@@ -1,0 +1,146 @@
+﻿[y   0]                 1                              2                              3                              4                              5                               6
+[y  12]                                                                             24V、10V采样           5V、3.3V采样       双相电流检测采样
+[y  18]                              3.3V                                                                                                                                           双相电流测试点接口
+[y  24]                                                                3.3V                                                               电机接口、测试点
+[y  30]                                            3.3V                                                               U6       5V                           编码器接口
+[y  36]          3.3V                                                           U4      5V         U5      5V     U1_ADC1_IN0
+[y  42]                                C26                              C11 U1_ADC1_IN4        U1_ADC1_IN2            11OUT VCC U1_ADC1_IN1                                 5V
+[y  48]        C9  U1                            C10 U2                 100nF   11OUTVCCU1_ADC1_IN51      8 U1_ADC1_IN2      7                                           CN2       电流检测
+[y  54]        100nF                   100nF    100nF                           2      7           21OUTVC7         ADC2IN-2O6T                               R4       5VXH-5PA               ADC5
+[y  60]            1           48                    1           48          ADC31IN-2O6T       ADC31IN-2O6T          41IN+ 25N-DC3            MA0_OUT        R37       1
+[y  66]            VBAT      VDD_3                   2BAT      VD473            41IN+2I5-DC0        1IN+ 2INADC5       GND  2IN+         P1      MB0_OUT      R38        1                   D16
+[y  72]            PC13-TAMPER-RTC                   PC13-TAMPER-RTC             GND 2IN+          4GND 2IN+                  5V            MA0_OUT           3kΩIM4_CH322
+[y  78]            PC14-OSC32_IN9 U2-PA11     GND    PC14-OSC32_IN9                     5C17               5VC18      LM358DR2GC38        33       MC0_OUT      TIM4_CH233   C3              SMF3.3
+[y  84]     GND    4           45TIM4_CH3            PC15-OSC32_OUTTIM4GND3     LM358DR2G                                                 22MB0_OUT      3.3V 3kΩIM4_CH14    100nF           GND
+[y  90]       U1-OS5C15-OSC32_OUTU1-BOOT0       U2-OS5-OUT       44U2-BOOT0   GND                  LM358DR2G        GND                   11MC0_OUT           3kΩ       54
+[y  96]       U1-OS6D0-OSC_INBO430IM4_CH2       U2-OS6-INOSC_INBO430IM4_CH2                     GND                            100nF                                     5         电流检测1
+[y 102]   GND U1-REPD1-OSC_OUTPB7TIM4_CH1  GND  U2-RE7T1-OSC_OUTP42TIM4_CH1              100nF               100nF                       WJ127-5.0-03P-14-00A                                ADC4
+[y 108]            NRST       PB6    3.3V            NRST       PB6TIM33.3V                 GND                GND                GND                                      GND
+[y 114]            VSSA       PB5TIM3_CH2            VSSA       PB5                                                                       24*20/（140+20）               GND
+[y 120]            9           40TIM3_CH1  C16       VDDA       PB4TIM3_CH1         24V、10V采样                          双相电流检测采样           （0~3V）                                             D17
+[y 126]       U1_A10DDAN0     P39          100nFU2_A101_IN0      39     C12                             5V、3.3V采样                                                                            SMF3.3
+[y 132]   C29 U1_A11A0-WKUP   P38      C27      U2_A111_IN1UP   P38     100nF                                                               R3IR31MA0_OUT                                    GND
+[y 138]   100nU1_ADPA1IN2    PA15U1-SCLK00nF    U2_A121_IN2    PA372-SCLK              5V                             U7      5V      GND
+[y 144]  A        1PA2       PA14               U2_ADC1_IN3    PA14             U8                 U9     5V      U2_ADC1_IN0               20kΩ40kΩ                                              A
+[y 150]       U1_A1PA3IN3    VDD_2                  1PA3       VDD_2        U2_ADC1_IN5        U2_A1C1_IN78           11OUT VCC
+[y 156]       U1_A141_IN4      35            3.3U2_A1PA4IN4    VSS_2            2OUT V7CU2_ADC1_IN61OUT VCCU2_ADC1_IN82      7 U2_ADC1_IN1NDR20R23MB0_OUT       D11D13D14
+[y 162]    3.3U1_A15A4IN5    VS3421-SWD         U2_A151_IN5      342-SWD     ADC1IN- 2OUT          1IN- 2OUT       ADC31IN-2O6T                               SMF3SMFSMF3.3A
+[y 168]       U1_A16A5IN6    PA33USB-DP         U2_A161_IN6    PA33             1IN+ 2IN-       ADC1IN+ 2IN-          41IN+ 25N-DC2         20k140kΩ
+[y 174]       U1_ADPA6IN7    PA12USB-GND        U2_A171_IN7    PA32U2-PA11      GND  2INADC1       4      5ADC4        GND  2IN+
+[y 180]           1PA7       PA11               U2_ADC1_IN8    PA112-RX1ND              5V         GND  2IN+                  5V            R2IR25
+[y 186]       U1_A1PB0IN8    PA10U1-RX1             1PB0       PA10                      C40              5VC41                 C39               MC0_OUT      GNDGNDGND
+[y 192]           19           30U1-TX1             1PB1        PA92-TX1        LM358DR2G          LM358DR2G        GNDLM358DR2G            20kΩ40kΩ
+[y 198]       U1-B20B1        P29TIM1_CH1       U2-B20T1         29IM1_CH1   GND                 GND
+[y 204]       U1-T21B2        P28U1-MOSI        U2-T21B2        P28                      100nF                                  100nF
+[y 210]       U1-RXPB10      PB15U1-MISO        U2-R22B10      PB27                         GND             100nF                 GND
+[y 216]    GND    2PB11      PB14            GND     PB11      PB14                                            GND
+[y 222]           2VSS_1     PB13U1-CLK             2VSS_1     PB13
+[y 228]           24           25U1-NSS             2VDD_1     PB12     TIM1_CH1
+[y 234]            VDD_1     PB12            C14                                    24V电源输入分压         10V驱动供电分压            对功率地电压采样                                     被测点输入
+[y 240]     C28                                      STM32F103C8T6             IN24V
+[y 246]     100nF  STM32F103C8T6            100nF                                                 IN10V    采样电压不能低于7V    3.3V                 3.3V
+[y 252]                                                                                                    24V：3.04032
+[y 258]                                                                                                                   LMV321AIDBVRG        LMV321AIDBVRG       IN24V
+[y 264]                                       3.3V                                                         10V：1.2668    5                    5                         IN24V
+[y 270]      3.3V                                                                R13                R9     7V：0.88676
+[y 276]                                                                          32.4kΩ             32.4kΩ             3      R26  U1_ADC1_IN8      R29 U2_ADC1_IN4
+[y 282]                                                                                                                  U114                 U144                 IN10VIN10V
+[y 288]                                                                                  ADC0                        IN1                  IN1
+[y 294]                                                                                                     ADC1              100Ω                  100Ω
+[y 300]                                                                                                                        C22  D5              C32  D10       IN5V
+[y 306]                       晶振1                           晶振2                  R14 C5                                  2                    2                         IN5V
+[y 312]                                                                          4.7kΩ00nFD3        R10  C7 D8         C23     1nF SMF3.3A  C33     1nF SMF3.3A
+[y 318]                                                                                   SMF3.3A   4.7kΩ100nFF3.3A   10nF                  10nF
+[y 324]                                                                                                                                                            IN3.3V
+[y 330]            GND                                                                                                          3.3V2                 3.C43             IN3.3V
+[y 336]                                         GND                                                                  GND
+[y 342]                X2   U1-OSC-OUT             X3                                                                    GND                  GND
+[y 348]                                                 CU2-OSC-OUT             GND                                                        GND          100nF
+[y 354]               2   1 C21                   2   1                                            GND                            100nF                   GND
+[y 360]             C20                          C1     20pF                                                                         GND
+[y 366]               3   4 20pF                 23pF 4
+[y 372]          U1-20pFIN                   U2-OSC-INz
+[y 378]                8MHz                                                   IN5V                 IN3.3V                                                       主控驱动信号测试点
+[y 384]                                                                                5V分压               3.3V分压
+[y 390]                                                                                                                  3.3V                 3.3V
+[y 396]                    GND                         GND
+[y 402]                                                                        R1                                         LMV321AIDBVRG        LMV321AIDBVRG
+[y 408]                                                                        20kΩ                                      5                    5
+[y 414]                                                                                              R6                                                            MA_INM3_CH2
+[y 420]                                                                                              3kΩ               3      R27  U1_ADC1_IN7      R32 U2_ADC1_IN3
+[y 426]                                                                                 ADC2                 ADC3        U124                 U154
+[y 432]                                                                                                              IN1                  IN1
+[y 438]                                                                            C4   D2                                    100Ω                  100Ω            MBTIM3_CH1
+[y 444]  B                                                                     R2                        C6   D7               C24  D6              C34  D12                                      B
+[y 450]                                                                        30kΩ100nFSMF3.3A      R8  100nF           2                    2
+[y 456]                               下载、boot选择电路                                                    30kΩ     SMF3.3A  C25     1nF SMF3.3A  C35     1nF SMF3.3A
+[y 462]    USB电源输入                                                                                                    10nF                  10nF                   MC_TIM1_CH1
+[y 474]                                                                                                                          3.3V                3.C45
+[y 480]                 GNDSMF5.0CA
+[y 486]                                                                       GND                   GND                  GND                  GND
+[y 492]                                               3.3V                                                           GND          100nF    GND         100nF
+[y 498]       3.3V                              3.3V                                                                                 GND                 GND
+[y 510]                     5V
+[y 522]                      2 F1
+[y 528]         R90            SMD0805-050-6R15          R16R5
+[y 534]         1.5kΩ                             H1H2                                                                   3.3V                 3.3V
+[y 540]                                     10kΩ 1    2  10k10kΩ
+[y 546]            D4        1       U1-10kΩ1 U1-BOOT0        U2-BOOT1                                                    LMV321AIDBVRG        LMV321AIDBVRG
+[y 552]     USB-DP        USB-DP                 22  11                                                                  5                    5
+[y 558]           1I/O1I/O1    VBUS                   U2-BOOT0
+[y 564]        GND2GNDVBUS5V   D-              PZ254V-11-02P                                                           3      R28  U1_ADC1_IN6      R33 U2_ADC1_IN2
+[y 570]     USB-DN3     4  USB-3N                   PZ254V-11-02P                                                        U134                 U164
+[y 576]            I/O2I/O2    4+         GND                                                                        INC                  IN1
+[y 582]            USBLC6-2P6D 5ND                         GND                                                                100Ω                  100Ω
+[y 588]                        GND              H4          串口2                                                                C30  D9              C36  D15
+[y 594]                        GND          U2-1X3                                                                       2                    2
+[y 600]                         USB1     H3  U2-1X3      U21T2U2-RX1                                                   C31     1nF SMF3.3A  C37     1nF SMF3.3A
+[y 606]              C1nF             U1-1X3   22       U2-314U2-SCLK                                                 10nF                  10nF
+[y 612]        P-GND         P-USB-B10-BRWX3                34                                                                                       3.C47
+[y 618]                  GND             2   PZ254V-11-02P                                                                      3.C46
+[y 624]                                                    PZ254V-12-4P
+[y 630]                               PZ254V-11-02P                                                                      GND                  GND
+[y 636]              10MΩ            UART1-H5    U1-1X2U1-SWD                                                        GND          100nF    GND         100nF
+[y 642]                                 UART1-RX U1-324U1-SCLK                                                                      GND                   GND
+[y 648]              R91                  11         4
+[y 654]                                 UA221-TX
+[y 660]                              UART1-TX      PZ254V-12-4P
+[y 666]                                 PZ254V-11-02P
+[y 684]   LDO稳压
+[y 690]                            复位电路
+[y 708]            U3
+[y 714]       GND
+[y 720]           1
+[y 726]           2GND  4              SW1 GND     SW2GND
+[y 732]        3.3VVOUVOUT3.3V        SKRPACE010 SKRPACE010
+[y 738]  C        3VIN                                                                                                                                                                            C
+[y 744]       5V   AMS1117-3.3V
+[y 750]        5V                      1  2       1  2 C19
+[y 762]                                3  4 C15   3  4
+[y 768]         C54          C53       U1-REST    U2-RE1uF
+[y 774]         1uF          1uF            1uF
+[y 786]                             3.310kΩ    3.310kΩ
+[y 792]                                R21        R22
+[y 816]      GND           GND
+[y 858]     外部FLASH
+[y 876]                        3.3100nF
+[y 888]                           C8
+[y 900]         U10               R17
+[y 912]     U1-1CS#          VCC  10GND
+[y 918]     U1-2ISO            7
+[y 924]        3SO(IO1)  HOLD#/6EU1-CLKO3)
+[y 930]        4WP#(IO2)     SC5KU1-MOSI
+[y 936]         VSS          SI(IO0)
+[y 948]         GD25Q128ESIGR
+[y 972]     GND
+[y1038]  D                                                                                                                                                                                        D
+[y1056]                                                                                                                                                                     创建日期    2026-08-18
+[y1062]                                                                                                                                    原理图             Schematic1
+[y1074]                                                                                                                                                                     更新日期    2026-09-08
+[y1086]                                                                                                                                    板子                Board1         图页      P1
+[y1098]                                                                                                                                    绘制
+[y1116]                                                                                                                                    审阅                         FOC无刷电机驱动-测试治具
+[y1146]                                                                                                                                                      版本  尺寸           页   1  共  1
+[y1164]                                                                                                                                                      V1.0A4              嘉立创EDA
+[y1182]                 1                              2                              3                              4                              5                               6
+

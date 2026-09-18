@@ -1,0 +1,32 @@
+# ---- 构建产物 / 临时文件 ----
+_render/
+*.o
+*.axf
+*.hex
+*.bin
+*.crf
+*.d
+*.dep
+*.lst
+*.map
+*.htm
+*.iex
+*.lnp
+*.sct
+*.bak
+*.build_log.*
+
+# 宿主测试可执行文件
+test/*.exe
+
+# ---- Keil 用户界面状态 (每台机器不同, 不入库) ----
+*.uvguix.*
+*.scvd
+U1/MDK-ARM/U1/
+U2/MDK-ARM/U2/
+
+# ---- DSH 会话状态 ----
+.dsh/
+
+# ---- Excel 临时文件 ----
+~$*
