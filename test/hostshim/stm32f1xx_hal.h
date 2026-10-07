@@ -14,9 +14,22 @@
 
 typedef enum { HAL_OK = 0, HAL_ERROR, HAL_BUSY, HAL_TIMEOUT } HAL_StatusTypeDef;
 
+/* ---- GPIO 类型与常量 ----
+ * 与 test/swdsim/sim_hal.h 共用同一套定义（app_test 同时要用 SWD 线级模型）。
+ * 谁先被包含谁定义，另一个跳过，避免枚举/结构体重复定义。 */
+#ifndef SIM_GPIO_TYPES_DEFINED
+#define SIM_GPIO_TYPES_DEFINED
+
 /* ---- 只需要类型名存在 (isp_config.h / spi.h 里声明了 extern 句柄) ---- */
-typedef struct { int _unused; } UART_HandleTypeDef;
+typedef struct { uint32_t _id; } USART_TypeDef;
 typedef struct { int _unused; } SPI_HandleTypeDef;
+
+#define USART1 ((USART_TypeDef *)0x40013800u)
+#define USART2 ((USART_TypeDef *)0x40004400u)
+#define USART3 ((USART_TypeDef *)0x40004800u)
+
+/* uart_port 驱动需要 Instance 来区分端口，所以这里给出真实字段 */
+typedef struct { USART_TypeDef *Instance; } UART_HandleTypeDef;
 typedef struct { int _unused; } GPIO_TypeDef;
 
 #define GPIOA ((GPIO_TypeDef *)0x40010800u)
@@ -42,8 +55,10 @@ typedef enum { GPIO_PIN_RESET = 0, GPIO_PIN_SET } GPIO_PinState;
 #define GPIO_PIN_14  ((uint16_t)0x4000)
 #define GPIO_PIN_15  ((uint16_t)0x8000)
 
+#define GPIO_MODE_INPUT        0x00u
 #define GPIO_MODE_OUTPUT_PP   0x01u
 #define GPIO_NOPULL           0x00u
+#define GPIO_PULLUP           0x01u
 #define GPIO_SPEED_FREQ_LOW   0x01u
 #define GPIO_SPEED_FREQ_MEDIUM 0x02u
 #define GPIO_SPEED_FREQ_HIGH  0x03u
@@ -55,12 +70,39 @@ typedef struct {
     uint32_t Speed;
 } GPIO_InitTypeDef;
 
+#endif /* SIM_GPIO_TYPES_DEFINED */
+
+/* ---- ADC 通道号 (measure.h 用它做通道映射, 宿主侧只需值存在) ---- */
+#define ADC_CHANNEL_0   0u
+#define ADC_CHANNEL_1   1u
+#define ADC_CHANNEL_2   2u
+#define ADC_CHANNEL_3   3u
+#define ADC_CHANNEL_4   4u
+#define ADC_CHANNEL_5   5u
+#define ADC_CHANNEL_6   6u
+#define ADC_CHANNEL_7   7u
+#define ADC_CHANNEL_8   8u
+#define ADC_CHANNEL_9   9u
+#define ADC_CHANNEL_VREFINT 17u
+
 /* ---- HAL API 替身 (由各测试文件实现) ---- */
 uint32_t HAL_GetTick(void);
 void     HAL_Delay(uint32_t ms);
 
 void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *init);
 void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state);
+GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin);
+
+/* ---- UART 替身 (uart_port 驱动 / uart_cfg 需要) ---- */
+HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size);
+HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size);
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart);
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart);
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart);
+
+/* 真实 HAL 里这是"读 SR 再读 DR"来清溢出标志; 宿主侧没有寄存器, 空动作即可
+ * (uart_cfg.c 的错误回调会调它, 所以要能编译过) */
+#define __HAL_UART_CLEAR_OREFLAG(__HANDLE__)  ((void)(__HANDLE__))
 
 HAL_StatusTypeDef HAL_SPI_TransmitReceive(SPI_HandleTypeDef *hspi,
                                           uint8_t *pTxData, uint8_t *pRxData,

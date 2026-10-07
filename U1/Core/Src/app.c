@@ -1,4 +1,4 @@
-﻿/**
+/**
   ******************************************************************************
   * @file    app.c
   * @brief   治具主控 U1 应用层 — 命令分发 / ACK / 主循环
@@ -19,11 +19,13 @@
 #include "flash_map.h"
 #include "fw_upload.h"
 #include "gd25q128.h"
-#include "isp_programmer.h"
-#include "isp_config.h"
+#include "swd_programmer.h"
 #include "bsp_uart.h"
+#include "uart_cfg.h"
+#include "uart_link.h"
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
+#include <string.h>
 
 /*==============================================================================
  * 全局状态
@@ -33,6 +35,23 @@ uint16_t    pc_seq    = 0u;
 
 static uint16_t prog_seq = 0u;      /* 0x0112 受理时的帧序号, 烧完 ACK 回显用 */
 static uint8_t  tx_buf[APP_FRAME_BUF_SIZE];
+
+/*===== 到 U2 的内部链路 (USART3, 见 docs/10_UART四路驱动设计.md) =====*/
+#define APP_U2_PROBE_PERIOD_MS  500u    /* 空闲时每 500ms 探一次 U2 */
+#define APP_U2_PROBE_TIMEOUT_MS 50u     /* 50ms 没回算丢 (115200 下往返 < 2ms) */
+#define APP_U2_STATUS_EVERY     5u      /* 每 5 次探测里用一次 STATUS (≈2.5s) */
+
+static link_t        s_u2_link;
+static uint32_t      s_probe_tick;
+static uint8_t       s_probe_cnt;
+static uint8_t       s_probe_is_status;     /* 当前在等的是 STATUS 的应答 */
+static uint16_t      s_probe_ok;
+static uint16_t      s_probe_fail;
+static uint8_t       s_u2_alive;
+static uint8_t       s_u2_ver_ok;           /* 最近一次 STATUS: 链路代码版本一致 */
+static uint8_t       s_u2_ver_checked;      /* 是否收到过 STATUS */
+static link_status_t s_u2_status;
+static uint8_t       s_link_rx[LINK_MAX_PAYLOAD];
 
 /*==============================================================================
  * 帧发送
@@ -188,7 +207,7 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
     /*── 0x000D 查询固件版本号 (FOC 板中) ──*/
     case MGR_CMD_QUERY_FOC_VER: {
         uint8_t resp[4];
-        resp[0] = ISP_QueryTargetVersion(&resp[1]);
+        resp[0] = SWDP_QueryTargetVersion(&resp[1]);
         APP_SendAck(cmd, resp, 4);
         break;
     }
@@ -204,7 +223,7 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
         }
         prog_seq  = pc_seq;
         app_state = APP_STATE_PROGRAMMING;
-        ISP_Start();
+        SWDP_Start();
         break;
     }
 
@@ -239,6 +258,94 @@ static void APP_HandlePendingFrame(void)
 }
 
 /*==============================================================================
+ * 到 U2 的内部链路
+ *----------------------------------------------------------------------------
+ * 作用:
+ *   1) 持续证明"两片之间的串口是通的"——每 500ms 探一次并检查应答;
+ *   2) 每 5 次探测插一次 STATUS: 拿到 U2 版本/统计, 并核对两片的 链路代码版本
+ *      （两片各有一份副本, 只重烧一片会导致字段对不上 → 这里看得见）;
+ *   3) 给 ③ 的测量交叉校验留通道 (U1 测一遍、U2 测一遍, 结果必须一致)。
+ *
+ * 为什么用 Start/Poll 两段而不是 Link_Request:
+ *   主循环里不能有 >50ms 的阻塞——USB 侧(协议帧)和 SWD 烧录都靠这个循环推进。
+ *   Start 只负责把请求塞进发送队列, Poll 每轮推进一次, 全程零阻塞。
+ *============================================================================*/
+static void APP_LinkTask(void)
+{
+    uint8_t  st;
+    uint16_t rxlen = 0u;
+
+    /* 烧录期间完全不碰链路: 这时 USB 侧必须及时响应, 而且 U2 的数据也没人用 */
+    if (app_state != APP_STATE_IDLE) {
+        return;
+    }
+
+    if (Link_Busy(&s_u2_link) != 0u) {
+        st = Link_RequestPoll(&s_u2_link, APP_U2_PROBE_TIMEOUT_MS, s_link_rx, &rxlen);
+        if (st == 1u) {
+            s_probe_ok++;
+            s_u2_alive = 1u;
+            /* 只有在"发的是 STATUS 且回来的也是 STATUS"时才解析:
+             * 0 长度的 PING 应答没有数据区, 拿去解包只会解出误判。 */
+            if ((s_probe_is_status != 0u) &&
+                (Link_LastRespCmd(&s_u2_link) == LINK_CMD_STATUS)) {
+                link_status_t tmp;
+                if (Link_UnpackStatus(s_link_rx, rxlen, &tmp) != 0u) {
+                    s_u2_status      = tmp;
+                    s_u2_ver_ok      = Link_CheckVersion(&tmp);
+                    s_u2_ver_checked = 1u;
+                }
+            }
+        } else if (st == 2u) {
+            s_probe_fail++;
+            s_u2_alive = 0u;
+        }
+        return;
+    }
+
+    Link_Poll(&s_u2_link);              /* 空闲时也收: U2 主动上报/U2 侧的应答 */
+
+    if ((uint32_t)(HAL_GetTick() - s_probe_tick) >= APP_U2_PROBE_PERIOD_MS) {
+        s_probe_tick = HAL_GetTick();
+        s_probe_cnt++;
+        s_probe_is_status = ((s_probe_cnt % APP_U2_STATUS_EVERY) == 0u) ? 1u : 0u;
+        /* PING 不带数据: 只要收到应答帧(哪怕 0 长度)就算这一路通的 */
+        (void)Link_RequestStart(&s_u2_link,
+                                (s_probe_is_status != 0u) ? LINK_CMD_STATUS : LINK_CMD_PING,
+                                0, 0u);
+    }
+}
+
+uint8_t APP_U2Alive(void)
+{
+    return s_u2_alive;
+}
+
+void APP_U2ProbeStats(uint16_t *ok, uint16_t *fail)
+{
+    if (ok   != 0) *ok   = s_probe_ok;
+    if (fail != 0) *fail = s_probe_fail;
+}
+
+uint8_t APP_U2VerOk(void)
+{
+    /* 还没收到过 STATUS 时不算"不一致": 上电头 2.5s 不该报错 */
+    if (s_u2_ver_checked == 0u) {
+        return 1u;
+    }
+    return s_u2_ver_ok;
+}
+
+uint8_t APP_U2Status(link_status_t *out)
+{
+    if ((out == 0) || (s_u2_ver_checked == 0u)) {
+        return 0u;
+    }
+    *out = s_u2_status;
+    return 1u;
+}
+
+/*==============================================================================
  * 对外 API
  *============================================================================*/
 void APP_Init(void)
@@ -250,8 +357,20 @@ void APP_Init(void)
     APP_Frame_Init();
     FwUpload_Init();
 
-    ISP_GpioInit();
-    BSP_ISP_UART_Init();
+    SWDP_Init();
+
+    /* 串口: 先绑端口开接收, 再建链路对象。反过来会漏掉早到的请求 */
+    UartCfg_Init();
+    Link_Init(&s_u2_link, UART_CFG_PORT_LINK, 1u /* 主机 */);
+    s_probe_tick      = HAL_GetTick();
+    s_probe_cnt       = 0u;
+    s_probe_is_status = 0u;
+    s_probe_ok        = 0u;
+    s_probe_fail      = 0u;
+    s_u2_alive        = 0u;
+    s_u2_ver_ok       = 0u;
+    s_u2_ver_checked  = 0u;
+    memset(&s_u2_status, 0, sizeof(s_u2_status));
 
     app_state = APP_STATE_IDLE;
 }
@@ -267,20 +386,23 @@ void APP_Run(void)
     /* 2) 上传超时检查 (10s 无新数据) */
     FwUpload_TimeoutCheck();
 
-    /* 3) ISP 烧录推进 + 终态回 ACK (不变量 I4: 只回一次) */
+    /* 3) SWD 烧录推进 + 终态回 ACK (不变量 I4: 只回一次) */
     if (app_state == APP_STATE_PROGRAMMING) {
-        ISP_Step();
-        if (!ISP_Busy()) {
-            uint8_t st = ISP_Result();
+        SWDP_Step();
+        if (!SWDP_Busy()) {
+            uint8_t st = SWDP_Result();
             app_state = APP_STATE_IDLE;
             APP_SendFrame(MGR_CMD_PROGRAM, prog_seq, &st, 1u);
-            /* ISP_Step 内可能阻塞十余秒 (等全片擦除 ACK), 期间 PC 若仍在发帧,
+            /* SWDP_Step 内单个 128KB 扇区擦除要 ~1.3s, 期间 PC 若仍在发帧,
              * 512B 接收环形缓冲可能被填满而丢弃字节, 留下半截帧。
              * 协议规定 PC 必须等 0x0112 的 ACK 才继续, 因此这里直接清空
              * 接收侧, 保证下一条命令从干净的解析状态开始 (见并发分析: 序号 10)。*/
             APP_Frame_Init();
         }
     }
+
+    /* 4) 到 U2 的内部链路 (非阻塞: 每轮最多推进一步) */
+    APP_LinkTask();
 }
 
 /* USB CDC 收到一批字节 (中断上下文) — 只喂状态机, 不做重活 */

@@ -1,6 +1,6 @@
-﻿/*
+/*
  * 协议层宿主侧单元测试 (gcc, 非目标机)
- * 直接编译 U1 固件里的 protocol_frame.c / app_frame.c 真源码, 验证:
+ * 直接编译固件(两片共用)的 protocol_frame.c / app_frame.c 真源码, 验证:
  *   1) CRC16-MODBUS 与标准校验向量一致 ("123456789" -> 0x4B37)
  *   2) 逐位实现 vs 独立表驱动实现 结果一致
  *   3) Frame_Build -> Frame_Parse 全命令往返 + 打印协议实际字节

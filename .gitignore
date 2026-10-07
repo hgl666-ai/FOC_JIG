@@ -19,6 +19,9 @@ _render/
 # 宿主测试可执行文件
 test/*.exe
 
+# SWD 仿真原型构建产物
+proto/swd_sim/build/
+
 # ---- Keil 用户界面状态 (每台机器不同, 不入库) ----
 *.uvguix.*
 *.scvd

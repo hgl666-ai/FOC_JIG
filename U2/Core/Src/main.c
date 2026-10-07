@@ -25,7 +25,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "uart_cfg.h"
+#include "u2_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -97,7 +98,10 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  /* 串口: 先把 HAL 句柄绑到端口号并打开接收中断, 再起应用层(注册链路处理函数)。
+   * 顺序不能反: 反了的话 U1 早到的请求会被丢进空端口。 */
+  UartCfg_Init();
+  U2App_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -107,6 +111,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    U2App_Run();          /* 链路轮询: 收请求 → 应答 (非阻塞) */
   }
   /* USER CODE END 3 */
 }

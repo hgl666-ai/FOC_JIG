@@ -23,9 +23,9 @@ set "GCC=gcc"
 :have_gcc
 
 echo ============================================================
-echo  1/5  Protocol layer host unit test
+echo  1/8  Protocol layer host unit test
 echo ============================================================
-"%GCC%" -std=c99 -Wall -Wextra -O1 -I"%ROOT%\U1\Core\Inc" -o "%ROOT%\test\protocol_test.exe" "%ROOT%\test\protocol_test.c" "%SRC%\protocol_frame.c" "%SRC%\app_frame.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 -I"%ROOT%\U1\Core\Inc" -o "%ROOT%\test\protocol_test.exe" "%ROOT%\test\protocol_test.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%SRC%\app_frame.c"
 if errorlevel 1 goto :proto_build_fail
 "%ROOT%\test\protocol_test.exe"
 if errorlevel 1 goto :proto_fail
@@ -42,7 +42,7 @@ set FAILED=1
 :isp
 echo.
 echo ============================================================
-echo  2/5  ISP flow byte-level test (simulated STM32 bootloader)
+echo  2/8  ISP flow byte-level test (simulated STM32 bootloader)
 echo       2a: verify off   2b: verify on   2c: pins confirmed
 echo ============================================================
 "%GCC%" -std=c99 -Wall -Wextra -O1 "-DISP_VERIFY_ENABLED=0" %INC% -o "%ROOT%\test\isp_test_v0.exe" "%ROOT%\test\isp_test.c" "%SRC%\isp_programmer.c"
@@ -74,77 +74,180 @@ set FAILED=1
 :app
 echo.
 echo ============================================================
-echo  3/5  Full-chain test (PC frame to target flash, all simulated)
+echo  3/8  Full-chain test (PC frame to target flash, all simulated)
 echo ============================================================
-"%GCC%" -std=c99 -Wall -Wextra -O1 %INC% -o "%ROOT%\test\app_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\protocol_frame.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\isp_programmer.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%ROOT%\test\swdsim\sim_target.c"
 if errorlevel 1 goto :app_build_fail
 "%ROOT%\test\app_test.exe"
 if errorlevel 1 goto :app_fail
 echo [PASS] app_test
-goto :py
+goto :meas
 :app_build_fail
 echo [FAIL] app_test compile error
 set FAILED=1
-goto :py
+goto :meas
 :app_fail
 echo [FAIL] app_test
+set FAILED=1
+
+:meas
+echo.
+echo ============================================================
+echo  4/8  Measurement module test (divider to voltage, thresholds)
+echo ============================================================
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DMEAS_HOST_TEST" %INC% -o "%ROOT%\test\measure_test.exe" "%ROOT%\test\measure_test.c" "%SRC%\measure.c"
+if errorlevel 1 goto :meas_build_fail
+"%ROOT%\test\measure_test.exe"
+if errorlevel 1 goto :meas_fail
+echo [PASS] measure_test
+goto :uart
+:meas_build_fail
+echo [FAIL] measure_test compile error
+set FAILED=1
+goto :uart
+:meas_fail
+echo [FAIL] measure_test
+set FAILED=1
+
+:uart
+echo.
+echo ============================================================
+echo  5/8  UART port driver + U1 to U2 internal link
+echo ============================================================
+"%GCC%" -std=c99 -Wall -Wextra -O1 %INC% -o "%ROOT%\test\uart_test.exe" "%ROOT%\test\uart_test.c" "%ROOT%\U1\Core\Src\uart_cfg.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%ROOT%\U1\Core\Src\protocol_frame.c"
+if errorlevel 1 goto :uart_build_fail
+"%ROOT%\test\uart_test.exe"
+if errorlevel 1 goto :uart_fail
+echo [PASS] uart_test
+goto :py
+:uart_build_fail
+echo [FAIL] uart_test compile error
+set FAILED=1
+goto :py
+:uart_fail
+echo [FAIL] uart_test
 set FAILED=1
 
 :py
 echo.
 echo ============================================================
-echo  4/5  Cross-language byte check (Python vs C firmware)
+echo  6/8  Cross-language byte check (Python vs C firmware)
 echo ============================================================
 if not exist "%PY%" goto :no_py
 "%PY%" "%ROOT%\tools\foc_jig_tool.py" selftest
 if errorlevel 1 goto :py_fail
 echo [PASS] foc_jig_tool selftest
-goto :build
+goto :dup
 :py_fail
 echo [FAIL] foc_jig_tool selftest
 set FAILED=1
-goto :build
+goto :dup
 :no_py
 echo [SKIP] python not found at %PY%
+
+:dup
+echo.
+echo ============================================================
+echo  7/8  Duplicated copies in sync (U1 vs U2)
+echo ============================================================
+rem  uart_port / uart_link / protocol_frame exist once per board (in each project folder);
+rem  the two copies must stay byte-identical, or the link behaviour drifts silently.
+rem  If the copies ever must differ on purpose, delete this stage (or make it a WARN).
+set DUPFAIL=0
+call :dupcmp uart_port.c
+call :dupcmp uart_port.h
+call :dupcmp uart_link.c
+call :dupcmp uart_link.h
+call :dupcmp protocol_frame.c
+call :dupcmp protocol_frame.h
+if "%DUPFAIL%"=="1" goto :dup_fail
+echo [PASS] 6 duplicated files are identical
+goto :build
+:dup_fail
+echo [FAIL] U1 and U2 copies differ -- sync them before flashing
+set FAILED=1
+goto :build
+
+rem  ---- compare one duplicated file pair (arg: file name) ----
+:dupcmp
+if not exist "%ROOT%\U1\Core\Src\%1" goto :dupcmp_inc
+fc /b "%ROOT%\U1\Core\Src\%1" "%ROOT%\U2\Core\Src\%1" >nul
+if errorlevel 1 goto :dupcmp_bad
+echo     %1 : ok
+exit /b 0
+:dupcmp_inc
+fc /b "%ROOT%\U1\Core\Inc\%1" "%ROOT%\U2\Core\Inc\%1" >nul
+if errorlevel 1 goto :dupcmp_bad
+echo     %1 : ok
+exit /b 0
+:dupcmp_bad
+echo     %1 : DIFFERENT
+set DUPFAIL=1
+exit /b 0
 
 :build
 echo.
 echo ============================================================
-echo  5/5  Keil MDK build
+echo  8/8  Keil MDK build (U1 + U2)
 echo ============================================================
+rem  Set SKIP_KEIL=1 to run host tests only (seconds, no UV4 needed)
+if /i "%SKIP_KEIL%"=="1" goto :skip_build
 if not exist "%UV4%" goto :no_uv4
-"%UV4%" -b "%ROOT%\U1\MDK-ARM\U1.uvprojx" -j0 -o "%ROOT%\_render\build_regress.log"
-echo     UV4 is a GUI-subsystem app; waiting for it to finish...
-:waitloop
+call :keil U1 %ROOT%\U1\MDK-ARM\U1.uvprojx %ROOT%\_render\build_regress.log
+call :keil U2 %ROOT%\U2\MDK-ARM\U2.uvprojx %ROOT%\_render\build_regress_u2.log
+goto :end
+
+rem  ---- build one project + judge the result (args: target name, project, log) ----
+:keil
+echo.
+echo     --- Keil build %1 ---
+rem  delete the old log first: its presence then means "this build finished"
+if exist "%3" del "%3"
+"%UV4%" -b "%2" -j0 -o "%3"
+echo     (UV4 is a GUI app; waiting for the build to finish...)
+set KEIL_WAIT=0
+:keil_wait
+set /a KEIL_WAIT=KEIL_WAIT+1
+if %KEIL_WAIT% GTR 150 goto :keil_timeout
+rem  the "Error(s)" summary line appears only when UV4 finished writing the log
+if not exist "%3" goto :keil_sleep
+findstr /C:"Error(s)" "%3" >nul
+if not errorlevel 1 goto :keil_ready
+:keil_sleep
 ping -n 3 127.0.0.1 >nul
-tasklist /fi "imagename eq UV4.exe" 2>nul | find /i "UV4.exe" >nul
-if not errorlevel 1 goto :waitloop
-echo     --- Keil build summary ---
-findstr /C:"Program Size" "%ROOT%\_render\build_regress.log"
-findstr /C:"Error(s)" "%ROOT%\_render\build_regress.log"
-findstr /C:"0 Warning(s)" "%ROOT%\_render\build_regress.log" >nul
-if errorlevel 1 goto :build_warn
-findstr /C:"0 Error(s)" "%ROOT%\_render\build_regress.log" >nul
-if errorlevel 1 goto :build_fail
-echo [PASS] Keil build: 0 Error, 0 Warning
-goto :end
-:build_fail
-echo [FAIL] Keil build has ERRORs -- see _render\build_regress.log
+goto :keil_wait
+:keil_timeout
+echo [WARN] %1: no build summary after 5 min -- UV4 may still be running
+:keil_ready
+findstr /C:"Program Size" "%3"
+findstr /C:"Error(s)" "%3"
+rem  errors take precedence: a build with errors AND warnings must still FAIL
+findstr /C:"0 Error(s)" "%3" >nul
+if errorlevel 1 goto :keil_fail
+findstr /C:"0 Warning(s)" "%3" >nul
+if errorlevel 1 goto :keil_warn
+echo [PASS] Keil build %1: 0 Error, 0 Warning
+exit /b 0
+:keil_warn
+echo [WARN] Keil build %1 has WARNINGs -- see the log
+exit /b 0
+:keil_fail
+echo [FAIL] Keil build %1 has ERRORs -- see the log
 set FAILED=1
-goto :end
-:build_warn
-echo [WARN] Keil build has WARNINGs -- see _render\build_regress.log
-goto :end
+exit /b 0
 :no_uv4
 echo [SKIP] UV4.exe not found
+goto :end
+:skip_build
+echo [SKIP] SKIP_KEIL=1
 
 :end
 echo.
 if "%FAILED%"=="1" goto :bad
-echo ===== host tests: ALL PASS =====
+echo ===== ALL PASS (host tests; Keil builds unless SKIP_KEIL=1) =====
 goto :done
 :bad
-echo ===== host tests: FAILURES PRESENT =====
+echo ===== FAILURES PRESENT =====
 endlocal & exit /b 1
 :done
 endlocal

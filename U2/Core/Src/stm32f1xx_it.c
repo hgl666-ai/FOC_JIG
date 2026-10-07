@@ -22,6 +22,7 @@
 #include "stm32f1xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "usart.h"          /* huart1 / huart3 (串口中断入口需要) */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -199,5 +200,23 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /* USER CODE BEGIN 1 */
+
+/**
+  * @brief  USART1 全局中断 — 端口0 (PA9/PA10, 对外排针)
+  * @note   收发都是"每字节一个中断": 中断里只把字节搬进 uart_port 的环形缓冲,
+  *         解析在主循环 (见 docs/10_UART四路驱动设计.md)。
+  */
+void USART1_IRQHandler(void)
+{
+  HAL_UART_IRQHandler(&huart1);
+}
+
+/**
+  * @brief  USART3 全局中断 — 端口1 (PB10/PB11, 到 U1 的内部链路)
+  */
+void USART3_IRQHandler(void)
+{
+  HAL_UART_IRQHandler(&huart3);
+}
 
 /* USER CODE END 1 */

@@ -448,7 +448,31 @@
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f1xx_hal_msp.c</FilePath>
             </File>
-          </Files>
+            <File>
+              <FileName>uart_cfg.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/uart_cfg.c</FilePath>
+            </File>
+            <File>
+              <FileName>u2_app.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/u2_app.c</FilePath>
+            </File>
+            <File>
+              <FileName>protocol_frame.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/protocol_frame.c</FilePath>
+            </File>
+            <File>
+              <FileName>uart_port.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/uart_port.c</FilePath>
+            </File>
+            <File>
+              <FileName>uart_link.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/uart_link.c</FilePath>
+            </File>          </Files>
         </Group>
         <Group>
           <GroupName>Drivers/STM32F1xx_HAL_Driver</GroupName>

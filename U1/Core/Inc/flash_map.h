@@ -2,7 +2,7 @@
   ******************************************************************************
   * @file    flash_map.h
   * @brief   FOC 烧录治具 — 命令码 / 状态码 / Flash 分区 / 目标板地址 定义
-  * @note    协议来源: INFO/M1 测试治具PC端通讯协议.xlsx
+  * @note    
   ******************************************************************************
   */
 #ifndef __FLASH_MAP_H
@@ -18,8 +18,6 @@
 #define MGR_CMD_FW_END          0x000Bu   /* 固件 结束帧       (PC→治具, LEN=0)  */
 #define MGR_CMD_QUERY_FLASH_VER 0x000Cu   /* 查询固件版本(Flash中) (LEN=0)       */
 #define MGR_CMD_QUERY_FOC_VER   0x000Du   /* 查询固件版本(FOC板中) (LEN=0)       */
-/* [修正] 原写成 0x0070 —— 那是把 xlsx 单元格里的十进制 `112` 误读成十六进制。
- *       正确值是 0x0112（与测径治具 PROGRAM 命令一致）。*/
 #define MGR_CMD_PROGRAM         0x0112u   /* 烧录Flash固件到FOC板  (LEN=0)       */
 
 /*==============================================================================
@@ -63,13 +61,24 @@
 #define FW_FLAG_ERASED          (0xFFu)           /* 擦除态 (=不完整)           */
 
 /*==============================================================================
- * 四、被烧 FOC 板目标 MCU 的绝对地址 (STM32F103C8, 64KB Flash)
+ * 四、被烧 FOC 板目标 MCU 的绝对地址 (STM32F405RGT6, 1MB Flash)
+ *----------------------------------------------------------------------------
+ * ⚠ 分区地址是**占位值**，等 FOC 工程的链接脚本确定后替换。
+ *
+ * 与旧 F1 方案最大的区别：F405 的扇区是
+ *     16K,16K,16K,16K,64K,128K,128K,128K KB（扇区 0..7）
+ * **分区边界必须落在扇区边界上**，否则擦一个分区会连带擦掉另一个
+ * （F1/F0 是 1KB 页，怎么切都行；F4 不行）。
  *============================================================================*/
-#define DUT_BOOT_ADDR           (0x08000000u)     /* Bootloader 起始            */
-#define DUT_BOOT_SIZE           (0x5000u)         /* Bootloader 分配区 20KB      */
-#define DUT_APP_ADDR            (0x08005000u)     /* App 起始 (固定, 不按 bin 推算) */
-#define DUT_APP_SIZE            (0xA000u)         /* App 分配区 40KB            */
-#define DUT_GO_ADDR             (0x08000000u)     /* 烧完跳转地址                */
+#define DUT_BOOT_ADDR           (0x08000000u)     /* 扇区 0 起 */
+#define DUT_BOOT_SIZE           (0x8000u)         /* 32KB = 扇区 0+1 (16K+16K) */
+#define DUT_APP_ADDR            (0x08008000u)     /* 扇区 2 起 */
+#define DUT_APP_SIZE            (0xF8000u)        /* 992KB = 扇区 2..7 到片尾 (0x08100000) */
+#define DUT_GO_ADDR             (0x08000000u)     /* 烧完复位运行地址 */
+
+/* 被烧板运行态固件版本号在 App 分区中的偏移（0x000D 用）——
+ * ⚠ 占位值，由 FOC 工程决定；SWD 可以直接读回来，不需要被烧板配合。 */
+#define DUT_VER_OFFSET          (0x20u)
 
 /*==============================================================================
  * 五、缓冲与时序
@@ -105,5 +114,14 @@ FOC_STATIC_ASSERT((DUT_BOOT_ADDR + DUT_BOOT_SIZE) == DUT_APP_ADDR, dut_partition
 FOC_STATIC_ASSERT((DUT_BOOT_SIZE % 4u) == 0u,                  dut_boot_size_word_aligned);
 FOC_STATIC_ASSERT((DUT_APP_ADDR % 4u) == 0u,                   dut_app_addr_word_aligned);
 FOC_STATIC_ASSERT(DUT_GO_ADDR == DUT_BOOT_ADDR,                go_addr_must_be_boot_base);
+
+/* F405 扇区边界约束（改分区地址时最容易踩的就是这条）：
+ *   扇区边界 = 0x00000,0x04000,0x08000,0x0C000,0x10000,0x20000,0x40000,0x60000
+ *   这里把当前占位方案钉死：Boot = 扇区 0+1，App = 扇区 2 起到片尾。 */
+FOC_STATIC_ASSERT(DUT_BOOT_ADDR == 0x08000000u,                dut_boot_must_start_at_sector0);
+FOC_STATIC_ASSERT(DUT_BOOT_SIZE == 0x8000u,                    dut_boot_must_be_sector0_and_1);
+FOC_STATIC_ASSERT(DUT_APP_ADDR == 0x08008000u,                 dut_app_must_start_at_sector2);
+FOC_STATIC_ASSERT((DUT_APP_ADDR + DUT_APP_SIZE) == 0x08100000u, dut_app_must_end_at_flash_end);
+FOC_STATIC_ASSERT((DUT_VER_OFFSET % 4u) == 0u,                 dut_ver_offset_word_aligned);
 
 #endif /* __FLASH_MAP_H */

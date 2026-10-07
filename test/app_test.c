@@ -1,4 +1,4 @@
-﻿/*
+/*
  * PC ↔ 治具 U1 全链路宿主仿真测试
  *
  * 直接把固件的 app.c / fw_upload.c / app_frame.c / protocol_frame.c /
@@ -19,8 +19,10 @@
 #include "flash_map.h"
 #include "fw_upload.h"
 #include "gd25q128.h"
-#include "isp_programmer.h"
-#include "isp_config.h"
+#include "swd_programmer.h"
+#include "swd_config.h"
+#include "swd_phy.h"
+#include "sim_target.h"
 #include "bsp_uart.h"
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
@@ -150,7 +152,33 @@ static uint8_t flash_xfer(uint8_t tx)
 /* ---- HAL 替身 ---- */
 SPI_HandleTypeDef hspi2;                    /* gd25q128.c 里 &hspi2 需要实体 */
 
-void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *init) { (void)port; (void)init; }
+/* 串口替身：app.c 现在会初始化 U1 的两路串口并建立到 U2 的内部链路，所以要有
+ * 两个句柄 (uart_cfg.c 里 extern 的就是它们) 和 HAL_UART_*_IT。
+ * 本测试关心的是 PC 协议链路，串口只要"能初始化、发了不崩"：
+ * 发送永不完成 → 链路保活 PING 必然超时(等于 U2 不在)，正是预期。 */
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart3;
+
+HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size)
+{
+    (void)huart; (void)pData; (void)Size;
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size)
+{
+    (void)huart; (void)pData; (void)Size;
+    return HAL_OK;              /* 故意不回调 TxCplt：模拟"线没接/对端不在" */
+}
+
+/* GPIO 替身一肩挑两件事：
+ *   1) 治具自己的 SPI Flash 片选 (PB12)
+ *   2) SWD 烧录引脚 → 送进线级目标模型 sim_target，由它按 ADIv5 解码波形 */
+void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *init)
+{
+    sim_gpio_dir(port, (uint16_t)init->Pin,
+                 (init->Mode == GPIO_MODE_INPUT) ? 0u : 1u);
+}
 
 void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
 {
@@ -158,6 +186,12 @@ void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state)
         if (state == GPIO_PIN_RESET) flash_cs_low();
         else                         flash_cs_high();
     }
+    sim_gpio_write(port, pin, (state == GPIO_PIN_SET) ? 1u : 0u);
+}
+
+GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin)
+{
+    return sim_gpio_read(port, pin) ? GPIO_PIN_SET : GPIO_PIN_RESET;
 }
 
 HAL_StatusTypeDef HAL_SPI_TransmitReceive(SPI_HandleTypeDef *hspi,
@@ -169,121 +203,6 @@ HAL_StatusTypeDef HAL_SPI_TransmitReceive(SPI_HandleTypeDef *hspi,
     return HAL_OK;
 }
 
-/*==============================================================================
- * 被烧板: STM32 系统 bootloader 仿真
- *============================================================================*/
-#define DUT_FLASH_SIZE  (64u * 1024u)
-static uint8_t g_dut[DUT_FLASH_SIZE];
-
-typedef enum { SS_CMD = 0, SS_CMDCK, SS_ADDR, SS_ERASE, SS_WN, SS_WDATA } SS_t;
-
-static struct {
-    uint8_t  bl_version;
-    uint8_t  support_0x43;
-    uint8_t  support_0x44;
-    uint8_t  silent;
-    SS_t     st;
-    uint8_t  cur_cmd, idx;
-    uint8_t  buf[8];
-    uint32_t addr;
-    uint16_t wlen, wgot;
-    uint8_t  wcksum;
-    uint8_t  wbuf[256];
-    uint8_t  erase_cmd_used;
-    uint8_t  jumped;
-    uint32_t write_ok, nack_count, ack_count;
-} sim;
-
-static uint8_t  rxq[512];
-static uint16_t rxq_h = 0, rxq_t = 0;
-static void q_push(uint8_t b) { if (((rxq_h + 1) & 511) != rxq_t) { rxq[rxq_h] = b; rxq_h = (rxq_h + 1) & 511; } }
-static int  q_pop(uint8_t *b) { if (rxq_t == rxq_h) return 0; *b = rxq[rxq_t]; rxq_t = (rxq_t + 1) & 511; return 1; }
-static void sim_ack(void)  { q_push(0x79); sim.ack_count++; }
-static void sim_nack(void) { q_push(0x1F); sim.nack_count++; }
-
-static void sim_reset(uint8_t ver, uint8_t s43, uint8_t s44, uint8_t silent)
-{
-    memset(&sim, 0, sizeof(sim));
-    memset(g_dut, 0xFF, sizeof(g_dut));
-    rxq_h = rxq_t = 0;
-    sim.bl_version = ver; sim.support_0x43 = s43; sim.support_0x44 = s44;
-    sim.silent = silent; sim.st = SS_CMD;
-}
-
-static void sim_feed(uint8_t b)
-{
-    if (sim.silent || sim.jumped) return;
-
-    switch (sim.st) {
-    case SS_CMD:
-        if (b == 0x7Fu) { sim_ack(); return; }
-        sim.cur_cmd = b; sim.st = SS_CMDCK; return;
-
-    case SS_CMDCK:
-        if (b != (uint8_t)(sim.cur_cmd ^ 0xFFu)) { sim_nack(); sim.st = SS_CMD; return; }
-        switch (sim.cur_cmd) {
-        case 0x01: sim_ack(); q_push(0x01); q_push(sim.bl_version); q_push(0x00); sim_ack(); sim.st = SS_CMD; return;
-        case 0x31: sim_ack(); sim.idx = 0; sim.st = SS_ADDR; return;
-        case 0x21: sim_ack(); sim.idx = 0; sim.st = SS_ADDR; return;
-        case 0x43:
-            if (!sim.support_0x43) { sim_nack(); sim.st = SS_CMD; return; }
-            sim_ack(); sim.idx = 0; sim.st = SS_ERASE; return;
-        case 0x44:
-            if (!sim.support_0x44) { sim_nack(); sim.st = SS_CMD; return; }
-            sim_ack(); sim.idx = 0; sim.st = SS_ERASE; return;
-        default: sim_nack(); sim.st = SS_CMD; return;
-        }
-
-    case SS_ADDR:
-        sim.buf[sim.idx++] = b;
-        if (sim.idx == 5) {
-            uint8_t x = (uint8_t)(sim.buf[0] ^ sim.buf[1] ^ sim.buf[2] ^ sim.buf[3]);
-            if (x != sim.buf[4]) { sim_nack(); sim.st = SS_CMD; return; }
-            sim.addr = ((uint32_t)sim.buf[0] << 24) | ((uint32_t)sim.buf[1] << 16)
-                     | ((uint32_t)sim.buf[2] << 8) | (uint32_t)sim.buf[3];
-            sim_ack();
-            if (sim.cur_cmd == 0x21) { sim.jumped = 1; sim.st = SS_CMD; }
-            else                     { sim.st = SS_WN; }
-        }
-        return;
-
-    case SS_ERASE:
-        sim.buf[sim.idx++] = b;
-        if (sim.idx == 3) {
-            if ((uint8_t)(sim.buf[0] ^ sim.buf[1]) != sim.buf[2]) { sim_nack(); sim.st = SS_CMD; return; }
-            if (sim.buf[0] == 0xFFu && sim.buf[1] == 0xFFu) {
-                memset(g_dut, 0xFF, sizeof(g_dut));
-                sim.erase_cmd_used = sim.cur_cmd;
-                sim_ack();
-            } else sim_nack();
-            sim.st = SS_CMD;
-        }
-        return;
-
-    case SS_WN:
-        sim.wlen = (uint16_t)b + 1u; sim.wgot = 0; sim.wcksum = b; sim.st = SS_WDATA; return;
-
-    case SS_WDATA:
-        if (sim.wgot < sim.wlen) { sim.wbuf[sim.wgot++] = b; sim.wcksum ^= b; return; }
-        if (b == sim.wcksum) {
-            uint32_t off = sim.addr - 0x08000000u;
-            if (off + sim.wlen <= DUT_FLASH_SIZE) { memcpy(&g_dut[off], sim.wbuf, sim.wlen); sim.write_ok++; }
-            sim_ack();
-        } else sim_nack();
-        sim.st = SS_CMD;
-        return;
-    }
-}
-
-/*==============================================================================
- * BSP 替身
- *============================================================================*/
-void BSP_ISP_UART_Init(void) { }
-void BSP_ISP_UART_SetParity(uint8_t p) { (void)p; }
-void BSP_ISP_UART_FlushRx(void) { }
-void BSP_ISP_UART_SendByte(uint8_t b) { sim_feed(b); }
-void BSP_ISP_UART_Send(const uint8_t *d, uint16_t n) { for (uint16_t i = 0; i < n; i++) sim_feed(d[i]); }
-uint8_t BSP_ISP_UART_RecvByte(uint8_t *out, uint32_t t) { (void)t; return q_pop(out) ? 1u : 0u; }
 void BSP_DBG_Send(const char *s) { (void)s; }
 void BSP_DBG_SendHexByte(uint8_t b) { (void)b; }
 
@@ -394,7 +313,8 @@ static void init_env(void)
     fl.sr1 = 0x00;
     g_tick = 0;
     tx_len = 0; tx_count = 0;
-    sim_reset(0x22, 1, 1, 0);
+    sim_target_reset();
+    sim_target_set_read_ta((uint8_t)SWD_TA_BEFORE_READ_DATA);
     hUsbDeviceFS.pClassData = &g_cdc;
     g_cdc.TxState = 0;
     for (int i = 0; i < 101; i++) g_boot[i] = (uint8_t)(0x11 + i * 3);
@@ -422,9 +342,9 @@ static void t2_empty_and_unknown(void)
       pc_send(MGR_CMD_QUERY_FLASH_VER, 0x0101, 0, 0);
       expect_ack(MGR_CMD_QUERY_FLASH_VER, 0x0101, e, 4, "空 Flash → ERR_NO_FW"); }
 
-    { uint8_t e[4] = {0x0C, 0x00, 0xFF, 0xFF};
+    { uint8_t e[4] = {0x06, 0x00, 0xFF, 0xFF};
       pc_send(MGR_CMD_QUERY_FOC_VER, 0x0202, 0, 0);
-      expect_ack(MGR_CMD_QUERY_FOC_VER, 0x0202, e, 4, "0x000D 未配置 → 0x0C + 00FFFF"); }
+      expect_ack(MGR_CMD_QUERY_FOC_VER, 0x0202, e, 4, "0x000D 被烧板 App 区为空 → 0x06(无固件) + 00FFFF"); }
 
     { uint8_t e[1] = {0xFF};
       pc_send(0x1234, 0x0303, 0, 0);
@@ -606,11 +526,13 @@ static void t8_program_precheck(void)
 
 static void t9_full_program_chain(void)
 {
-    printf("[T9] 端到端: PC帧 → 上传 → SPI Flash → 0x0112 ISP → 被烧板 Flash\n");
+    printf("[T9] 端到端: PC帧 → 上传 → SPI Flash → 0x0112 SWD → 被烧板 Flash\n");
     init_env();
     uint16_t seq = 0x7000;
     uint8_t  ver1[3] = {1, 2, 3};
     uint8_t  ver2[3] = {4, 5, 6};
+    uint8_t *dut = sim_target_flash();          /* 线级模型里的 F405 Flash */
+    uint32_t clk0 = SWD_PhyClockCount();
 
     /* 上传两段镜像 (自动 Slot0 → Slot1) */
     upload(&seq, g_boot, sizeof(g_boot), ver1);
@@ -626,35 +548,53 @@ static void t9_full_program_chain(void)
     { uint16_t rseq = 0; uint8_t rst = 0xFF;
       CHECK(wait_for_cmd(MGR_CMD_PROGRAM, &rseq, &rst) == 1, "收到 0x0112 应答");
       CHECK(rseq == seq, "0x0112 ACK 的 SEQ = 受理时的序号 (锁存生效)");
-      CHECK(rst == 0x00, "0x0112 ACK 状态 = OK"); }
+      CHECK(rst == APP_STATUS_OK, "0x0112 ACK 状态 = OK"); }
     seq++;
 
     /* 被烧板 Flash 逐字节核对 */
-    CHECK(memcmp(&g_dut[DUT_BOOT_ADDR - 0x08000000u], g_boot, sizeof(g_boot)) == 0,
+    CHECK(memcmp(&dut[DUT_BOOT_ADDR - 0x08000000u], g_boot, sizeof(g_boot)) == 0,
           "被烧板 Bootloader 区 == 源镜像");
-    CHECK(memcmp(&g_dut[DUT_APP_ADDR - 0x08000000u], g_app, sizeof(g_app)) == 0,
+    CHECK(memcmp(&dut[DUT_APP_ADDR - 0x08000000u], g_app, sizeof(g_app)) == 0,
           "被烧板 App 区 == 源镜像");
-    CHECK(sim.erase_cmd_used == 0x43, "F1 目标使用 0x43 全片擦除");
-    CHECK(sim.jumped == 1, "烧录完成后执行 Go 跳转");
-    CHECK(sim.nack_count == 0, "ISP 全程零 NACK");
+    /* 线路层与协议层的不变量 */
+    CHECK(sim_target_switch_seen() == 1u,   "JTAG→SWD 切换序列被目标识别");
+    CHECK(sim_target_contention() == 0u,    "SWDIO 全程零总线冲突");
+    CHECK(sim_target_parity_errors() == 0u, "线路层零奇偶校验错");
+    CHECK(sim_target_erases() == 3u,        "按扇区擦除: Boot 2 个 + App 1 个 = 3");
+    CHECK(sim_target_locked_reject() == 0u, "没有在未解锁状态下碰过目标 Flash");
+    CHECK(sim_target_halted() == 0u,        "烧完目标在运行态 (SYSRESETREQ 后 S_HALT=0)");
+    CHECK(SWDP_LastIdcode() == 0x2BA01477u, "SW-DP IDCODE = 0x2BA01477");
+    CHECK(SWDP_LastDevId() == 0x0413u,      "目标 DEV_ID = 0x413 (F405/407)");
 
-    printf("    擦除=0x%02X 写块=%u ACK=%u NACK=%u 跳转=%u\n",
-           sim.erase_cmd_used, sim.write_ok, sim.ack_count, sim.nack_count, sim.jumped);
+    printf("    IDCODE=0x%08lX DEV_ID=0x%03lX 擦扇区=%lu 编程字=%lu SWD 事务=%lu\n",
+           (unsigned long)SWDP_LastIdcode(), (unsigned long)SWDP_LastDevId(),
+           (unsigned long)sim_target_erases(), (unsigned long)sim_target_programs(),
+           (unsigned long)sim_target_transactions());
+    /* 实测时钟周期 → 上板节拍推算（SWCLK 频率由 SWD_DELAY_LOOPS 决定） */
+    {
+        uint32_t cycles = SWD_PhyClockCount() - clk0;
+        uint32_t bytes  = (uint32_t)(sizeof(g_boot) + sizeof(g_app));
+        uint32_t per_kb = (uint32_t)(((unsigned long long)cycles * 1024ull) / bytes);
+        printf("    烧 %u B 用了 %lu 个 SWCLK 周期 (%lu 周期/KB)\n",
+               bytes, (unsigned long)cycles, (unsigned long)per_kb);
+        printf("    推算 300KB: %.1f s @1MHz   %.1f s @2MHz   %.1f s @4MHz\n",
+               (double)per_kb * 300.0 / 1.0e6, (double)per_kb * 300.0 / 2.0e6,
+               (double)per_kb * 300.0 / 4.0e6);
+        printf("    (只算 SWD 链路时间; 真实擦除还要等 Flash: 128KB 扇区约 1.3s/个)\n");
+    }
 }
 
-static void t10_program_busy_and_g0(void)
+static void t10_busy_and_target_absent(void)
 {
-    printf("[T10] 烧录中 BUSY / G0 目标走 0x44\n");
-    /* G0 目标: 只支持 0x44 */
-    init_env();
-    sim_reset(0x31, 0, 1, 0);
+    printf("[T10] 烧录中 BUSY / 目标不在时干净失败\n");
     uint16_t seq = 0x8000;
     uint8_t  ver[3] = {7, 7, 7};
+    uint8_t *dut = sim_target_flash();
 
+    /* ── 10a: 烧录途中插入命令必须回 BUSY ── */
+    init_env();
     upload(&seq, g_boot, sizeof(g_boot), ver);
     upload(&seq, g_app,  sizeof(g_app),  ver);
-
-    /* 触发烧录 */
     {
         uint8_t  raw[8 + 2];
         uint16_t n = Frame_Build(raw, MGR_CMD_PROGRAM, seq, 0, 0);
@@ -664,30 +604,43 @@ static void t10_program_busy_and_g0(void)
     uint16_t prog_seq = seq;
     seq++;
 
-    /* 只推 1 步, 让状态机进入 PROGRAMMING 但烧录尚未结束 */
     APP_Run();
-    APP_Run();
+    APP_Run();                        /* 已进入 PROGRAMMING, 但远未烧完 */
 
-    /* 烧录途中插入一条命令 → 必须回 BUSY (且不能被后面的 0x0112 ACK 覆盖) */
     {
         uint8_t  raw[16];
         uint16_t n = Frame_Build(raw, MGR_CMD_QUERY_FLASH_VER, seq++, 0, 0);
-        uint8_t  e[1] = {0x01};
+        uint8_t  e[1] = {APP_STATUS_BUSY};
         tx_len = 0;
         APP_USB_Receive(raw, n);
-        APP_Run();                       /* 只推 1 步: 处理该帧 + ISP 前进一步 */
+        APP_Run();
         expect_ack(MGR_CMD_QUERY_FLASH_VER, seq - 1, e, 1, "烧录中查版本 → BUSY");
     }
 
-    /* 继续推进到 0x0112 完成 */
     { uint16_t rseq = 0; uint8_t rst = 0xFF;
-      CHECK(wait_for_cmd(MGR_CMD_PROGRAM, &rseq, &rst) == 1, "G0: 收到 0x0112 应答");
-      CHECK(rseq == prog_seq, "G0: 0x0112 ACK SEQ = 受理序号");
-      CHECK(rst == 0x00, "G0: 0x0112 → OK"); }
+      CHECK(wait_for_cmd(MGR_CMD_PROGRAM, &rseq, &rst) == 1, "收到 0x0112 应答");
+      CHECK(rseq == prog_seq, "0x0112 ACK SEQ = 受理序号");
+      CHECK(rst == APP_STATUS_OK, "0x0112 → OK"); }
+    CHECK(memcmp(&dut[DUT_BOOT_ADDR - 0x08000000u], g_boot, sizeof(g_boot)) == 0, "Boot 区一致");
+    CHECK(memcmp(&dut[DUT_APP_ADDR - 0x08000000u], g_app, sizeof(g_app)) == 0, "App 区一致");
 
-    CHECK(sim.erase_cmd_used == 0x44, "G0 目标使用 0x44");
-    CHECK(memcmp(&g_dut[DUT_BOOT_ADDR - 0x08000000u], g_boot, sizeof(g_boot)) == 0, "G0: Boot 区一致");
-    CHECK(memcmp(&g_dut[DUT_APP_ADDR - 0x08000000u], g_app, sizeof(g_app)) == 0, "G0: App 区一致");
+    /* ── 10b: 目标不在（线悬空）→ 必须干净失败, 一个字节都不写 ── */
+    init_env();
+    sim_target_attach(0u);
+    upload(&seq, g_boot, sizeof(g_boot), ver);
+    upload(&seq, g_app,  sizeof(g_app),  ver);
+    {
+        uint8_t  raw[8 + 2];
+        uint16_t n = Frame_Build(raw, MGR_CMD_PROGRAM, seq, 0, 0);
+        tx_len = 0;
+        APP_USB_Receive(raw, n);
+    }
+    { uint16_t rseq = 0; uint8_t rst = 0xFF;
+      CHECK(wait_for_cmd(MGR_CMD_PROGRAM, &rseq, &rst) == 1, "目标不在时仍然回 ACK (不死等)");
+      CHECK(rst == APP_STATUS_ERR_PROG, "目标不在 → ERR_PROG");
+      CHECK(SWDP_LastSwdError() != 0u, "记录了底层 SWD 错误码供诊断"); }
+    CHECK(sim_target_programs() == 0u, "目标不在时一个字节都没写进目标 Flash");
+    CHECK(sim_target_erases() == 0u,   "目标不在时没有擦除任何扇区");
 }
 
 static void t13_flash_offline_detected(void)
@@ -720,7 +673,7 @@ int main(void)
     t7_upload_timeout();
     t8_program_precheck();
     t9_full_program_chain();
-    t10_program_busy_and_g0();
+    t10_busy_and_target_absent();
     t13_flash_offline_detected();
     printf("\n=== 共 %d 项检查, 失败 %d 项 ===\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;

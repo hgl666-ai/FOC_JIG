@@ -1,11 +1,22 @@
+/**
+  ******************************************************************************
+  * @file    bsp_uart.c
+  * @brief   串口底层实现: ISP 阻塞收发(默认编出) + 调试打印(默认关)
+  *
+  * 引脚分配见 bsp_uart.h 顶部说明与 docs/10_UART四路驱动设计.md。
+  ******************************************************************************
+  */
 #include "bsp_uart.h"
-#include "isp_config.h"
-#include "usart.h"
 #include "main.h"
 #include <string.h>
 
+#if (BSP_ISP_UART_ENABLE != 0u)
+#include "isp_config.h"
+#include "usart.h"
+
 /*==============================================================================
- * ISP 串口 (默认 USART3)
+ * ISP 串口 (isp_config.h 里的 ISP_UART_INSTANCE, 原方案是 USART3)
+ * ⚠ 与"U1 USART3 = 到 U2 的内部链路"冲突, 默认不编。
  *============================================================================*/
 void BSP_ISP_UART_Init(void)
 {
@@ -56,14 +67,25 @@ void BSP_ISP_UART_FlushRx(void)
     (void)huart3.Instance->DR;      /* 读 DR 清 RXNE */
     (void)huart3.Instance->SR;
 }
+#endif /* BSP_ISP_UART_ENABLE */
 
 /*==============================================================================
- * 调试口 (USART1, PA9/PA10) — 仅用于 bring-up 打点, 不参与协议
+ * 调试打印 (USART1)
+ *----------------------------------------------------------------------------
+ * 默认 BSP_DBG_ENABLE=0 → 下面是空函数: 调用点(swd_programmer/measure)不用改,
+ * 也绝不会往 DUT 串口线上灌调试字符。
+ * 台架 bring-up 想看日志时, 把 BSP_DBG_ENABLE 打开, 并注意:
+ *   此时 USART1 被占用, 被测板串口就不能同时用了 (二选一)。
  *============================================================================*/
+#if (BSP_DBG_ENABLE != 0u)
+#include "usart.h"
+
 void BSP_DBG_Send(const char *str)
 {
+    uint16_t len;
+
     if (str == 0) return;
-    uint16_t len = (uint16_t)strlen(str);
+    len = (uint16_t)strlen(str);
     if (len == 0u) return;
     (void)HAL_UART_Transmit(&huart1, (uint8_t *)str, len, 100);
 }
@@ -77,3 +99,14 @@ void BSP_DBG_SendHexByte(uint8_t b)
     s[2] = '\0';
     BSP_DBG_Send(s);
 }
+#else
+void BSP_DBG_Send(const char *str)
+{
+    (void)str;                       /* 关掉时不产生任何输出 */
+}
+
+void BSP_DBG_SendHexByte(uint8_t b)
+{
+    (void)b;
+}
+#endif /* BSP_DBG_ENABLE */

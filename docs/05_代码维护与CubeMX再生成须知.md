@@ -19,6 +19,8 @@
 | 文件 | 改动 | 在 USER CODE 区? | 再生成后 |
 |---|---|---|---|
 | `Core/Src/gpio.c` | 删除 PA13 的 EXTI13 输入配置 | ❌ | **不会回退** ✅（见 §3.1） |
+| `Core/Src/adc.c` | 单通道配置 → **10 通道扫描 + DMA1_CH1 循环搬运**（9 路模拟量 + VREFINT）；`MX_ADC1_Init()` 里的通道循环写在 `USER CODE BEGIN ADC1_Init 2` 内、DMA 初始化写在 `USER CODE BEGIN ADC1_MspInit 1` 内 → **这两块能保留** ✅；但 `hadc1.Init.ScanConvMode/ContinuousConvMode/NbrOfConversion` 与 `k_adc_scan[]` 在外面，**再生成会被改回单通道** ⚠ | 部分 | 见 §2.1 |
+| `Core/Inc/adc.h` | 加 `extern DMA_HandleTypeDef hdma_adc1;`（在 USER CODE 区） | ✅ | 保留 ✅ |
 | `Core/Src/stm32f1xx_hal_msp.c` | `__HAL_AFIO_REMAP_SWJ_DISABLE()` → `__HAL_AFIO_REMAP_SWJ_NOJTAG()` | ❌ | **不会回退** ✅（见 §3.1） |
 | `Core/Src/stm32f1xx_it.c` | 加 `USB_LP_CAN1_RX0_IRQHandler` / `USB_HP_CAN1_TX_IRQHandler` | ✅ | 保留 ✅ |
 | `Core/Src/main.c` | `GD25Q_Init()` / `APP_Init()` / `APP_Run()` | ✅ | 保留 ✅ |
@@ -27,6 +29,98 @@
 | `MDK-ARM/startup_stm32f103xb.s` | `Stack_Size 0x400 → 0x800` | ❌ | **回退到 0x400** ⚠ |
 | `MDK-ARM/U1.uvprojx` | 追加 15 个源文件 + 4 条 Include 路径 | ❌ | **会被整表重写，手动加的文件全部丢失** ⚠⚠ |
 | `U1.ioc` | PA13/PA14 改回 `SYS_JTMS-SWDIO`/`SYS_JTCK-SWCLK`，删除 `VP_SYS_VS_ND` | —— | 这是配置源，已改好 ✅ |
+
+---
+
+## 2.1 `adc.c` 与测量功能
+
+`MX_ADC1_Init()` 现在是 **10 通道扫描**（9 路模拟量 + 内部基准 VREFINT）配 DMA1_CH1 循环搬运；
+通道表 `k_adc_scan[]` 的顺序必须与 `measure.h` 里 `meas_id_t` 的顺序一致
+（这两处靠 `MEAS_ADC_CH_xxx` 宏共用同一个 ADC 通道定义，但**顺序**只有注释约束——
+改动任何一处都要同步改另一处）。
+
+再生成后必须手工恢复的三点：
+1. `hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;`、`ContinuousConvMode = ENABLE;`、
+   `NbrOfConversion = MEAS_SCAN_COUNT;`
+2. 加上 `k_adc_scan[]` 表（在 `USER CODE BEGIN 0` 区，会保留）与
+   `USER CODE BEGIN ADC1_Init 2` 里的通道配置循环（会保留）
+3. `USER CODE BEGIN ADC1_MspInit 1` 里的 DMA 初始化（会保留）
+
+另外：**刻意没有使能 `DMA1_Channel1_IRQn`**——循环模式下 DMA 硬件自己重装计数器，
+不需要软件参与，所以 `stm32f1xx_it.c` 里也没有对应的中断处理函数。
+如果将来要用 `HAL_ADC_ConvCpltCallback`，必须同时补上中断处理函数，否则会进默认死循环。
+
+---
+
+## 2.2 SWD 烧录引脚（占位期间）与 USART3 的关系
+
+> 2026-10 更新：SWD 占位引脚已从 PB10/PB11 **改为 PB1(SWCLK)/PB3(SWDIO)**，
+> 因此**不再和任何串口抢引脚**。当时改成这两个脚的依据：
+>
+> - **PB1**：F103C8 的 ADC_IN9，本工程只用到 IN0..IN8（PA0..PA7 + PB0），所以 PB1 空闲；
+> - **PB3**：复位后是 JTDO，`stm32f1xx_hal_msp.c` 里的 `__HAL_AFIO_REMAP_SWJ_NOJTAG()`
+>   （SWJ_CFG = JTAG-DP 关 / SW-DP 开）已经把它释放成 GPIO，**SWD 下载调试口 PA13/PA14 不受影响**；
+> - 不用 NRST（`SWD_USE_NRST 0`）：目标板复位走 SWD 的 AIRCR.SYSRESETREQ。
+
+现在 U1 的 USART3 是**到 U2 的内部链路**（见 `docs/10_UART四路驱动设计.md`），所以：
+
+- 老方案里"ISP 走 USART3 直连被测板"与现在的链路**引脚冲突**，
+  因此 `bsp_uart.c` 的 ISP 部分默认**不编进固件**（`BSP_ISP_UART_ENABLE = 0`），
+  调试打印也默认关（`BSP_DBG_ENABLE = 0`，否则会把调试字符灌到 DUT 串口线上）。
+  真要用 ISP，必须先把链路挪到别的 USART 或放弃链路。
+- `swd_config.h` 里 `SWD_PINS_CONFIRMED 0` 仍表示"引脚是占位、等真实板确认"。
+
+---
+
+## 2.3 USART 中断（新增，CubeMX 再生成会丢）
+
+四路串口的收发都是"每字节一个中断"，需要下面两组**USER CODE 区**的代码：
+
+1. `Core/Src/usart.c`，`USER CODE BEGIN USART1_MspInit 1` / `USART3_MspInit 1` 里：
+
+   ```c
+   HAL_NVIC_SetPriority(USART1_IRQn, 3, 0);   /* 3 = 低于 USB(0) */
+   HAL_NVIC_EnableIRQ(USART1_IRQn);
+   ```
+
+2. `Core/Src/stm32f1xx_it.c`，`USER CODE BEGIN 1` 里：
+
+   ```c
+   void USART1_IRQHandler(void) { HAL_UART_IRQHandler(&huart1); }
+   void USART3_IRQHandler(void) { HAL_UART_IRQHandler(&huart3); }
+   ```
+
+   （U2 工程同样两份，`huart1`/`huart3` 的定义来自各自的 `usart.c`。）
+
+回调分发在各自的 `Core/Src/uart_cfg.c`：`HAL_UART_RxCpltCallback/TxCpltCallback/ErrorCallback`
+按句柄分发给 `UartPort_OnRxComplete/OnTxComplete/OnError`。**错误回调里必须先清 ORE 再让驱动重挂接收**，
+否则这一路会永久哑掉（原因见 `docs/10_UART四路驱动设计.md` §3.1）。
+
+---
+
+## 2.4 两片重复的三个模块：各放各的工程目录，靠脚本保证副本一致
+
+U1 与 U2 是同一颗 MCU（STM32F103C8T6），协议帧 / 串口驱动 / 链路协议的代码在两边是一样的。
+**不搞公共目录**，而是**在两片各自的工程目录里各放一份副本**（工程自包含，Keil 里看到的就是全部）：
+
+| 文件（U1 与 U2 各一份） | 内容 |
+|---|---|
+| `Core/Src/protocol_frame.c` + `Core/Inc/protocol_frame.h` | A5 5B 帧 + CRC16-MODBUS |
+| `Core/Src/uart_port.c` + `Core/Inc/uart_port.h` | 串口端口驱动（环形缓冲 + 中断收发） |
+| `Core/Src/uart_link.c` + `Core/Inc/uart_link.h` | U1↔U2 链路协议（请求/应答 + STATUS 编解码） |
+
+两个工程的 `uvprojx` 就是普通的 `../Core/Src/xxx.c`，**没有任何跨工程路径**，不需要额外的 Include 路径。
+
+⚠ **代价是"改一边忘一边"**，所以有两条机械保护（别删）：
+
+1. **回归脚本第 7 阶段**（`test\run_all_tests.cmd`）用 `fc /b` 逐字节比对这 6 个文件对，
+   只要有一对不一致就报 `[FAIL]` 并让整个回归失败。
+   确实需要两份不同时，把这一阶段删掉即可（脚本里有注释说明）。
+2. `uart_link.h` 里的 `LINK_CODE_VER`：改变了链路的对外行为（帧格式 / 字段布局 / 时序）就 +1。
+   从机在 STATUS 里回这个值，主机比对 → `APP_U2VerOk()` 直接告诉你两片是不是同一版。
+
+> 判据：**只改了某一片的 `Core/` → 只重烧那一片；改了这三个模块中的任何一个 → 两片都重烧。**
+> 两片各自的编译产物与烧录方法见 `docs/10_UART四路驱动设计.md` §10。
 
 ---
 
@@ -74,18 +168,25 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef* pcdHandle) { ... }
 3. **`MDK-ARM/startup_stm32f103xb.s`**：`Stack_Size EQU 0x400` → `0x800`。
 4. **`MDK-ARM/U1.uvprojx`**：把下面这些重新加回工程，并补 Include 路径：
    - 分组 Application/User/Core 追加：
-     `app.c` `app_frame.c` `protocol_frame.c` `gd25q128.c` `fw_upload.c` `bsp_uart.c` `isp_programmer.c`
+     `app.c` `app_frame.c` `gd25q128.c` `fw_upload.c` `bsp_uart.c` `uart_cfg.c`
+     `swd_programmer.c` `swd_phy.c` `swd_dp.c` `swd_memap.c` `cortex_m.c` `stm32f4_flash.c` `measure.c`
+     `protocol_frame.c` `uart_port.c` `uart_link.c`（各片自己的副本，均在 `../Core/Src/`）
    - 分组 Application/User/USB_Device：`usb_device.c` `usbd_desc.c` `usbd_cdc_if.c` `usbd_conf.c`
    - 分组 Middlewares/USB：`usbd_core.c` `usbd_ctlreq.c` `usbd_ioreq.c` `usbd_cdc.c`
    - Include 路径追加：
      `../USB_DEVICE/App;../USB_DEVICE/Target;`
      `../Middlewares/ST/STM32_USB_Device_Library/Core/Inc;`
      `../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc`
-5. 编译确认 **0 Error / 0 Warning**，并跑一遍 `test\run_all_tests.cmd`。
+5. **`Core/Src/usart.c` / `stm32f1xx_it.c`**：USART 的 NVIC 使能与中断入口（见 §2.3）。
+6. 编译确认 **0 Error / 0 Warning**，并跑一遍 `test\run_all_tests.cmd`。
 
 > 手写文件（`flash_map.h` `protocol_frame.*` `app_frame.*` `gd25q128.*` `fw_upload.*` `isp_config.h`
-> `isp_programmer.*` `bsp_uart.*` `app.*`）以及 `USB_DEVICE/`、`Middlewares/` 都不是 CubeMX 管理的，
+> `isp_programmer.*` `bsp_uart.*` `app.*` `uart_cfg.*` `swd_*` `cortex_m.*` `stm32f4_flash.*` `measure.*`
+> 以及 `USB_DEVICE/`、`Middlewares/` 都不是 CubeMX 管理的，
 > **再生成不会动它们**。
+>
+> ⚠ `U2` 工程的 `U2.uvprojx` 同样需要它自己的三个副本（`uart_port.c` `uart_link.c` `protocol_frame.c`）+
+> `uart_cfg.c` `u2_app.c`。
 
 ---
 

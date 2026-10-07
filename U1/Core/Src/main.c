@@ -30,6 +30,7 @@
 #include "gd25q128.h"
 #include "bsp_uart.h"
 #include "app.h"
+#include "measure.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -106,6 +107,8 @@ int main(void)
   GD25Q_Init();
   /* 应用层: 帧状态机 / 上传状态机 / ISP 串口 / 烧录引脚 */
   APP_Init();
+  /* 测量功能: ADC1 校准 + DMA 循环扫描（9 路模拟量 + 内部基准） */
+  MEAS_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -116,6 +119,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     APP_Run();
+    MEAS_Poll();
   }
   /* USER CODE END 3 */
 }
