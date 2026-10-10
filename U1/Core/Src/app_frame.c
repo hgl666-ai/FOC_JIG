@@ -122,8 +122,12 @@ static void frame_feed(uint8_t b)
  *============================================================================*/
 void APP_Frame_Init(void)
 {
-    ring_head   = 0u;
-    ring_tail   = 0u;
+    /* ⚠ ring_head 是 **USB 中断** 的写变量（APP_Frame_Feed），主循环绝不能写它：
+     *    两边各自做"读-改-写"会互相丢失 —— 丢字节 / head-tail 错位 / 重解析旧字节。
+     *    清空接收侧的正确做法：只把主循环自己的 ring_tail 追到 head，
+     *    语义一样（未处理的字节全部丢弃），但不碰 ISR 的进度。
+     *    （上电时 head 本来就是 0，等价于全清。） */
+    ring_tail   = ring_head;
     frame_pos   = 0u;
     frame_dlen  = 0u;
     frame_ready = 0u;

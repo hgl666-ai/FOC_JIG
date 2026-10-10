@@ -20,7 +20,7 @@ typedef enum { HAL_OK = 0, HAL_ERROR, HAL_BUSY, HAL_TIMEOUT } HAL_StatusTypeDef;
 #ifndef SIM_GPIO_TYPES_DEFINED
 #define SIM_GPIO_TYPES_DEFINED
 
-/* ---- 只需要类型名存在 (isp_config.h / spi.h 里声明了 extern 句柄) ---- */
+/* ---- 只需要类型名存在 (各模块头里声明了 extern 句柄) ---- */
 typedef struct { uint32_t _id; } USART_TypeDef;
 typedef struct { int _unused; } SPI_HandleTypeDef;
 

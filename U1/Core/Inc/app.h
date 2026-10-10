@@ -16,7 +16,8 @@ typedef enum {
     APP_STATE_INIT = 0,
     APP_STATE_IDLE,
     APP_STATE_UPLOADING,     /* 固件上传中 (只接受 0x000A / 0x000B) */
-    APP_STATE_PROGRAMMING    /* ISP 烧录中   (只接受 0x0112, 回 BUSY) */
+    APP_STATE_PROGRAMMING,   /* SWD 烧录中  (只接受 0x0112, 回 BUSY) */
+    APP_STATE_TESTING        /* 测量测试中  (0x000E mode=1, 跑完判定才回 ACK) */
 } APP_State_t;
 
 extern APP_State_t app_state;

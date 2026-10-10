@@ -1,54 +1,86 @@
 /**
   ******************************************************************************
   * @file    measure.c
-  * @brief   测量功能实现：通道表 + 换算 + 滤波 + 判定 + 调试打印
+  * @brief   测量功能实现：信号表 + 换算 + 滤波 + 判定 + 快照 + 交叉校验
   *
   * 分压/通道对应关系见 docs/06_测量通道分压逆推.md：
   *   每个通道前级都是"分压（或直连）→ 电压跟随器 → 100Ω+1nF+TVS → ADC"，
   *   跟随器增益为 1，所以 V_in = V_adc / k，k 就是分压比。
+  *
+  * ⚠ 本文件在两片各有一份**逐字节副本**，因此：
+  *   - 不许出现 ADC_CHANNEL_x / GPIO 等板级差异（信号→通道号在各自 adc.c 里）；
+  *   - 打印依赖 bsp_uart（只有 U1 有），所以用 MEAS_PRINT_ENABLE 开关隔离。
   ******************************************************************************
   */
 #include "measure.h"
 #include "main.h"
+#include "protocol_frame.h"     /* 配置表指纹用 Frame_CRC16（两片都有这份文件） */
 
 #ifndef MEAS_HOST_TEST
 #include "adc.h"
 #endif
 
+#if (MEAS_PRINT_ENABLE != 0u)
 #include "bsp_uart.h"
+#endif
 
 /* ------------------------------------------------------------------ */
-/* 通道表                                                              */
+/* 信号表                                                              */
 /* ------------------------------------------------------------------ */
 typedef struct {
     const char *name;
     uint16_t    k_num;      /* 分压比 k = k_num / k_den（已是约分后的整数） */
     uint16_t    k_den;
-    uint16_t    vmin_mv;    /* 合格下限（换算到输入侧 mV） */
-    uint16_t    vmax_mv;    /* 合格上限 */
     uint8_t     ema_shift;  /* 指数滑动平均 alpha = 1/(1<<shift)，越大越慢 */
+    uint16_t    cc_tol_mv;  /* 与 U2 交叉校验的容差（输入侧 mV） */
 } meas_cfg_t;
+
+/* ------------------------------------------------------------------ */
+/* 合格门限：由 jig_mode.h 的 MEAS_THRESHOLDS_ENABLED 选一套            */
+/* ------------------------------------------------------------------ */
+#if (MEAS_THRESHOLDS_ENABLED != 0)
+/* **规格门限**（生产模式用）。⚠ 数值待硬件/规格确认，见 docs/07 §8；
+ *   相电压被 PWM 斩波，判据待定 → 暂时全量程。 */
+static const uint16_t k_lim_min[MEAS_CH_COUNT] = {
+    7000u, 9000u, 4500u, 3000u, 0u, 0u, 0u, 0u, 0u
+};
+static const uint16_t k_lim_max[MEAS_CH_COUNT] = {
+    25000u, 11000u, 5500u, 3600u, 26400u, 26400u, 26400u, 3300u, 3300u
+};
+#else
+/* **全量程 = 先不判**（调试模式默认）：上限取该通道的满量程，
+ * 所以任何 ADC 能读出的值都算"合格"，只有贴边(sat)与超量程才看得出来。 */
+static const uint16_t k_lim_min[MEAS_CH_COUNT] = {
+    0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u
+};
+static const uint16_t k_lim_max[MEAS_CH_COUNT] = {
+    26050u, 26050u, 5500u, 3630u, 26400u, 26400u, 26400u, 3300u, 3300u
+};
+#endif
 
 /* 说明：
  *  - k 的取值来自原理图：24V/10V 用 4.7k/(32.4k+4.7k)=47/371；
  *    5V 用 30k/(20k+30k)=3/5；3.3V 用 30k/(3k+30k)=10/11；
  *    相电压用 20k/(140k+20k)=1/8；电流两路直连 k=1。
- *  - 门限是**默认值**，只为"先跑起来 + 能打印"：24V 下限用图上标注的 7V，
- *    上限按满量程 26.05V 留 4% 余量；其余按标称 ±10%；相电压/电流的判据
- *    要按被测板规格再定（所以先给全量程）。
+ *  - **门限当前是"全量程"= 先不判**（用户 2026-10 决定：先保证能采、能打包、
+ *    能比对，判定标准以后再收紧）。收紧时只改这一张表的 vmin/vmax。
+ *    下面注释里保留的是当初按规格算的"合理门限"，将来可直接启用：
+ *      V24 7000~25000 / V10 9000~11000 / V5 4500~5500 / V33 3000~3600
+ *      PHx 0~26400（相电压被 PWM 斩波，判据待定）/ CUR 0~3300
+ *    24V 的 7V 下限来自原理图上硬件工程师的标注（docs/06 §3），尚需确认含义。
  *  - 相电压是被 PWM 斩波的，窗口取 1/256（约 10ms）做平均；
- *    直流通道取 1/64（约 2.6ms）。 */
+ *    直流通道取 1/64（约 2.6ms）。交叉校验因此给相电压更宽的容差。 */
 static const meas_cfg_t k_cfg[MEAS_CH_COUNT] = {
-    /* name    k_num  k_den  vmin   vmax   ema_shift */
-    {  "V24",    47,   371,   7000, 25000, 6 },
-    {  "V10",    47,   371,   9000, 11000, 6 },
-    {  "V5",      3,     5,   4500,  5500, 6 },
-    {  "V33",    10,    11,   3000,  3600, 6 },
-    {  "PHA",     1,     8,      0, 26400, 8 },
-    {  "PHB",     1,     8,      0, 26400, 8 },
-    {  "PHC",     1,     8,      0, 26400, 8 },
-    {  "CUR1",    1,     1,      0,  3300, 6 },
-    {  "CUR2",    1,     1,      0,  3300, 6 },
+    /* name    k_num  k_den  ema_shift  cc_tol_mv */
+    {  "V24",    47,   371, 6,  300 },
+    {  "V10",    47,   371, 6,  300 },
+    {  "V5",      3,     5, 6,  200 },
+    {  "V33",    10,    11, 6,  150 },
+    {  "PHA",     1,     8, 8, 2000 },
+    {  "PHB",     1,     8, 8, 2000 },
+    {  "PHC",     1,     8, 8, 2000 },
+    {  "CUR1",    1,     1, 6,  200 },
+    {  "CUR2",    1,     1, 6,  200 },
 };
 
 /* ------------------------------------------------------------------ */
@@ -68,7 +100,17 @@ static uint8_t  s_in_cnt[MEAS_CH_COUNT];
 static uint8_t  s_ok[MEAS_CH_COUNT];
 static uint8_t  s_sat[MEAS_CH_COUNT];
 static uint32_t s_vdda_mv = MEAS_VDDA_MV;
+#if (MEAS_PRINT_ENABLE != 0u)
 static uint32_t s_print_tick;
+#endif
+static uint16_t s_round;            /* 采集回合号：每完成一轮扫描 +1 */
+static uint32_t s_round_tick;       /* 上一回合的时刻，用来算快照的 dt_ms */
+static uint16_t s_dt_ms;            /* 上一回合距再上一回合的间隔 */
+static uint16_t s_cfg_crc;          /* 配置表指纹 */
+static uint8_t  s_vdda_cal;         /* 1 = VDDA 已用 VREFINT 校准 */
+static uint8_t  s_test_active;      /* 1 = 正在跑"一次测试" */
+static uint32_t s_test_t0;
+static uint8_t  s_test_result;      /* 0=进行中 1=完成 2=超时 */
 #ifndef MEAS_HOST_TEST
 static uint32_t s_last_ndtr;
 #endif
@@ -124,7 +166,19 @@ void MEAS_Init(void)
         s_ok[i]        = 0u;
         s_sat[i]       = 0u;
     }
-    s_print_tick = 0u;
+#if (MEAS_PRINT_ENABLE != 0u)
+    s_print_tick  = 0u;
+#endif
+    s_round       = 0u;
+    s_round_tick  = HAL_GetTick();
+    s_dt_ms       = 0u;
+    s_vdda_cal    = 0u;
+    s_test_active = 0u;
+    s_test_result = 0u;
+
+    /* 配置表指纹：改了 k/门限/容差 这张表，指纹就变，
+     * 上位机据此确认"判定用的是哪套配置"（产线两台治具结论不同时一眼定位）。 */
+    s_cfg_crc = Frame_CRC16((const uint8_t *)k_cfg, (uint16_t)sizeof(k_cfg));
 
 #if MEAS_USE_VREFINT
     s_vdda_mv = MEAS_VDDA_MV;      /* 第一次轮询后用 VREFINT 修正 */
@@ -155,10 +209,22 @@ void MEAS_Poll(void)
         return;                      /* 还没有新的一轮 ADC 数据 */
     }
 
+    /* 回合号 + 间隔：快照里带上这两个，PC 和 ④ 的脉冲数据才能确定"是不是同一批" */
+    if (s_round != 0xFFFFu) {
+        s_round++;
+    }
+    {
+        uint32_t now = HAL_GetTick();
+        uint32_t dt  = now - s_round_tick;
+        s_round_tick = now;
+        s_dt_ms = (dt > 0xFFFFu) ? 0xFFFFu : (uint16_t)dt;
+    }
+
 #if MEAS_USE_VREFINT
     /* 用内部基准反算 VDDA，跟踪 LDO 漂移（需要一次性标定 MEAS_VREFINT_MV） */
     if (s_dma[MEAS_CH_VREF] != 0u) {
         uint32_t vdda = (MEAS_VREFINT_MV * 4095u) / (uint32_t)s_dma[MEAS_CH_VREF];
+        s_vdda_cal = 1u;
         if (vdda != s_vdda_mv) {
             s_vdda_mv = vdda;
             meas_recalc_scales(s_vdda_mv);
@@ -198,8 +264,8 @@ void MEAS_Poll(void)
         uv = s_ema_uv[i];
 
         /* 门限判定：连续 MEAS_STABLE_N 次都在范围内才算合格 */
-        if (uv >= ((uint32_t)k_cfg[i].vmin_mv * 1000u) &&
-            uv <= ((uint32_t)k_cfg[i].vmax_mv * 1000u)) {
+        if (uv >= ((uint32_t)k_lim_min[i] * 1000u) &&
+            uv <= ((uint32_t)k_lim_max[i] * 1000u)) {
             if (s_in_cnt[i] < MEAS_STABLE_N) {
                 s_in_cnt[i]++;
             }
@@ -210,7 +276,7 @@ void MEAS_Poll(void)
         s_sat[i] = ((raw <= MEAS_SAT_LOW) || (raw >= MEAS_SAT_HIGH)) ? 1u : 0u;
     }
 
-#if (MEAS_PRINT_PERIOD_MS > 0u)
+#if (MEAS_PRINT_ENABLE != 0u) && (MEAS_PRINT_PERIOD_MS > 0u)
     if ((HAL_GetTick() - s_print_tick) >= MEAS_PRINT_PERIOD_MS) {
         s_print_tick = HAL_GetTick();
         MEAS_Print();
@@ -292,23 +358,121 @@ const char *MEAS_Name(meas_id_t ch)
     return k_cfg[ch].name;
 }
 
-meas_cc_t MEAS_CrossCheck(void)
+uint16_t MEAS_GetCfgCrc(void)
 {
-    /* 交叉校验：U1 与 U2 各自独立采样同一路信号（硬件上是两套独立链路），
-     * 比对两套读数即可发现"运放虚焊 / 分压漂移 / ADC 坏"这类治具自身故障——
-     * 生产线上最怕的是治具悄悄测错还判合格。
-     *
-     * 启用需要三件事（当前都还没做）：
-     *   1) U2 用同一张表采样（measure.c 是 U1/U2 共用模块）；
-     *   2) U2 经 PB9 <-> PA11 上报读数（每秒十几字节，那根硬线足够）；
-     *   3) 逐通道比对，超过 MEAS_CC_TOL_MV 返回 MEAS_CC_MISMATCH。
-     * 注意两片 ADC 的基准是同一路 3.3V，所以容差可以取 2~3%，不必要求相等。 */
-    return MEAS_CC_DISABLED;
+    return s_cfg_crc;
 }
 
 /* ------------------------------------------------------------------ */
-/* 调试打印（USART1 / PA9）                                            */
+/* 快照                                                                */
 /* ------------------------------------------------------------------ */
+void MEAS_Snapshot(meas_snapshot_t *out)
+{
+    uint8_t i;
+
+    if (out == 0) {
+        return;
+    }
+    out->flags    = MEAS_SNAP_F_VALID;
+    if (s_vdda_cal != 0u) {
+        out->flags |= MEAS_SNAP_F_VDDA_CAL;
+    }
+    if (MEAS_AllOk() != 0u) {
+        out->flags |= MEAS_SNAP_F_ALL_OK;
+    }
+    out->ch_count = (uint8_t)MEAS_CH_COUNT;
+    out->round    = s_round;
+    out->dt_ms    = s_dt_ms;
+    out->vdda_mv  = (uint16_t)((s_vdda_mv > 0xFFFFu) ? 0xFFFFu : s_vdda_mv);
+    out->cfg_crc  = s_cfg_crc;
+
+    for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
+        out->ch[i].raw   = s_raw[i];
+        out->ch[i].mv    = (uint16_t)((s_ema_uv[i] + 500u) / 1000u);   /* uV -> mV */
+        out->ch[i].flags = (uint8_t)((s_ok[i] ? MEAS_CHF_OK : 0u) |
+                                     (s_sat[i] ? MEAS_CHF_SAT : 0u));
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 跑一次测试                                                          */
+/* ------------------------------------------------------------------ */
+void MEAS_TestBegin(void)
+{
+    uint8_t i;
+
+    /* 清掉稳定计数：判定必须基于"触发之后新采到的"连续 N 次数据，
+     * 不能拿触发前的旧计数直接算合格。 */
+    for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
+        s_in_cnt[i] = 0u;
+        s_ok[i]     = 0u;
+    }
+    s_test_t0     = HAL_GetTick();
+    s_test_result = 0u;
+    s_test_active = 1u;
+}
+
+uint8_t MEAS_TestPoll(void)
+{
+    if (s_test_active == 0u) {
+        return s_test_result;                 /* 已经出结果了，保持 */
+    }
+    if (MEAS_AllOk() != 0u) {                 /* 9 路都连续稳定 */
+        s_test_active = 0u;
+        s_test_result = 1u;
+        return 1u;
+    }
+    if ((HAL_GetTick() - s_test_t0) >= MEAS_TEST_TIMEOUT_MS) {
+        s_test_active = 0u;
+        s_test_result = 2u;
+        return 2u;
+    }
+    return 0u;
+}
+
+/* ------------------------------------------------------------------ */
+/* 与 U2 的交叉校验                                                    */
+/* ------------------------------------------------------------------ */
+uint16_t MEAS_Compare(const meas_snapshot_t *mine,
+                      const meas_snapshot_t *peer,
+                      uint8_t *mism)
+{
+    uint16_t mask = 0u;
+    uint8_t  i;
+
+    if (mism != 0) {
+        for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
+            mism[i] = 0u;
+        }
+    }
+    if ((mine == 0) || (peer == 0)) {
+        return 0u;
+    }
+    /* 通道数不足就直接按"无法比较"处理（返回全 1 掩码，调用方据此报异常） */
+    if ((mine->ch_count < (uint8_t)MEAS_CH_COUNT) ||
+        (peer->ch_count < (uint8_t)MEAS_CH_COUNT)) {
+        return (uint16_t)((1u << (uint8_t)MEAS_CH_COUNT) - 1u);
+    }
+
+    for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
+        uint32_t a = mine->ch[i].mv;
+        uint32_t b = peer->ch[i].mv;
+        uint32_t d = (a > b) ? (a - b) : (b - a);
+
+        if (d > (uint32_t)k_cfg[i].cc_tol_mv) {
+            mask |= (uint16_t)(1u << i);
+            if (mism != 0) {
+                mism[i] = 1u;
+            }
+        }
+    }
+    return mask;
+}
+
+/* ------------------------------------------------------------------ */
+/* 调试打印（U1 的调试口 USART1 / PA9；U2 不编，见 MEAS_PRINT_ENABLE）  */
+/* ------------------------------------------------------------------ */
+#if (MEAS_PRINT_ENABLE != 0u)
 static uint16_t fmt_u32(char *p, uint32_t v)
 {
     char     tmp[10];
@@ -381,6 +545,11 @@ void MEAS_Print(void)
     line[n]   = '\0';
     BSP_DBG_Send(line);
 }
+#else
+/* 打印关闭时保留同名空函数：调用点(MEAS_Init / MEAS_Poll)不用改 */
+void MEAS_PrintHeader(void) { }
+void MEAS_Print(void)       { }
+#endif /* MEAS_PRINT_ENABLE */
 
 #ifdef MEAS_HOST_TEST
 void MEAS_TestInject(meas_id_t ch, uint16_t counts)

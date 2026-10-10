@@ -19,7 +19,7 @@ CRC16   : MODBUS (poly 0xA001 反射, init 0xFFFF), 计算范围 帧头..DATA �
     python foc_jig_tool.py -p COM5 query-foc            # 0x000D 查被烧板运行态版本
     python foc_jig_tool.py -p COM5 upload fw.bin -v 1.0.0   # 0x0009/0A/0B 上传固件
     python foc_jig_tool.py -p COM5 program              # 0x0112 烧录到被烧板
-    python foc_jig_tool.py -p COM5 raw A5 5B 00 0C 00 01 00 00 3E 34
+    python foc_jig_tool.py -p COM5 raw A5 5B 00 0C 00 01 00 00 48 21
 """
 
 import sys
@@ -366,17 +366,17 @@ def do_burn(link: JigLink, boot_path: str, app_path: str,
     dt = time.time() - t0
     if r is None:
         print("!! 烧录无应答 (%.1fs)" % dt)
-        print("   排查: 被烧板是否进 bootloader / ISP 串口是否交叉接对 / 是否共地")
+        print("   排查: 目标是否供电/共地 / SWCLK-SWDIO 是否接对 / 目标是否把 PA13-PA14 当普通 IO 用")
         return 1
     st = r[1][0]
     if st != 0x00:
         print("!! 烧录失败: %s  (耗时 %.1fs)" % (status_name(st), dt))
         if st == 0x04:
-            print("   排查: 被烧板未进 bootloader / UART 未交叉 / 未共地 / RDP 读保护")
+            print("   排查: 目标未供电或未共地 / SWD 两线接错 / RDP 读保护(需先整片擦除)")
         return 1
 
     print("\n" + "=" * 60)
-    print("★ 烧录完成 OK   (ISP 阶段耗时 %.1fs)" % dt)
+    print("★ 烧录完成 OK   (SWD 烧录耗时 %.1fs)" % dt)
     print("=" * 60)
     return 0
 

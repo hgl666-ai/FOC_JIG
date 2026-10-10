@@ -31,6 +31,8 @@
 #include "uart_port.h"
 #include "uart_link.h"
 #include "protocol_frame.h"
+#include "meas_pack.h"
+#include "pulse_pack.h"      /* 55B 快照线格式（0x000E / MEAS_XCHK 共用） */
 
 static int g_checks = 0;
 static int g_fails  = 0;
@@ -392,8 +394,9 @@ static void test_error_rearm(void)
  *============================================================================*/
 static link_t s_master;
 static link_t s_slave;
+static meas_snapshot_t s_slave_snap;   /* 从机(模拟 U2)手里的快照, 由用例填充 */
 
-/* 与 U2 固件一致的从机处理函数 (PING 回显 / STATUS 打包 / 其余 NIY) */
+/* 与 U2 固件一致的从机处理函数 (PING 回显 / STATUS 打包 / XCHK 换快照 / 其余 NIY) */
 static uint8_t slave_handler(uint16_t cmd, const uint8_t *in, uint16_t inlen,
                              uint8_t *out, uint16_t *outlen)
 {
@@ -403,6 +406,39 @@ static uint8_t slave_handler(uint16_t cmd, const uint8_t *in, uint16_t inlen,
         for (uint16_t i = 0u; i < inlen; i++) out[i] = in[i];
         *outlen = inlen;
         return 1u;
+    case LINK_CMD_MEAS_XCHK: {
+        /* U2 的角色: 收到 U1 的 55B 快照, 回自己的 55B 快照(判定归 U1) */
+        if (inlen < MEAS_PACK_SNAP_LEN) {
+            out[0]  = LINK_ST_NIY;
+            *outlen = 1u;
+            return 1u;
+        }
+        *outlen = MeasPack_Snapshot(out, LINK_MAX_PAYLOAD, &s_slave_snap);
+        return (*outlen != 0u) ? 1u : 0u;
+    }
+    case LINK_CMD_PULSE_XCHK: {
+        /* U2 的角色: 收到 U1 的 45B(输出端), 回自己的 45B(输入端) */
+        pulse_snapshot_t ps;
+        uint8_t i;
+        if (inlen < PULSE_PACK_LEN) {
+            out[0]  = LINK_ST_NIY;
+            *outlen = 1u;
+            return 1u;
+        }
+        memset(&ps, 0, sizeof(ps));
+        ps.phase_count = (uint8_t)PULSE_PH_COUNT;
+        ps.flags       = PULSE_SNAP_F_VALID;
+        ps.window_ms   = 200u;
+        for (i = 0u; i < (uint8_t)PULSE_PH_COUNT; i++) {
+            ps.ph[i].period_ns     = 50000u;
+            ps.ph[i].high_ns       = 25000u;
+            ps.ph[i].duty_permille = 500u;
+            ps.ph[i].edges         = 4000u;
+            ps.ph[i].flags         = PULSE_F_VALID;
+        }
+        *outlen = PulsePack_Pack(out, LINK_MAX_PAYLOAD, &ps);
+        return (*outlen != 0u) ? 1u : 0u;
+    }
     case LINK_CMD_STATUS: {
         static const uint8_t ver[2] = { 0x00u, 0x01u };
         *outlen = Link_PackStatus(out, LINK_MAX_PAYLOAD, ver, 7u,
@@ -510,6 +546,129 @@ static void test_link_timeout(void)
     CHECK(Link_Stats(&s_master)->tx_timeout == 1u, "超时计数不再增长");
 }
 
+/*==============================================================================
+ * 12) 交叉校验快照交换 (MEAS_XCHK: 请求 55B / 应答 55B, 链路单帧上限 64B)
+ *     s_slave_snap 在"链路: 从机角色"一节声明（从机处理函数要用）
+ *============================================================================*/
+static void test_meas_xchk(void)
+{
+    uint8_t  req[MEAS_PACK_SNAP_LEN];
+    uint8_t  resp[LINK_MAX_PAYLOAD];
+    uint16_t rxlen = 0u;
+    meas_snapshot_t mine, peer;
+    uint8_t  i;
+
+    SECTION("12) 交叉校验快照交换 (55B 负载)");
+    link_setup(1u);
+
+    /* 造两份快照：主片标称值，从片在 5V 那一路偏 400mV（应被判定为超差） */
+    memset(&mine, 0, sizeof(mine));
+    mine.ch_count = (uint8_t)MEAS_CH_COUNT;
+    mine.flags    = MEAS_SNAP_F_VALID | MEAS_SNAP_F_ALL_OK;
+    for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
+        mine.ch[i].mv  = (uint16_t)(1000u + (uint16_t)i * 100u);
+        mine.ch[i].raw = (uint16_t)(200u + i);
+    }
+    s_slave_snap = mine;
+    s_slave_snap.ch[MEAS_CH_V5].mv = (uint16_t)(mine.ch[MEAS_CH_V5].mv + 400u);
+    s_slave_snap.round = 7u;
+
+    CHECK(MeasPack_Snapshot(req, sizeof(req), &mine) == MEAS_PACK_SNAP_LEN,
+          "主片 55B 快照打包成功");
+    CHECK(MEAS_PACK_SNAP_LEN <= LINK_MAX_PAYLOAD, "55B 装得进链路单帧(64B)");
+
+    CHECK(Link_Request(&s_master, LINK_CMD_MEAS_XCHK, req, MEAS_PACK_SNAP_LEN,
+                       resp, &rxlen, 50u) == 1u, "MEAS_XCHK 有应答");
+    CHECK(rxlen == MEAS_PACK_SNAP_LEN, "应答也是 55B");
+
+    memset(&peer, 0, sizeof(peer));
+    CHECK(MeasPack_UnpackSnapshot(resp, rxlen, &peer) == 1u, "对侧快照可解析");
+    CHECK(peer.round == 7u, "对侧的回合号传过来了");
+    {
+        int same = 1;
+        for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
+            if (peer.ch[i].mv != s_slave_snap.ch[i].mv) same = 0;
+        }
+        CHECK(same == 1, "9 路 mv 全部逐字节一致");
+    }
+    CHECK(peer.ch[MEAS_CH_V5].mv != mine.ch[MEAS_CH_V5].mv, "两片在 5V 那一路确实不同");
+
+    /* 请求太短 → 从机明确回 NIY（1 字节），而不是静默超时 */
+    rxlen = 0u;
+    CHECK(Link_Request(&s_master, LINK_CMD_MEAS_XCHK, req, MEAS_PACK_SNAP_LEN - 1u,
+                       resp, &rxlen, 50u) == 1u, "太短的请求也有应答");
+    CHECK(rxlen == 1u && resp[0] == LINK_ST_NIY, "太短的请求 → NIY");
+
+    /* 连续 3 发 55B 往返：确认长负载不会打乱 SEQ 配对 */
+    for (i = 0u; i < 3u; i++) {
+        rxlen = 0u;
+        CHECK(Link_Request(&s_master, LINK_CMD_MEAS_XCHK, req, MEAS_PACK_SNAP_LEN,
+                           resp, &rxlen, 50u) == 1u, "连续 55B 交换仍有应答");
+        CHECK(rxlen == MEAS_PACK_SNAP_LEN, "长度稳定");
+    }
+    CHECK(Link_Stats(&s_master)->rx_stale == 0u, "没有陈旧帧(SEQ 配对正确)");
+    CHECK(Link_Stats(&s_master)->rx_crc_err == 0u, "长负载没有 CRC 错");
+    CHECK(Link_Stats(&s_master)->tx_nospace == 0u, "55B 请求没有把发送队列撑爆");
+}
+
+
+/*==============================================================================
+ * 13) 脉冲结果交换 (PULSE_XCHK: 请求 45B / 应答 45B)
+ *============================================================================*/
+static void test_pulse_xchk(void)
+{
+    uint8_t  req[PULSE_PACK_LEN];
+    uint8_t  resp[LINK_MAX_PAYLOAD];
+    uint16_t rxlen = 0u;
+    pulse_snapshot_t mine, peer;
+    uint8_t  i;
+
+    SECTION("13) 脉冲结果交换 (45B)");
+    link_setup(1u);
+
+    memset(&mine, 0, sizeof(mine));
+    mine.phase_count = (uint8_t)PULSE_PH_COUNT;
+    mine.flags       = PULSE_SNAP_F_VALID;
+    mine.window_ms   = 200u;
+    for (i = 0u; i < (uint8_t)PULSE_PH_COUNT; i++) {
+        mine.ph[i].period_ns     = 50000u;      /* 20kHz */
+        mine.ph[i].high_ns       = 25000u;      /* 50% */
+        mine.ph[i].duty_permille = 500u;
+        mine.ph[i].edges         = 4000u;
+        mine.ph[i].flags         = PULSE_F_VALID;
+    }
+
+    CHECK(PulsePack_Pack(req, (uint16_t)sizeof(req), &mine) == PULSE_PACK_LEN,
+          "45B 脉冲结果打包成功");
+    CHECK(PULSE_PACK_LEN <= LINK_MAX_PAYLOAD, "45B 装得进链路单帧(64B)");
+
+    CHECK(Link_Request(&s_master, LINK_CMD_PULSE_XCHK, req, PULSE_PACK_LEN,
+                       resp, &rxlen, 50u) == 1u, "PULSE_XCHK 有应答");
+    CHECK(rxlen == PULSE_PACK_LEN, "应答也是 45B");
+
+    memset(&peer, 0, sizeof(peer));
+    CHECK(PulsePack_Unpack(resp, rxlen, &peer) == 1u, "对侧脉冲结果可解析");
+    CHECK(peer.window_ms == 200u, "窗口长度传过来了");
+    CHECK(peer.ph[PULSE_PH_A].period_ns == 50000u, "对侧周期传对了");
+    CHECK(peer.ph[PULSE_PH_C].duty_permille == 500u, "对侧占空比传对了");
+    CHECK(PulsePack_Compare(&mine, &peer, 0) == 0u, "两端一致 → 0 个差异");
+
+    /* 请求太短 → NIY（1 字节），而不是静默超时 */
+    rxlen = 0u;
+    CHECK(Link_Request(&s_master, LINK_CMD_PULSE_XCHK, req, PULSE_PACK_LEN - 1u,
+                       resp, &rxlen, 50u) == 1u, "太短的请求也有应答");
+    CHECK(rxlen == 1u && resp[0] == LINK_ST_NIY, "太短的请求 → NIY");
+
+    /* 连打 3 发 45B：确认长负载不打乱 SEQ 配对 */
+    for (i = 0u; i < 3u; i++) {
+        rxlen = 0u;
+        CHECK(Link_Request(&s_master, LINK_CMD_PULSE_XCHK, req, PULSE_PACK_LEN,
+                           resp, &rxlen, 50u) == 1u, "连续 45B 交换仍有应答");
+        CHECK(rxlen == PULSE_PACK_LEN, "长度稳定");
+    }
+    CHECK(Link_Stats(&s_master)->rx_stale == 0u, "没有陈旧帧");
+    CHECK(Link_Stats(&s_master)->rx_crc_err == 0u, "长负载无 CRC 错");
+}
 /*==============================================================================
  * 8) 链路抗干扰: CRC 错 / 垃圾前缀 / 超长 LEN
  *============================================================================*/
@@ -733,6 +892,8 @@ int main(void)
     test_link_status();
     test_code_ver();
     test_link_status_e2e();
+    test_meas_xchk();
+    test_pulse_xchk();
 
     printf("\n========================================\n");
     printf(" checks: %d, failed: %d\n", g_checks, g_fails);

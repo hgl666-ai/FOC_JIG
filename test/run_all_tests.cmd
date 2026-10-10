@@ -30,53 +30,14 @@ if errorlevel 1 goto :proto_build_fail
 "%ROOT%\test\protocol_test.exe"
 if errorlevel 1 goto :proto_fail
 echo [PASS] protocol_test
-goto :isp
-:proto_build_fail
-echo [FAIL] protocol_test compile error
-set FAILED=1
-goto :isp
-:proto_fail
-echo [FAIL] protocol_test
-set FAILED=1
-
-:isp
-echo.
-echo ============================================================
-echo  2/8  ISP flow byte-level test (simulated STM32 bootloader)
-echo       2a: verify off   2b: verify on   2c: pins confirmed
-echo ============================================================
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DISP_VERIFY_ENABLED=0" %INC% -o "%ROOT%\test\isp_test_v0.exe" "%ROOT%\test\isp_test.c" "%SRC%\isp_programmer.c"
-if errorlevel 1 goto :isp_build_fail
-"%ROOT%\test\isp_test_v0.exe"
-if errorlevel 1 goto :isp_fail
-echo [PASS] isp_test (verify off)
-
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DISP_VERIFY_ENABLED=1" %INC% -o "%ROOT%\test\isp_test_v1.exe" "%ROOT%\test\isp_test.c" "%SRC%\isp_programmer.c"
-if errorlevel 1 goto :isp_build_fail
-"%ROOT%\test\isp_test_v1.exe"
-if errorlevel 1 goto :isp_fail
-echo [PASS] isp_test (verify on)
-
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DISP_VERIFY_ENABLED=1" "-DISP_CTRL_PINS_CONFIRMED=1" %INC% -o "%ROOT%\test\isp_test_pins_v1.exe" "%ROOT%\test\isp_test.c" "%SRC%\isp_programmer.c"
-if errorlevel 1 goto :isp_build_fail
-"%ROOT%\test\isp_test_pins_v1.exe"
-if errorlevel 1 goto :isp_fail
-echo [PASS] isp_test (pins confirmed + verify on)
 goto :app
-:isp_build_fail
-echo [FAIL] isp_test compile error
-set FAILED=1
-goto :app
-:isp_fail
-echo [FAIL] isp_test
-set FAILED=1
 
 :app
 echo.
 echo ============================================================
-echo  3/8  Full-chain test (PC frame to target flash, all simulated)
+echo  2/8  Full-chain test (PC frame to target flash, all simulated)
 echo ============================================================
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%ROOT%\test\swdsim\sim_target.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%ROOT%\test\swdsim\sim_target.c"
 if errorlevel 1 goto :app_build_fail
 "%ROOT%\test\app_test.exe"
 if errorlevel 1 goto :app_fail
@@ -93,9 +54,9 @@ set FAILED=1
 :meas
 echo.
 echo ============================================================
-echo  4/8  Measurement module test (divider to voltage, thresholds)
+echo  3/8  Measurement module test (divider to voltage, thresholds)
 echo ============================================================
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DMEAS_HOST_TEST" %INC% -o "%ROOT%\test\measure_test.exe" "%ROOT%\test\measure_test.c" "%SRC%\measure.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DMEAS_HOST_TEST" "-DMEAS_PRINT_ENABLE=1" %INC% -o "%ROOT%\test\measure_test.exe" "%ROOT%\test\measure_test.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%ROOT%\U1\Core\Src\protocol_frame.c"
 if errorlevel 1 goto :meas_build_fail
 "%ROOT%\test\measure_test.exe"
 if errorlevel 1 goto :meas_fail
@@ -112,20 +73,39 @@ set FAILED=1
 :uart
 echo.
 echo ============================================================
-echo  5/8  UART port driver + U1 to U2 internal link
+echo  4/8  UART port driver + U1 to U2 internal link
 echo ============================================================
-"%GCC%" -std=c99 -Wall -Wextra -O1 %INC% -o "%ROOT%\test\uart_test.exe" "%ROOT%\test\uart_test.c" "%ROOT%\U1\Core\Src\uart_cfg.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%ROOT%\U1\Core\Src\protocol_frame.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 %INC% -o "%ROOT%\test\uart_test.exe" "%ROOT%\test\uart_test.c" "%ROOT%\U1\Core\Src\uart_cfg.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\meas_pack.c" "%ROOT%\U1\Core\Src\pulse_cap.c" "%ROOT%\U1\Core\Src\pulse_pack.c"
 if errorlevel 1 goto :uart_build_fail
 "%ROOT%\test\uart_test.exe"
 if errorlevel 1 goto :uart_fail
 echo [PASS] uart_test
-goto :py
+goto :rep
 :uart_build_fail
 echo [FAIL] uart_test compile error
 set FAILED=1
-goto :py
+goto :rep
 :uart_fail
 echo [FAIL] uart_test
+set FAILED=1
+
+:rep
+echo.
+echo ============================================================
+echo  5/8  TIM pulse capture (edge timestamps to period/duty)
+echo ============================================================
+"%GCC%" -std=c99 -Wall -Wextra -O1 %INC% -o "%ROOT%\test\pulse_test.exe" "%ROOT%\test\pulse_test.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c"
+if errorlevel 1 goto :rep_build_fail
+"%ROOT%\test\pulse_test.exe"
+if errorlevel 1 goto :rep_fail
+echo [PASS] pulse_test
+goto :py
+:rep_build_fail
+echo [FAIL] pulse_test compile error
+set FAILED=1
+goto :py
+:rep_fail
+echo [FAIL] pulse_test
 set FAILED=1
 
 :py
@@ -150,7 +130,7 @@ echo.
 echo ============================================================
 echo  7/8  Duplicated copies in sync (U1 vs U2)
 echo ============================================================
-rem  uart_port / uart_link / protocol_frame exist once per board (in each project folder);
+rem  the shared modules exist once per board (uart_port/uart_link/measure/meas_pack/pulse_*) (in each project folder);
 rem  the two copies must stay byte-identical, or the link behaviour drifts silently.
 rem  If the copies ever must differ on purpose, delete this stage (or make it a WARN).
 set DUPFAIL=0
@@ -160,8 +140,17 @@ call :dupcmp uart_link.c
 call :dupcmp uart_link.h
 call :dupcmp protocol_frame.c
 call :dupcmp protocol_frame.h
+call :dupcmp measure.c
+call :dupcmp measure.h
+call :dupcmp meas_pack.c
+call :dupcmp meas_pack.h
+call :dupcmp pulse_cap.c
+call :dupcmp pulse_cap.h
+call :dupcmp pulse_pack.c
+call :dupcmp pulse_pack.h
+call :dupcmp jig_mode.h
 if "%DUPFAIL%"=="1" goto :dup_fail
-echo [PASS] 6 duplicated files are identical
+echo [PASS] 15 duplicated files are identical
 goto :build
 :dup_fail
 echo [FAIL] U1 and U2 copies differ -- sync them before flashing

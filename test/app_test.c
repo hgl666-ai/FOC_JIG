@@ -2,12 +2,12 @@
  * PC ↔ 治具 U1 全链路宿主仿真测试
  *
  * 直接把固件的 app.c / fw_upload.c / app_frame.c / protocol_frame.c /
- * gd25q128.c / isp_programmer.c 真源码编译进来, 宿主侧提供:
+ * gd25q128.c / swd_programmer.c 等真源码编译进来, 宿主侧提供:
  *   - GD25Q128 SPI Flash 芯片仿真 (状态寄存器/WEL/扇区擦除/跨页编程)
- *   - STM32 系统 bootloader 仿真 (被烧板)
+ *   - 被烧板仿真: STM32F405 Flash + 按 ADIv5 解码的 SWD 线级目标模型 (test/swdsim/)
  *   - USB CDC 收发替身 (捕获 U1 发出的帧 / 注入 PC 发来的帧)
  * 从而在无硬件条件下验证整条链路:
- *   PC 帧 → app 分发 → 上传状态机 → SPI Flash 驱动 → ISP → 被烧板 Flash
+ *   PC 帧 → app 分发 → 上传状态机 → SPI Flash 驱动 → SWD → 被烧板 Flash
  */
 #include <stdio.h>
 #include <string.h>
@@ -24,6 +24,12 @@
 #include "swd_phy.h"
 #include "sim_target.h"
 #include "bsp_uart.h"
+#include "measure.h"
+#include "meas_pack.h"
+#include "pulse_cap.h"
+#include "pulse_pack.h"
+#include "pulse_cap.h"
+#include "pulse_pack.h"
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
 
@@ -212,13 +218,23 @@ void BSP_DBG_SendHexByte(uint8_t b) { (void)b; }
 static USBD_CDC_HandleTypeDef g_cdc;
 USBD_HandleTypeDef hUsbDeviceFS;
 
-static uint8_t  tx_buf[64];
+static uint8_t  tx_buf[APP_FRAME_BUF_SIZE];   /* 必须装得下整帧(0x000E 应答 87B) */
 static uint16_t tx_len = 0;
 static uint32_t tx_count = 0;
+static uint32_t g_tx_oversize = 0;            /* 应答超过替身缓冲的次数(必须为 0) */
 
 uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
 {
-    if (Len <= sizeof(tx_buf)) { memcpy(tx_buf, Buf, Len); tx_len = Len; tx_count++; }
+    if (Len <= sizeof(tx_buf)) {
+        memcpy(tx_buf, Buf, Len);
+        tx_len = Len;
+        tx_count++;
+    } else {
+        /* 不能静默丢：否则"应答太长"会伪装成"根本没应答" */
+        printf("  !! CDC 替身缓冲太小: %u > %u\n", (unsigned)Len, (unsigned)sizeof(tx_buf));
+        g_tx_oversize++;
+        tx_len = 0;
+    }
     return USBD_OK;
 }
 void MX_USB_DEVICE_Init(void) { }
@@ -231,7 +247,7 @@ static int g_checks = 0, g_fails = 0;
 
 static void pump(int n) { for (int i = 0; i < n; i++) APP_Run(); }
 
-/* 推进主循环直到 U1 主动发出指定命令的帧 (用于 0x0112 这种"烧完才回"的 ACK) */
+/* 推进主循环直到 U1 主动发出指定命令的帧 (用于 0x0070 这种"烧完才回"的 ACK) */
 static int wait_for_cmd(uint16_t cmd, uint16_t *seq_out, uint8_t *st_out)
 {
     for (uint32_t i = 0; i < 200000u; i++) {
@@ -239,7 +255,7 @@ static int wait_for_cmd(uint16_t cmd, uint16_t *seq_out, uint8_t *st_out)
         APP_Run();
         if (tx_len > 0) {
             uint16_t c = 0, s = 0, d = 0;
-            uint8_t  dd[64];
+            uint8_t  dd[FRAME_MAX_DATA];
             if (Frame_Parse(tx_buf, tx_len, &c, &s, dd, &d) && c == cmd) {
                 if (seq_out) *seq_out = s;
                 if (st_out)  *st_out  = d ? dd[0] : 0xFFu;
@@ -265,7 +281,7 @@ static uint16_t pc_send(uint16_t cmd, uint16_t seq, const uint8_t *data, uint16_
 static void expect_ack(uint16_t cmd, uint16_t seq, const uint8_t *st, uint16_t stlen, const char *what)
 {
     uint16_t cmd_o = 0, seq_o = 0, dlen = 0;
-    uint8_t  d[64];
+    uint8_t  d[FRAME_MAX_DATA];
     int ok = (tx_len > 0) && Frame_Parse(tx_buf, tx_len, &cmd_o, &seq_o, d, &dlen);
     CHECK(ok, what);
     if (!ok) { printf("      (%s 无有效应答)\n", what); return; }
@@ -320,6 +336,8 @@ static void init_env(void)
     for (int i = 0; i < 101; i++) g_boot[i] = (uint8_t)(0x11 + i * 3);
     for (int i = 0; i < 301; i++) g_app[i]  = (uint8_t)(0xA0 + i * 7);
 
+    MEAS_Init();    /* 固件里由 main.c 调；这里补上, 0x000E 才拿得到配置指纹 */
+    MEAS_Init();    /* 固件里由 main.c 调；这里补上, 0x000E 才拿得到配置指纹 */
     APP_Init();     /* 内部会调 GD25Q 初始化等 */
     GD25Q_Init();
 }
@@ -505,7 +523,7 @@ static void t7_upload_timeout(void)
 
 static void t8_program_precheck(void)
 {
-    printf("[T8] 0x0112 前置检查\n");
+    printf("[T8] 0x0070 前置检查\n");
     init_env();
     uint16_t seq = 0x6000;
     uint8_t  ok[1] = {0x00};
@@ -661,6 +679,330 @@ static void t13_flash_offline_detected(void)
     CHECK(fl.wel_violations == 0u, "无 WEL 违规");
 }
 
+/*==============================================================================
+ * T14: 0x000E 测量 (mode=0 只读 / mode=1 触发测试)
+ *----------------------------------------------------------------------------
+ * 本测试环境没有 U2（HAL_UART_Transmit_IT 永不完成），所以走的是
+ * "对侧无应答"路径：应答里应带 MEAS_CC_F_NO_PEER、对侧脉冲段为"无数据"，
+ * 但结论仍是 OK（MEAS_CC_REQUIRED=0 / PULSE_JUDGE_ENABLE=0，bring-up 期
+ * 不因为 U2 缺席或没信号就判失败）。
+ *============================================================================*/
+static void pump_meas(int n)
+{
+    for (int i = 0; i < n; i++) {
+        MEAS_Poll();          /* 固件里 main.c 就是这么调的 */
+        APP_Run();
+    }
+}
+
+/* ── 脉冲采集层的宿主替身 ──
+ * pulse_cfg.c 是板级的（直接读写 TIM 寄存器），宿主上没法编译，所以这里替身：
+ * 算法层 pulse_cap.c 是真的，只有"寄存器那一层"换成"窗口一开始就灌一段
+ * 20kHz/50% 的假 PWM 边沿"——等于把一个理想信号发生器接在三相上。 */
+static uint8_t g_pulse_edges_on = 1u;      /* 用例可以关掉，模拟"没信号" */
+
+void PULSE_CfgInit(void) { }
+
+void PULSE_CfgStart(uint16_t window_ms)
+{
+    uint32_t k;
+    uint32_t t;
+
+    PULSE_Start(window_ms);
+    if (g_pulse_edges_on == 0u) {
+        return;                            /* 没信号：一个边沿都不灌 */
+    }
+    /* 20kHz（周期 3600 tick = 50us）50% 占空比，灌满整个窗口 */
+    t = 0u;
+    for (k = 0u; k < 4000u; k++) {
+        PULSE_OnEdge(PULSE_PH_A, t);
+        PULSE_OnEdge(PULSE_PH_A, t + 1800u);
+        PULSE_OnEdge(PULSE_PH_B, t);
+        PULSE_OnEdge(PULSE_PH_B, t + 1800u);
+        PULSE_OnEdge(PULSE_PH_C, t);
+        PULSE_OnEdge(PULSE_PH_C, t + 1800u);
+        t += 3600u;
+    }
+}
+
+void     PULSE_CfgStop(void) { PULSE_Stop(); }
+uint8_t  PULSE_CfgPoll(void) { return PULSE_Poll(); }
+uint32_t PULSE_CfgLostEdges(void) { return 0u; }
+
+/* 等 0x000E 的应答：必须同时喂 MEAS_Poll（固件 main.c 的循环顺序就是
+ * MEAS_Poll() → APP_Run()），只用 APP_Run 的话稳定计数永远不涨 → 必然超时。 */
+static int wait_meas_ack(uint16_t expect_cmd, uint16_t *seq_out, uint8_t *st_out)
+{
+    for (uint32_t i = 0; i < 200000u; i++) {
+        tx_len = 0;
+        MEAS_Poll();
+        APP_Run();
+        if (tx_len > 0) {
+            uint16_t c = 0, s = 0, d = 0;
+            uint8_t  dd[FRAME_MAX_DATA];
+            if (Frame_Parse(tx_buf, tx_len, &c, &s, dd, &d) && c == expect_cmd) {
+                if (seq_out) *seq_out = s;
+                if (st_out)  *st_out  = d ? dd[0] : 0xFFu;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* 解析 0x000E 的 77B 应答（状态 + 快照 + 交叉校验块） */
+static int parse_meas_resp(uint8_t *status, meas_snapshot_t *snap,
+                           uint8_t *cc_flags, uint16_t *mask, meas_snapshot_t *peer)
+{
+    uint16_t cmd_o = 0, seq_o = 0, dlen = 0;
+    uint8_t  d[FRAME_MAX_DATA];
+
+    if ((tx_len == 0u) || (!Frame_Parse(tx_buf, tx_len, &cmd_o, &seq_o, d, &dlen))) {
+        return 0;
+    }
+    if (cmd_o != MGR_CMD_MEASURE || dlen != MEAS_PACK_RESP_LEN) {
+        return 0;
+    }
+    if (status) *status = d[0];
+    if (snap)   (void)MeasPack_UnpackSnapshot(&d[1], MEAS_PACK_SNAP_LEN, snap);
+    if (cc_flags || mask || peer) {
+        (void)MeasPack_UnpackCcBlock(&d[1 + MEAS_PACK_SNAP_LEN], MEAS_PACK_CC_LEN,
+                                     cc_flags, mask, peer);
+    }
+    return 1;
+}
+
+/* 解析 0x000F 的 91B 应答（状态 + 本片脉冲 45B + 对侧脉冲 45B） */
+static int parse_pulse_resp(uint8_t *status, pulse_snapshot_t *mine,
+                            pulse_snapshot_t *peer)
+{
+    uint16_t cmd_o = 0, seq_o = 0, dlen = 0;
+    uint8_t  d[FRAME_MAX_DATA];
+
+    if ((tx_len == 0u) || (!Frame_Parse(tx_buf, tx_len, &cmd_o, &seq_o, d, &dlen))) {
+        return 0;
+    }
+    if (cmd_o != MGR_CMD_PULSE || dlen != PULSE_PACK_RESP_LEN) {
+        return 0;
+    }
+    if (status) *status = d[0];
+    if ((mine != 0) && (PulsePack_Unpack(&d[1], PULSE_PACK_LEN, mine) == 0u)) {
+        return 0;
+    }
+    if ((peer != 0) && (PulsePack_Unpack(&d[1 + PULSE_PACK_LEN], PULSE_PACK_LEN, peer) == 0u)) {
+        return 0;
+    }
+    return 1;
+}
+
+static void t14_measure_cmd(void)
+{
+    uint16_t seq = 0xA000;
+    uint8_t  mode;
+    uint8_t  status = 0xFF;
+    meas_snapshot_t snap, peer;
+    uint8_t  cc = 0u;
+    uint16_t mask = 0xFFFFu;
+
+    printf("[T14] 0x000E 测量: mode=0 只读 / mode=1 测试 / 非法 mode\n");
+    init_env();
+
+    /* ── 14a: 非法 mode → ERR_PARAM ── */
+    mode = 0x02u;
+    pc_send(MGR_CMD_MEASURE, seq++, &mode, 1);
+    {
+        uint8_t e[1] = {APP_STATUS_ERR_PARAM};
+        expect_ack(MGR_CMD_MEASURE, seq - 1, e, 1, "mode=0x02 → ERR_PARAM 0x0B");
+    }
+
+    /* ── 14b: 请求没有 DATA (LEN=0) → 也按参数错误处理 ── */
+    pc_send(MGR_CMD_MEASURE, seq++, 0, 0);
+    {
+        uint8_t e[1] = {APP_STATUS_ERR_PARAM};
+        expect_ack(MGR_CMD_MEASURE, seq - 1, e, 1, "LEN=0 → ERR_PARAM");
+    }
+
+    /* ── 14c: mode=0 只读: 立刻回 77B, 不进入测试流程 ── */
+    mode = MGR_MEAS_MODE_READ;
+    pump_meas((int)MEAS_STABLE_N + 2);          /* 先让数据稳定 */
+    pc_send(MGR_CMD_MEASURE, seq++, &mode, 1);
+    CHECK(parse_meas_resp(&status, &snap, &cc, &mask, &peer) == 1,
+          "mode=0 → 77B 应答可解析");
+    CHECK(status == APP_STATUS_OK, "mode=0 命令状态 OK");
+    CHECK(snap.ch_count == (uint8_t)MEAS_CH_COUNT, "快照 ch_count = 9");
+    CHECK((snap.flags & MEAS_SNAP_F_VALID) != 0u, "快照标记有效");
+    CHECK(snap.cfg_crc == MEAS_GetCfgCrc(), "快照带上了配置指纹");
+    CHECK((cc & MEAS_CC_F_DONE) == 0u, "只读模式不该声称做过交叉校验");
+    CHECK(app_state == APP_STATE_IDLE, "只读模式不改变状态机");
+
+    /* ── 14d: mode=1 触发测试: 跑完才回 ACK, U2 不在 → NO_PEER 但不判失败 ── */
+    mode = MGR_MEAS_MODE_TEST;
+    {
+        uint8_t  raw[8 + 1];
+        uint16_t n = Frame_Build(raw, MGR_CMD_MEASURE, seq++, &mode, 1);
+        uint16_t rseq = 0;
+        uint8_t  rst = 0xFF;
+
+        tx_len = 0;
+        APP_USB_Receive(raw, n);
+        CHECK(wait_meas_ack(MGR_CMD_MEASURE, &rseq, &rst) == 1,
+              "mode=1 → 测试跑完后给出应答");
+        CHECK(rseq == (uint16_t)(seq - 1), "应答 SEQ = 受理序号");
+        CHECK(app_state == APP_STATE_IDLE, "测试结束后回到 IDLE");
+    }
+    CHECK(parse_meas_resp(&status, &snap, &cc, &mask, &peer) == 1, "测试应答可解析");
+    CHECK(status == APP_STATUS_OK, "9 路全量程内 + U2 缺席(不强制) → OK");
+    CHECK((snap.flags & MEAS_SNAP_F_ALL_OK) != 0u, "快照标记 9 路全部合格");
+    CHECK((cc & MEAS_CC_F_NO_PEER) != 0u, "标志里说明 U2 没有应答");
+    CHECK((cc & MEAS_CC_F_DONE) == 0u, "U2 不在时不算做过交叉校验");
+    CHECK(mask == 0u, "没有对侧数据时掩码为 0");
+
+    /* ── 14d-2: 0x000E 只管 ADC，应答里**不应该**再带脉冲段 ── */
+    CHECK(PULSE_PACK_RESP_LEN != MEAS_PACK_RESP_LEN, "两条命令的应答长度确实不同");
+    CHECK(MEAS_PACK_RESP_LEN == 77u, "0x000E 应答固定 77B(状态+快照+校验块)");
+
+    /* ── 14e: 测试期间其它命令回 BUSY（不变量 I3） ── */
+    {
+        uint8_t  raw[8 + 1];
+        uint16_t n = Frame_Build(raw, MGR_CMD_MEASURE, seq++, &mode, 1);
+        tx_len = 0;
+        APP_USB_Receive(raw, n);
+        APP_Run();                            /* 进入 TESTING */
+        CHECK(app_state == APP_STATE_TESTING, "mode=1 之后进入 TESTING 状态");
+
+        {
+            uint8_t  raw2[16];
+            uint16_t n2 = Frame_Build(raw2, MGR_CMD_QUERY_FLASH_VER, seq++, 0, 0);
+            uint8_t  e[1] = {APP_STATUS_BUSY};
+            tx_len = 0;
+            APP_USB_Receive(raw2, n2);
+            APP_Run();
+            expect_ack(MGR_CMD_QUERY_FLASH_VER, seq - 1, e, 1, "测试中查版本 → BUSY");
+        }
+        /* 让这次测试自己走完, 免得影响后续用例 */
+        { uint16_t rseq = 0; uint8_t rst = 0xFF;
+          CHECK(wait_meas_ack(MGR_CMD_MEASURE, &rseq, &rst) == 1, "测试仍能正常收尾"); }
+        CHECK(app_state == APP_STATE_IDLE, "收尾后回到 IDLE, 后续命令不再 BUSY");
+        pc_send(MGR_CMD_QUERY_FLASH_VER, seq++, 0, 0);
+        CHECK(tx_len > 0u, "测试结束后命令恢复正常处理");
+    }
+
+    /* ── 14f: 手动把某一路做成"贴边" → 快照里应带 sat 标记 ── */
+    mode = MGR_MODE_READ;
+    MEAS_TestInject(MEAS_CH_V5, 0u);          /* 码值 0 = 开路/短路可疑 */
+    pump_meas(2);
+    pc_send(MGR_CMD_MEASURE, seq++, &mode, 1);
+    CHECK(parse_meas_resp(&status, &snap, 0, 0, 0) == 1, "贴边用例应答可解析");
+    CHECK((snap.ch[MEAS_CH_V5].flags & MEAS_CHF_SAT) != 0u, "码值贴边 → sat 标志置位");
+    CHECK(snap.ch[MEAS_CH_V5].raw == 0u, "快照里的 raw 码值同步为 0");
+}
+
+/*==============================================================================
+ * T15: 0x000F 脉冲捕获（与 0x000E 完全独立的一条命令）
+ *----------------------------------------------------------------------------
+ * 宿主替身 PULSE_CfgStart() 会在窗口开始时灌一段 20kHz/50% 的假 PWM，
+ * 相当于接了个理想信号发生器；U2 缺席 → 对侧那段按"无数据"打包。
+ *============================================================================*/
+static void t15_pulse_cmd(void)
+{
+    uint16_t seq = 0xB000;
+    uint8_t  mode;
+    uint8_t  status = 0xFF;
+    pulse_snapshot_t pm, pp;
+    int      i;
+
+    printf("[T15] 0x000F 脉冲捕获: mode=0 只读 / mode=1 测试 / 非法 mode\n");
+    init_env();
+
+    /* ── 15a: 非法 mode → ERR_PARAM ── */
+    mode = 0x07u;
+    pc_send(MGR_CMD_PULSE, seq++, &mode, 1);
+    {
+        uint8_t e[1] = {APP_STATUS_ERR_PARAM};
+        expect_ack(MGR_CMD_PULSE, seq - 1, e, 1, "mode=0x07 → ERR_PARAM 0x0B");
+    }
+
+    /* ── 15b: LEN=0 → 也按参数错误 ── */
+    pc_send(MGR_CMD_PULSE, seq++, 0, 0);
+    {
+        uint8_t e[1] = {APP_STATUS_ERR_PARAM};
+        expect_ack(MGR_CMD_PULSE, seq - 1, e, 1, "LEN=0 → ERR_PARAM");
+    }
+
+    /* ── 15c: mode=1 触发一次捕获（200ms 窗口，跑完才回 ACK） ── */
+    mode = MGR_MODE_TEST;
+    {
+        uint8_t  raw[8 + 1];
+        uint16_t n = Frame_Build(raw, MGR_CMD_PULSE, seq++, &mode, 1);
+        uint16_t rseq = 0;
+        uint8_t  rst = 0xFF;
+
+        tx_len = 0;
+        APP_USB_Receive(raw, n);
+        APP_Run();                            /* 解析这一帧 → 进入 TESTING */
+        CHECK(app_state == APP_STATE_TESTING, "mode=1 之后进入 TESTING 状态");
+        CHECK(wait_meas_ack(MGR_CMD_PULSE, &rseq, &rst) == 1, "捕获窗口跑完后给出应答");
+        CHECK(rseq == (uint16_t)(seq - 1), "应答 SEQ = 受理序号");
+        CHECK(app_state == APP_STATE_IDLE, "结束后回到 IDLE");
+    }
+    memset(&pm, 0, sizeof(pm));
+    memset(&pp, 0, sizeof(pp));
+    CHECK(parse_pulse_resp(&status, &pm, &pp) == 1, "0x000F 应答(91B)可解析");
+    CHECK(PULSE_PACK_RESP_LEN == 91u, "应答长度 = 状态1 + 45 + 45");
+    CHECK(status == APP_STATUS_OK, "默认不判脉冲 → 结论 OK");
+    for (i = 0; i < (int)PULSE_PH_COUNT; i++) {
+        char nm[64];
+        sprintf(nm, "第 %d 相: 20kHz → 周期 50us", i);
+        CHECK(pm.ph[i].period_ns == 50000u, nm);
+        CHECK(pm.ph[i].duty_permille == 500u, "占空比 50.0%");
+        CHECK((pm.ph[i].flags & PULSE_F_VALID) != 0u, "该相标记有效");
+    }
+    CHECK(pm.window_ms == PULSE_WINDOW_MS, "带上窗口长度");
+    CHECK((pp.ph[PULSE_PH_A].flags & PULSE_F_NOSIGNAL) != 0u,
+          "U2 缺席 → 对侧那段按无数据打包");
+
+    /* ── 15d: mode=0 只读：立刻回上一批结果，不重新采 ── */
+    mode = MGR_MODE_READ;
+    {
+        uint32_t t0 = g_tick;
+        pc_send(MGR_CMD_PULSE, seq++, &mode, 1);
+        CHECK(parse_pulse_resp(&status, &pm, &pp) == 1, "只读模式应答可解析");
+        CHECK(pm.ph[PULSE_PH_A].period_ns == 50000u, "读到的是上一批结果");
+        CHECK((g_tick - t0) < 50u, "只读模式没有等 200ms 窗口");
+    }
+
+    /* ── 15e: 没有信号时（替身不灌边沿）→ NOSIGNAL，而不是垃圾数据 ── */
+    g_pulse_edges_on = 0u;
+    mode = MGR_MODE_TEST;
+    {
+        uint8_t  raw[8 + 1];
+        uint16_t n = Frame_Build(raw, MGR_CMD_PULSE, seq++, &mode, 1);
+        uint16_t rseq = 0;
+        uint8_t  rst = 0xFF;
+
+        tx_len = 0;
+        APP_USB_Receive(raw, n);
+        APP_Run();
+        CHECK(wait_meas_ack(MGR_CMD_PULSE, &rseq, &rst) == 1, "没信号时也能正常收尾");
+    }
+    memset(&pm, 0, sizeof(pm));
+    CHECK(parse_pulse_resp(&status, &pm, 0) == 1, "无信号应答可解析");
+    CHECK((pm.flags & PULSE_SNAP_F_NOSIGNAL) != 0u, "整体标记为'至少一相没信号'");
+    CHECK((pm.ph[PULSE_PH_B].flags & PULSE_F_NOSIGNAL) != 0u, "该相标记没信号");
+    CHECK(pm.ph[PULSE_PH_B].period_ns == 0u, "没信号时周期为 0（不硬算）");
+    CHECK(pm.ph[PULSE_PH_B].edges == 0u, "边沿数为 0");
+    g_pulse_edges_on = 1u;
+
+    /* ── 15f: 0x000E 与 0x000F 互不干扰（各自独立读） ── */
+    {
+        uint8_t m2 = MGR_MODE_READ;
+        pc_send(MGR_CMD_MEASURE, seq++, &m2, 1);
+        CHECK(parse_meas_resp(&status, 0, 0, 0, 0) == 1, "0x000E 仍然可用");
+        pc_send(MGR_CMD_PULSE, seq++, &m2, 1);
+        CHECK(parse_pulse_resp(&status, 0, 0) == 1, "0x000F 也仍然可用");
+    }
+}
+
 int main(void)
 {
     printf("=== FOC JIG U1 全链路宿主仿真 (PC帧→上传→SPI Flash→ISP→被烧板) ===\n\n");
@@ -675,6 +1017,9 @@ int main(void)
     t9_full_program_chain();
     t10_busy_and_target_absent();
     t13_flash_offline_detected();
+    t14_measure_cmd();
+    t15_pulse_cmd();
+    CHECK(g_tx_oversize == 0u, "没有任何应答被 CDC 替身缓冲截断");
     printf("\n=== 共 %d 项检查, 失败 %d 项 ===\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

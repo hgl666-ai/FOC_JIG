@@ -19,7 +19,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "adc.h"
-#include "measure.h"        /* 通道/扫描顺序的唯一来源（MEAS_ADC_CH_xxx / MEAS_SCAN_COUNT） */
+#include "measure.h"        /* 信号序号 / MEAS_SCAN_COUNT 的唯一来源 */
 
 /* USER CODE BEGIN 0 */
 /* ADC1 -> DMA1_Channel1 循环搬运（F1 上 ADC1 固定用 DMA1_CH1）
@@ -31,6 +31,21 @@ DMA_HandleTypeDef hdma_adc1;
 
 ADC_HandleTypeDef hadc1;
 
+/* ── 信号 → ADC 通道号（**U1 的接法**；U2 是另一套，见 U2/Core/Src/adc.c）
+ *    依据 docs/06_测量通道分压逆推.md §2 的逆推结果。
+ *    ⚠ 扫描顺序必须严格等于 measure.h 的信号序号（V24,V10,V5,V33,
+ *      PHA,PHB,PHC,CUR1,CUR2），最后一项才是 VREFINT：
+ *      顺序错了不会编译报错，但 9 路读数会整体错位（上板一眼能看出来）。 */
+#define ADCCH_V24    ADC_CHANNEL_5   /* PA5 */
+#define ADCCH_V10    ADC_CHANNEL_4   /* PA4 */
+#define ADCCH_V5     ADC_CHANNEL_0   /* PA0 */
+#define ADCCH_V33    ADC_CHANNEL_1   /* PA1 */
+#define ADCCH_PH_A   ADC_CHANNEL_8   /* PB0 */
+#define ADCCH_PH_B   ADC_CHANNEL_7   /* PA7 */
+#define ADCCH_PH_C   ADC_CHANNEL_6   /* PA6 */
+#define ADCCH_CUR1   ADC_CHANNEL_2   /* PA2 */
+#define ADCCH_CUR2   ADC_CHANNEL_3   /* PA3 */
+
 /* 扫描表：下标 = DMA 缓冲下标 = measure.h 里的 meas_id_t 顺序。
  * 采样时间：外部通道 13.5 周期(1.1us@12MHz)；引脚上有 1nF，源阻抗 ~100Ω，
  * 够用。内部基准 VREFINT 按数据手册要求必须给足采样时间（≥5.1us），
@@ -41,15 +56,15 @@ typedef struct {
 } adc_scan_item_t;
 
 static const adc_scan_item_t k_adc_scan[MEAS_SCAN_COUNT] = {
-  { MEAS_ADC_CH_V24,   ADC_SAMPLETIME_13CYCLES_5 },  /* 0: 24V   */
-  { MEAS_ADC_CH_V10,   ADC_SAMPLETIME_13CYCLES_5 },  /* 1: 10V   */
-  { MEAS_ADC_CH_V5,    ADC_SAMPLETIME_13CYCLES_5 },  /* 2: 5V    */
-  { MEAS_ADC_CH_V33,   ADC_SAMPLETIME_13CYCLES_5 },  /* 3: 3.3V  */
-  { MEAS_ADC_CH_PH_A,  ADC_SAMPLETIME_13CYCLES_5 },  /* 4: A 相  */
-  { MEAS_ADC_CH_PH_B,  ADC_SAMPLETIME_13CYCLES_5 },  /* 5: B 相  */
-  { MEAS_ADC_CH_PH_C,  ADC_SAMPLETIME_13CYCLES_5 },  /* 6: C 相  */
-  { MEAS_ADC_CH_CUR1,  ADC_SAMPLETIME_13CYCLES_5 },  /* 7: 电流1 */
-  { MEAS_ADC_CH_CUR2,  ADC_SAMPLETIME_13CYCLES_5 },  /* 8: 电流2 */
+  { ADCCH_V24,   ADC_SAMPLETIME_13CYCLES_5 },  /* 0: 24V   */
+  { ADCCH_V10,   ADC_SAMPLETIME_13CYCLES_5 },  /* 1: 10V   */
+  { ADCCH_V5,    ADC_SAMPLETIME_13CYCLES_5 },  /* 2: 5V    */
+  { ADCCH_V33,   ADC_SAMPLETIME_13CYCLES_5 },  /* 3: 3.3V  */
+  { ADCCH_PH_A,  ADC_SAMPLETIME_13CYCLES_5 },  /* 4: A 相  */
+  { ADCCH_PH_B,  ADC_SAMPLETIME_13CYCLES_5 },  /* 5: B 相  */
+  { ADCCH_PH_C,  ADC_SAMPLETIME_13CYCLES_5 },  /* 6: C 相  */
+  { ADCCH_CUR1,  ADC_SAMPLETIME_13CYCLES_5 },  /* 7: 电流1 */
+  { ADCCH_CUR2,  ADC_SAMPLETIME_13CYCLES_5 },  /* 8: 电流2 */
   { ADC_CHANNEL_VREFINT, ADC_SAMPLETIME_239CYCLES_5 } /* 9: 内部基准 */
 };
 

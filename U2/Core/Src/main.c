@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "uart_cfg.h"
 #include "u2_app.h"
+#include "measure.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -102,6 +103,8 @@ int main(void)
    * 顺序不能反: 反了的话 U1 早到的请求会被丢进空端口。 */
   UartCfg_Init();
   U2App_Init();
+  /* 采集: ADC1 10 通道扫描 + DMA 循环（通道映射是本片自己的一套） */
+  MEAS_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -111,6 +114,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    MEAS_Poll();          /* 采一轮就更新一次(非阻塞, DMA 回卷门控) */
     U2App_Run();          /* 链路轮询: 收请求 → 应答 (非阻塞) */
   }
   /* USER CODE END 3 */

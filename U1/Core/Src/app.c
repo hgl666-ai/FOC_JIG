@@ -3,13 +3,15 @@
   * @file    app.c
   * @brief   治具主控 U1 应用层 — 命令分发 / ACK / 主循环
   *
-  * 实现协议 (INFO/M1 测试治具PC端通讯协议.xlsx) 全部 6 条命令:
-  *   0x0009 固件起始帧          → fw_upload.c
-  *   0x000A 固件数据帧          → fw_upload.c
-  *   0x000B 固件结束帧          → fw_upload.c
-  *   0x000C 查询固件版本(Flash) → 本文件
-  *   0x000D 查询固件版本(FOC板) → isp_programmer.c
-  *   0x0112 烧录Flash固件到FOC板 → isp_programmer.c
+  * 实现协议 (INFO/M1 测试治具PC端通讯协议.xlsx) 全部 8 条命令:
+ *   0x0009 固件起始帧          → fw_upload.c
+ *   0x000A 固件数据帧          → fw_upload.c
+ *   0x000B 固件结束帧          → fw_upload.c
+ *   0x000C 查询固件版本(Flash) → 本文件
+ *   0x000D 查询固件版本(FOC板) → swd_programmer.c (SWD 直接读目标 Flash)
+ *   0x000E 测量 ADC (1B mode)  → measure.c / meas_pack.c
+ *   0x000F 脉冲捕获 (1B mode)  → pulse_cfg.c / pulse_cap.c / pulse_pack.c
+ *   0x0112 烧录Flash固件到FOC板 → swd_programmer.c (SWD 两线, 不用 NRST)
   * 其余命令统一回 NIY(0xFF)。
   ******************************************************************************
   */
@@ -23,6 +25,11 @@
 #include "bsp_uart.h"
 #include "uart_cfg.h"
 #include "uart_link.h"
+#include "measure.h"
+#include "meas_pack.h"
+#include "pulse_cap.h"
+#include "pulse_pack.h"
+#include "pulse_cfg.h"
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
 #include <string.h>
@@ -53,6 +60,34 @@ static uint8_t       s_u2_ver_checked;      /* 是否收到过 STATUS */
 static link_status_t s_u2_status;
 static uint8_t       s_link_rx[LINK_MAX_PAYLOAD];
 
+/*===== 0x000E 测量 (见 docs/07 §数据包与测试流程) =====*/
+#define APP_MEAS_PEER_TIMEOUT_MS  60u   /* 等 U2 快照的上限 (115200 下 55B 往返 < 15ms) */
+
+/* 测试推进阶段 */
+typedef enum {
+    APP_MEAS_ST_IDLE = 0,
+    APP_MEAS_ST_WAIT_STABLE,    /* 等 9 路连续稳定 (MEAS_STABLE_N 次) */
+    APP_MEAS_ST_WAIT_PULSE,     /* 等脉冲捕获窗口结束 */
+    APP_MEAS_ST_WAIT_PEER,      /* 已发测量快照交换请求, 等 U2 的快照 */
+    APP_MEAS_ST_WAIT_PULSE_PEER /* 已发脉冲结果交换请求, 等 U2 的结果 */
+} APP_MeasStage_t;
+
+static APP_MeasStage_t s_meas_stage;
+static uint16_t        s_meas_seq;                       /* 受理时的帧序号 */
+static uint16_t        s_test_cmd;                       /* 正在服务的命令: 0x000E / 0x000F */
+static meas_snapshot_t s_snap;                           /* 本片快照 */
+static meas_snapshot_t s_peer;                           /* U2 快照 */
+static uint8_t         s_meas_req[MEAS_PACK_SNAP_LEN];   /* 发给 U2 的 55B 请求 */
+static uint8_t         s_peer_raw[LINK_MAX_PAYLOAD];     /* U2 应答原始负载 (>=55B) */
+static uint8_t         s_meas_resp[PULSE_PACK_RESP_LEN]; /* 0x000E(77B) / 0x000F(91B) 共用应答缓冲(取较大者) */
+static pulse_snapshot_t s_pulse;                         /* 本片(输出端)脉冲结果 */
+static pulse_snapshot_t s_pulse_peer;                    /* U2(输入端)脉冲结果 */
+static uint8_t          s_pulse_peer_ok;                 /* 是否拿到 U2 的脉冲结果 */
+static uint8_t          s_pulse_diff[PULSE_PH_COUNT];    /* 两端差异标记 */
+static uint8_t          s_last_cc_flags;                 /* 最近一次交叉校验标志 */
+static uint16_t        s_last_cc_mask;                   /* 最近一次超差掩码 */
+static uint8_t         s_last_cc_peer;                   /* 最近一次是否拿到 U2 数据 */
+
 /*==============================================================================
  * 帧发送
  *============================================================================*/
@@ -69,8 +104,22 @@ static void APP_WaitTxDone(void)
 
 static void APP_SendFrame(uint16_t cmd, uint16_t seq, const uint8_t *data, uint16_t len)
 {
-    uint16_t total = Frame_Build(tx_buf, cmd, seq, data, len);
-    uint32_t tick  = HAL_GetTick();
+    uint16_t total;
+    uint32_t tick;
+    USBD_CDC_HandleTypeDef *hcdc;
+
+    /* ⚠ 必须**先等上一次发完**，再往 tx_buf 里组帧：
+     *    超过 64B 的帧（0x000E 的 77B / 0x000F 的 91B 应答）由 USB 中断继续从
+     *    tx_buf 取后续包；上一帧还在飞就覆写 → 主机会收到混叠/截断的帧。
+     *    等不到（USB 卡住）就放弃这一帧：宁可让 PC 超时重试，也不发坏帧。 */
+    APP_WaitTxDone();
+    hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
+    if ((hcdc != 0) && (hcdc->TxState != 0u)) {
+        return;
+    }
+
+    total = Frame_Build(tx_buf, cmd, seq, data, len);
+    tick  = HAL_GetTick();
 
     while (CDC_Transmit_FS(tx_buf, total) == USBD_BUSY) {
         if ((HAL_GetTick() - tick) > APP_TX_BUSY_TIMEOUT_MS) return;
@@ -88,6 +137,317 @@ void APP_SendAck(uint16_t cmd, const uint8_t *data, uint16_t len)
 void APP_SendEvent(uint16_t cmd, const uint8_t *data, uint16_t len)
 {
     APP_SendFrame(cmd, 0u, data, len);
+}
+
+/*==============================================================================
+ * 0x000E 测量
+ *----------------------------------------------------------------------------
+ * 请求 DATA = 1 字节 mode:
+ *   0x00 只读：立刻把"最近一批"数据回给 PC（bring-up 调试时一直看电压用），
+ *             不触发测试流程、不影响状态机。
+ *   0x01 测试：非阻塞跑一次完整测试（等 9 路连续稳定 → 与 U2 交叉校验 →
+ *             汇总判定），跑完才回 ACK —— 与 0x0112 的"终态回 ACK"规则一致。
+ * 应答 DATA = 77 字节（布局见 meas_pack.h）:
+ *   [0]      命令状态 (0x00 OK / 0x05 ERR_TEST / 0x0C ERR_TIMEOUT)
+ *   [1..55]  本片快照 55B
+ *   [56..76] 交叉校验块 21B (标志 + 超差掩码 + U2 的 9 路 mv)
+ *============================================================================*/
+static uint16_t APP_MeasBuildResp(uint8_t cmd_status, uint8_t cc_flags,
+                                  uint16_t mask, uint8_t with_peer)
+{
+    uint16_t n = 0u;
+    uint16_t left;
+
+    s_meas_resp[n++] = cmd_status;
+
+    left = (uint16_t)(MEAS_PACK_RESP_LEN - n);
+    if (MeasPack_Snapshot(&s_meas_resp[n], left, &s_snap) != MEAS_PACK_SNAP_LEN) {
+        return 0u;
+    }
+    n = (uint16_t)(n + MEAS_PACK_SNAP_LEN);
+
+    left = (uint16_t)(MEAS_PACK_RESP_LEN - n);
+    if (MeasPack_CcBlock(&s_meas_resp[n], left, cc_flags, mask,
+                         (with_peer != 0u) ? &s_peer : 0) != MEAS_PACK_CC_LEN) {
+        return 0u;
+    }
+    n = (uint16_t)(n + MEAS_PACK_CC_LEN);
+
+    return (n == MEAS_PACK_RESP_LEN) ? n : 0u;
+}
+
+/*==============================================================================
+ * 0x000F 脉冲捕获（与 0x000E 完全独立的一条命令）
+ *----------------------------------------------------------------------------
+ * 请求 DATA = 1 字节 mode（语义与 0x000E 一样）:
+ *   0x00 只读：立刻回"最近一个窗口"的结果，不触发捕获。
+ *   0x01 测试：开一个 200ms 捕获窗口 → 结算本片三相 → 与 U2 交换（PULSE_XCHK）
+ *             → 汇总判定，跑完才回 ACK。
+ * 应答 DATA = 91 字节:
+ *   [0]      命令状态 (0x00 OK / 0x05 ERR_TEST / 0x0B ERR_PARAM)
+ *   [1..45]  本片(三相输出端)脉冲结果 45B
+ *   [46..90] 对侧 U2(三相驱动输入端)脉冲结果 45B（拿不到则按"无数据"打包）
+ *============================================================================*/
+static uint16_t APP_PulseBuildResp(uint8_t cmd_status)
+{
+    uint16_t n = 0u;
+    uint16_t left;
+
+    s_meas_resp[n++] = cmd_status;
+
+    left = (uint16_t)(PULSE_PACK_RESP_LEN - n);
+    if (PulsePack_Pack(&s_meas_resp[n], left, &s_pulse) != PULSE_PACK_LEN) {
+        return 0u;
+    }
+    n = (uint16_t)(n + PULSE_PACK_LEN);
+
+    /* 对侧结果：拿不到就传 0（按"无数据"打包），配合 per-phase flags 区分 */
+    left = (uint16_t)(PULSE_PACK_RESP_LEN - n);
+    if (PulsePack_Pack(&s_meas_resp[n], left,
+                       (s_pulse_peer_ok != 0u) ? &s_pulse_peer : 0) != PULSE_PACK_LEN) {
+        return 0u;
+    }
+    n = (uint16_t)(n + PULSE_PACK_LEN);
+
+    return (n == PULSE_PACK_RESP_LEN) ? n : 0u;
+}
+
+/* 0x000F 的判定（默认 PULSE_JUDGE_ENABLE=0 → 只记录不判） */
+static uint8_t APP_PulseVerdict(void)
+{
+#if (PULSE_JUDGE_ENABLE != 0)
+    {
+        uint8_t pi;
+        for (pi = 0u; pi < (uint8_t)PULSE_PH_COUNT; pi++) {
+            if (s_pulse_diff[pi] != 0u) {
+                return APP_STATUS_ERR_TEST;      /* 两端对不上 */
+            }
+            if ((s_pulse.ph[pi].flags & PULSE_F_VALID) == 0u) {
+                return APP_STATUS_ERR_TEST;      /* 没测到波形 */
+            }
+        }
+    }
+#endif
+    return APP_STATUS_OK;
+}
+
+/* 判定：先看本片 9 路，再看与 U2 的一致性 */
+static uint8_t APP_MeasVerdict(uint8_t cc_flags, uint16_t mask)
+{
+    (void)cc_flags;      /* MEAS_CC_REQUIRED=0 时用不到; 形参保留以便开关切换 */
+
+    if (MEAS_AllOk() == 0u) {
+        return APP_STATUS_ERR_TEST;              /* 本片有通道不达标 */
+    }
+    if (mask != 0u) {
+        return APP_STATUS_ERR_TEST;              /* 两片读数不一致 → 治具自身可疑 */
+    }
+#if (MEAS_CC_REQUIRED != 0)
+    if ((cc_flags & MEAS_CC_F_NO_PEER) != 0u) {
+        return APP_STATUS_ERR_TEST;              /* 产线模式: U2 不在就不放行 */
+    }
+#endif
+    return APP_STATUS_OK;
+}
+
+/* 收尾：发唯一一次 ACK、清干净状态。
+ * 同一个收尾函数服务两条命令：应答内容按 s_test_cmd 走不同的打包函数。 */
+static void APP_MeasFinish(uint8_t cmd_status, uint8_t cc_flags, uint16_t mask,
+                           uint8_t with_peer)
+{
+    uint16_t n;
+
+    s_last_cc_flags = cc_flags;
+    s_last_cc_mask  = mask;
+    s_last_cc_peer  = with_peer;
+
+    if (s_test_cmd == MGR_CMD_PULSE) {
+        n = APP_PulseBuildResp(cmd_status);
+    } else {
+        n = APP_MeasBuildResp(cmd_status, cc_flags, mask, with_peer);
+    }
+
+    if (n == 0u) {                               /* 理论上不会发生: 编解码长度不符 */
+        uint8_t e = APP_STATUS_ERR_PARAM;
+        APP_SendFrame(s_test_cmd, s_meas_seq, &e, 1u);
+    } else {
+        APP_SendFrame(s_test_cmd, s_meas_seq, s_meas_resp, n);
+    }
+
+    s_meas_stage = APP_MEAS_ST_IDLE;
+    app_state    = APP_STATE_IDLE;
+    /* 测试期间 PC 若仍在发帧, 半截帧会留在解析器里 —— 和 0x0112 一样清掉 */
+    APP_Frame_Init();
+}
+
+/* 每轮主循环推进一步 (非阻塞, 与 SWDP_Step 同一个套路) */
+static void APP_MeasStep(void)
+{
+    uint8_t  st;
+    uint16_t peer_len = 0u;
+
+    switch (s_meas_stage) {
+
+    case APP_MEAS_ST_WAIT_STABLE:
+        st = MEAS_TestPoll();
+        if (st == 0u) {
+            return;                              /* 还在等数据稳定 */
+        }
+        if (st == 2u) {                          /* 超时: 数据一直不稳 */
+            MEAS_Snapshot(&s_snap);
+            APP_MeasFinish(APP_STATUS_ERR_TIMEOUT, 0u, 0u, 0u);
+            return;
+        }
+
+        MEAS_Snapshot(&s_snap);
+        if (MeasPack_Snapshot(s_meas_req, (uint16_t)sizeof(s_meas_req), &s_snap)
+                != MEAS_PACK_SNAP_LEN) {
+            APP_MeasFinish(APP_STATUS_ERR_PARAM, 0u, 0u, 0u);
+            return;
+        }
+        /* 把本片快照发给 U2, 换回它的快照 (一条链路命令完成交换+可比对) */
+        if (Link_RequestStart(&s_u2_link, LINK_CMD_MEAS_XCHK,
+                              s_meas_req, MEAS_PACK_SNAP_LEN) == 0u) {
+            APP_MeasFinish(APP_MeasVerdict(MEAS_CC_F_NO_PEER, 0u),
+                           MEAS_CC_F_NO_PEER, 0u, 0u);
+            return;
+        }
+        s_meas_stage = APP_MEAS_ST_WAIT_PEER;
+        return;
+
+    case APP_MEAS_ST_WAIT_PEER:
+        st = Link_RequestPoll(&s_u2_link, APP_MEAS_PEER_TIMEOUT_MS,
+                              s_peer_raw, &peer_len);
+        if (st == 0u) {
+            return;                              /* 还在等 U2 */
+        }
+        if ((st == 2u) || (peer_len != MEAS_PACK_SNAP_LEN) ||
+            (MeasPack_UnpackSnapshot(s_peer_raw, peer_len, &s_peer) == 0u)) {
+            APP_MeasFinish(APP_MeasVerdict(MEAS_CC_F_NO_PEER, 0u),
+                           MEAS_CC_F_NO_PEER, 0u, 0u);
+            return;
+        }
+        {
+            uint16_t mask = MEAS_Compare(&s_snap, &s_peer, 0);
+            uint8_t  cc   = (uint8_t)(MEAS_CC_F_DONE |
+                                      ((mask != 0u) ? MEAS_CC_F_MISMATCH : 0u));
+            APP_MeasFinish(APP_MeasVerdict(cc, mask), cc, mask, 1u);
+        }
+        return;
+
+    /* ── 0x000F 脉冲捕获的两段（与上面的 ADC 流程完全独立） ── */
+    case APP_MEAS_ST_WAIT_PULSE:
+        if (PULSE_CfgPoll() == 0u) {
+            return;                              /* 200ms 窗口还没到 */
+        }
+        PULSE_Snapshot(&s_pulse);
+        s_pulse_peer_ok = 0u;
+        memset(s_pulse_diff, 0, sizeof(s_pulse_diff));
+
+        /* 请求 = 本片(输出端) 45B，应答 = U2(输入端) 45B */
+        {
+            uint8_t preq[PULSE_PACK_LEN];
+            if (PulsePack_Pack(preq, (uint16_t)sizeof(preq), &s_pulse) != PULSE_PACK_LEN) {
+                APP_MeasFinish(APP_STATUS_ERR_PARAM, 0u, 0u, 0u);
+                return;
+            }
+            if (Link_RequestStart(&s_u2_link, LINK_CMD_PULSE_XCHK,
+                                  preq, PULSE_PACK_LEN) == 0u) {
+                APP_MeasFinish(APP_PulseVerdict(), 0u, 0u, 0u);
+                return;
+            }
+        }
+        s_meas_stage = APP_MEAS_ST_WAIT_PULSE_PEER;
+        return;
+
+    case APP_MEAS_ST_WAIT_PULSE_PEER:
+        st = Link_RequestPoll(&s_u2_link, APP_MEAS_PEER_TIMEOUT_MS,
+                              s_peer_raw, &peer_len);
+        if (st == 0u) {
+            return;                              /* 还在等 U2 的脉冲结果 */
+        }
+        if ((st == 1u) && (peer_len == PULSE_PACK_LEN) &&
+            (PulsePack_Unpack(s_peer_raw, peer_len, &s_pulse_peer) != 0u)) {
+            s_pulse_peer_ok = 1u;
+            (void)PulsePack_Compare(&s_pulse, &s_pulse_peer, s_pulse_diff);
+        }
+        APP_MeasFinish(APP_PulseVerdict(), 0u, 0u, 0u);
+        return;
+
+    default:
+        s_meas_stage = APP_MEAS_ST_IDLE;
+        app_state    = APP_STATE_IDLE;
+        return;
+    }
+}
+
+/* 0x000F 脉冲捕获命令入口 */
+static void APP_PulseCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
+{
+    uint8_t mode = (len >= 1u) ? data[0] : 0xFFu;
+
+    if (mode == MGR_MODE_READ) {
+        /* 只读：立刻回最近一个窗口的结果（不触发捕获，不占 200ms） */
+        uint16_t rn = APP_PulseBuildResp(APP_STATUS_OK);
+
+        if (rn == 0u) {
+            uint8_t e = APP_STATUS_ERR_PARAM;
+            APP_SendAck(cmd, &e, 1u);
+            return;
+        }
+        APP_SendAck(cmd, s_meas_resp, rn);
+        return;
+    }
+
+    if (mode == MGR_MODE_TEST) {
+        s_test_cmd   = cmd;
+        s_meas_seq   = pc_seq;
+        PULSE_CfgStart(PULSE_WINDOW_MS);
+        s_meas_stage = APP_MEAS_ST_WAIT_PULSE;
+        app_state    = APP_STATE_TESTING;
+        return;                                  /* ACK 由 APP_MeasStep 发 */
+    }
+
+    {
+        uint8_t e = APP_STATUS_ERR_PARAM;        /* mode 非法 */
+        APP_SendAck(cmd, &e, 1u);
+    }
+}
+
+/* 0x000E 命令入口 (在 APP_Dispatch 里调用) —— 只管 ADC 测量 */
+static void APP_MeasCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
+{
+    uint8_t mode = (len >= 1u) ? data[0] : 0xFFu;
+
+    if (mode == MGR_MODE_READ) {
+        /* 只读: 不碰测试流程, 立刻回"最近一批" + 最近一次交叉校验结果 */
+        uint16_t rn;
+
+        MEAS_Snapshot(&s_snap);
+        rn = APP_MeasBuildResp(APP_STATUS_OK, s_last_cc_flags, s_last_cc_mask,
+                               s_last_cc_peer);
+        if (rn == 0u) {
+            uint8_t e = APP_STATUS_ERR_PARAM;
+            APP_SendAck(cmd, &e, 1u);
+            return;
+        }
+        APP_SendAck(cmd, s_meas_resp, rn);       /* ⚠ 用实际长度, 不能写死 */
+        return;
+    }
+
+    if (mode == MGR_MODE_TEST) {
+        MEAS_TestBegin();
+        s_test_cmd   = cmd;
+        s_meas_seq   = pc_seq;
+        s_meas_stage = APP_MEAS_ST_WAIT_STABLE;
+        app_state    = APP_STATE_TESTING;
+        return;                                  /* ACK 由 APP_MeasStep 发 */
+    }
+
+    {
+        uint8_t e = APP_STATUS_ERR_PARAM;        /* mode 非法 */
+        APP_SendAck(cmd, &e, 1u);
+    }
 }
 
 /*==============================================================================
@@ -226,6 +586,16 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
         SWDP_Start();
         break;
     }
+
+    /*── 0x000E 测量 ADC (mode=0 只读 / mode=1 测试) ──*/
+    case MGR_CMD_MEASURE:
+        APP_MeasCmd(cmd, data, len);
+        break;
+
+    /*── 0x000F 脉冲捕获 (mode=0 只读 / mode=1 测试) ──*/
+    case MGR_CMD_PULSE:
+        APP_PulseCmd(cmd, data, len);
+        break;
 
     /*── 未实现命令 ──*/
     default: {
@@ -372,6 +742,23 @@ void APP_Init(void)
     s_u2_ver_checked  = 0u;
     memset(&s_u2_status, 0, sizeof(s_u2_status));
 
+    /* 测量/测试状态 */
+    s_meas_stage    = APP_MEAS_ST_IDLE;
+    s_meas_seq      = 0u;
+    s_last_cc_flags = 0u;
+    s_last_cc_mask  = 0u;
+    s_last_cc_peer  = 0u;
+    memset(&s_snap, 0, sizeof(s_snap));
+    memset(&s_peer, 0, sizeof(s_peer));
+    s_pulse_peer_ok = 0u;
+    memset(&s_pulse, 0, sizeof(s_pulse));
+    memset(&s_pulse_peer, 0, sizeof(s_pulse_peer));
+    memset(s_pulse_diff, 0, sizeof(s_pulse_diff));
+
+    /* 脉冲捕获：配好定时器（此时不采），捕获窗口由 0x000E mode=1 打开 */
+    PULSE_Init();
+    PULSE_CfgInit();
+
     app_state = APP_STATE_IDLE;
 }
 
@@ -403,6 +790,11 @@ void APP_Run(void)
 
     /* 4) 到 U2 的内部链路 (非阻塞: 每轮最多推进一步) */
     APP_LinkTask();
+
+    /* 5) 0x000E 测试推进 + 终态回 ACK (不变量 I4: 只回一次) */
+    if (app_state == APP_STATE_TESTING) {
+        APP_MeasStep();
+    }
 }
 
 /* USB CDC 收到一批字节 (中断上下文) — 只喂状态机, 不做重活 */

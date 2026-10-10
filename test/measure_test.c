@@ -14,6 +14,7 @@
 #include <stdlib.h>
 
 #include "measure.h"
+#include "meas_pack.h"
 
 #define VDDA_MV 3300.0
 
@@ -198,30 +199,44 @@ int main(void)
     /* ============ 4. 门限与稳定判据 ============ */
     printf("\n--- 4. threshold + stability ---\n");
     {
-        uint16_t ok24  = mv_to_counts(24000.0, 47.0 / 371.0);
-        uint16_t hi24  = mv_to_counts(26000.0, 47.0 / 371.0);  /* > 25000 上限 */
-
+        /* 注意：门限现在是**全量程**（用户决定"先不判"，先保证能采/能打包/能比对），
+         * 所以从 ADC 码值不可能造出"超门限"的输入（满量程就是门限上限）。
+         * 这里改为验证"判定机制本身"：稳定计数 + 掩码/汇总的联动。
+         * 收紧门限只需改 measure.c 里 k_cfg[] 的 vmin/vmax 两列。 */
         reset_all(0u);
-        MEAS_TestInject(MEAS_CH_V24, ok24);
-        for (i = 0; i < (int)MEAS_CH_COUNT; i++) {          /* 其余通道也给正常值 */
-            if (i != (int)MEAS_CH_V24) {
-                MEAS_TestInject((meas_id_t)i, 2000u);
-            }
-        }
+        inject_nominal();
         MEAS_Poll();
         check(MEAS_IsOk(MEAS_CH_V24) == 0u, "not ok after 1 poll (needs stability count)");
+
         for (i = 0; i < (int)MEAS_STABLE_N; i++) {
             MEAS_Poll();
         }
         check(MEAS_IsOk(MEAS_CH_V24) == 1u, "ok after MEAS_STABLE_N polls in range");
 
-        MEAS_TestInject(MEAS_CH_V24, hi24);
-        for (i = 0; i < 400; i++) {
-            MEAS_Poll();                                    /* 等 EMA 爬过门限 */
+        /* 触发一次测试会清零稳定计数 → 立刻回到"不合格"，
+         * 直到重新累计够 MEAS_STABLE_N 次（这就是 0x000E mode=1 的语义） */
+        MEAS_TestBegin();
+        check(MEAS_AllOk() == 0u, "test begin clears stability -> AllOk=0");
+        check(MEAS_GetFaultMask() == ((1u << MEAS_CH_COUNT) - 1u),
+              "fault mask has all 9 bits right after test begin");
+        for (i = 0; i < (int)MEAS_STABLE_N - 1; i++) {
+            MEAS_Poll();
         }
-        check(MEAS_IsOk(MEAS_CH_V24) == 0u, "26V is above 25V limit -> not ok");
-        check((MEAS_GetFaultMask() & (1u << MEAS_CH_V24)) != 0u, "fault mask bit for V24");
-        check(MEAS_AllOk() == 0u, "AllOk is false while V24 is faulted");
+        check(MEAS_TestPoll() == 0u, "test still running one poll before stable");
+        MEAS_Poll();
+        check(MEAS_TestPoll() == 1u, "test done once all channels stable");
+        check(MEAS_AllOk() == 1u, "AllOk=1 after the test completed");
+        check(MEAS_GetFaultMask() == 0u, "fault mask cleared");
+    }
+
+    /* ============ 4b. 测试超时（数据一直不稳） ============ */
+    printf("\n--- 4b. test timeout ---\n");
+    {
+        reset_all(0u);                 /* 全 0 码值：EMA 稳定后也算合格，所以只测超时口径 */
+        MEAS_TestBegin();
+        g_tick += (uint32_t)MEAS_TEST_TIMEOUT_MS + 1u;
+        check(MEAS_TestPoll() == 2u, "test reports timeout after MEAS_TEST_TIMEOUT_MS");
+        check(MEAS_TestPoll() == 2u, "timeout result stays latched (idempotent)");
     }
 
     /* ============ 5. 饱和标记 ============ */
@@ -291,7 +306,165 @@ int main(void)
         check(v.mv == 0u, "MEAS_Get out of range yields zeros");
         MEAS_Get(MEAS_CH_V5, NULL);
         check(1, "MEAS_Get(NULL) does not crash");
-        check(MEAS_CrossCheck() == MEAS_CC_DISABLED, "cross-check reports disabled (U2 not wired yet)");
+    }
+
+    /* ============ 9. 快照（0x000E 要发出去的东西） ============ */
+    printf("\n--- 9. snapshot ---\n");
+    {
+        meas_snapshot_t s;
+        uint32_t mv24;
+
+        reset_all(0u);
+        inject_nominal();
+        g_tick = 1000u;
+        MEAS_Poll();
+        for (i = 0; i < (int)MEAS_STABLE_N; i++) {
+            g_tick += 3u;
+            MEAS_Poll();
+        }
+        memset(&s, 0, sizeof(s));
+        MEAS_Snapshot(&s);
+
+        mv24 = MEAS_GetMv(MEAS_CH_V24);
+        check(s.ch_count == (uint8_t)MEAS_CH_COUNT, "snapshot ch_count = 9");
+        check((s.flags & MEAS_SNAP_F_VALID) != 0u, "snapshot marked valid");
+        check((s.flags & MEAS_SNAP_F_ALL_OK) != 0u, "snapshot marked all-ok (full-scale thresholds)");
+        check(s.round >= (uint16_t)(MEAS_STABLE_N + 1), "snapshot round counts scans");
+        check(s.dt_ms == 3u, "snapshot dt_ms = gap between rounds");
+        check(s.vdda_mv == MEAS_VDDA_MV, "snapshot carries VDDA");
+        check(s.cfg_crc == MEAS_GetCfgCrc(), "snapshot carries config fingerprint");
+        check(s.cfg_crc != 0u, "config fingerprint is non-zero");
+        check_near((long)s.ch[MEAS_CH_V24].mv, (long)mv24, 1, "ch[V24].mv matches MEAS_GetMv");
+        check(s.ch[MEAS_CH_V24].raw != 0u, "ch[V24].raw carries the raw code");
+        check((s.ch[MEAS_CH_V24].flags & MEAS_CHF_OK) != 0u, "ch[V24] flagged ok");
+        check((s.ch[MEAS_CH_CUR1].flags & MEAS_CHF_SAT) == 0u, "ch[CUR1] not flagged sat");
+        MEAS_Snapshot(NULL);
+        check(1, "MEAS_Snapshot(NULL) does not crash");
+    }
+
+    /* ============ 10. 交叉校验比对 + 容差 ============ */
+    printf("\n--- 10. cross-check compare + tolerance ---\n");
+    {
+        meas_snapshot_t a, b;
+        uint8_t  mism[MEAS_CH_COUNT];
+        uint16_t mask;
+
+        reset_all(0u);
+        inject_nominal();
+        MEAS_Poll();
+        for (i = 0; i < (int)MEAS_STABLE_N; i++) {
+            MEAS_Poll();
+        }
+        MEAS_Snapshot(&a);
+        b = a;
+        mask = MEAS_Compare(&a, &b, mism);
+        check(mask == 0u, "identical snapshots -> no mismatch");
+        check(mism[MEAS_CH_V24] == 0u, "per-channel mismatch array cleared");
+
+        b.ch[MEAS_CH_V5].mv = (uint16_t)(a.ch[MEAS_CH_V5].mv + 100u);   /* 容差 200mV */
+        mask = MEAS_Compare(&a, &b, mism);
+        check(mask == 0u, "100mV on 5V rail is inside the 200mV tolerance");
+
+        b.ch[MEAS_CH_V5].mv = (uint16_t)(a.ch[MEAS_CH_V5].mv + 400u);   /* 超出容差 */
+        mask = MEAS_Compare(&a, &b, mism);
+        check((mask & (1u << MEAS_CH_V5)) != 0u, "400mV on 5V rail flagged");
+        check(mism[MEAS_CH_V5] == 1u, "per-channel array flags the offending channel");
+
+        /* 相电压容差 2000mV（PWM 斩波 + 两片采样时刻差） */
+        b = a;
+        b.ch[MEAS_CH_PH_A].mv = (uint16_t)(a.ch[MEAS_CH_PH_A].mv + 1500u);
+        check(MEAS_Compare(&a, &b, NULL) == 0u, "1500mV on a phase channel is inside tolerance");
+        b.ch[MEAS_CH_PH_A].mv = (uint16_t)(a.ch[MEAS_CH_PH_A].mv + 2500u);
+        check((MEAS_Compare(&a, &b, NULL) & (1u << MEAS_CH_PH_A)) != 0u, "2500mV on a phase flagged");
+
+        /* 两边方向相反也要算对（不能只看有符号差值） */
+        b = a;
+        b.ch[MEAS_CH_CUR1].mv = (uint16_t)((a.ch[MEAS_CH_CUR1].mv > 500u)
+                                           ? (a.ch[MEAS_CH_CUR1].mv - 500u) : 0u);
+        check((MEAS_Compare(&a, &b, NULL) & (1u << MEAS_CH_CUR1)) != 0u,
+              "lower peer reading also flagged");
+
+        /* 通道数不对 -> 全 1 掩码（调用方据此报异常，而不是当成"一致"） */
+        b = a;
+        b.ch_count = 3u;
+        check(MEAS_Compare(&a, &b, NULL) == (uint16_t)((1u << MEAS_CH_COUNT) - 1u),
+              "short peer snapshot -> all channels flagged");
+        check(MEAS_Compare(NULL, &a, NULL) == 0u, "NULL snapshots are handled");
+    }
+
+    /* ============ 11. 数据包编解码（0x000E 应答布局） ============ */
+    printf("\n--- 11. meas_pack wire format ---\n");
+    {
+        meas_snapshot_t s, back;
+        uint8_t  buf[MEAS_PACK_RESP_LEN];
+        uint16_t n;
+        uint8_t  cc_flags = 0u;
+        uint16_t mask = 0u;
+
+        check(MEAS_PACK_SNAP_LEN == 55u, "snapshot layout is 55B");
+        check(MEAS_PACK_CC_LEN == 21u, "cross-check block is 21B");
+        check(MEAS_PACK_RESP_LEN == 77u, "0x000E response is 77B");
+        check(MEAS_PACK_SNAP_LEN <= 64u, "snapshot fits LINK_MAX_PAYLOAD (64)");
+        check(MEAS_PACK_RESP_LEN <= 256u, "response fits FRAME_MAX_DATA (256)");
+
+        reset_all(0u);
+        inject_nominal();
+        MEAS_Poll();
+        MEAS_Snapshot(&s);
+
+        n = MeasPack_Snapshot(buf, sizeof(buf), &s);
+        check(n == MEAS_PACK_SNAP_LEN, "MeasPack_Snapshot returns 55");
+        check(buf[0] == s.flags, "byte0 = flags");
+        check(buf[1] == (uint8_t)MEAS_CH_COUNT, "byte1 = ch_count");
+        check(buf[2] == (uint8_t)(s.round >> 8), "round is big-endian");
+        check(buf[8] == (uint8_t)(s.cfg_crc >> 8), "cfg_crc sits at [8..9]");
+        check(buf[10] == (uint8_t)(s.ch[0].raw >> 8), "channel 0 raw starts at [10]");
+        check(buf[14] == (uint8_t)s.ch[0].flags, "channel 0 flags at [14] (5B stride)");
+        check(buf[10 + 5 * (MEAS_CH_COUNT - 1) + 4] == s.ch[MEAS_CH_COUNT - 1].flags,
+              "last channel record ends at byte 54");
+
+        memset(&back, 0, sizeof(back));
+        check(MeasPack_UnpackSnapshot(buf, n, &back) == 1u, "unpack succeeds");
+        check(back.round == s.round && back.dt_ms == s.dt_ms &&
+              back.vdda_mv == s.vdda_mv && back.cfg_crc == s.cfg_crc,
+              "scalar fields round-trip");
+        {
+            /* 逐字段比（不能 memcmp 整个结构体：内存里有对齐填充字节） */
+            int same = 1;
+            for (i = 0; i < (int)MEAS_CH_COUNT; i++) {
+                if ((back.ch[i].raw   != s.ch[i].raw) ||
+                    (back.ch[i].mv    != s.ch[i].mv)  ||
+                    (back.ch[i].flags != s.ch[i].flags)) {
+                    same = 0;
+                }
+            }
+            check(same == 1, "all 9 channel records round-trip");
+        }
+
+        /* 交叉校验块 */
+        n = MeasPack_CcBlock(buf, sizeof(buf), MEAS_CC_F_DONE | MEAS_CC_F_MISMATCH,
+                             0x0121u, &s);
+        check(n == MEAS_PACK_CC_LEN, "MeasPack_CcBlock returns 21");
+        check(buf[0] == (MEAS_CC_F_DONE | MEAS_CC_F_MISMATCH), "cc flags at [0]");
+        check(buf[1] == 0x01u && buf[2] == 0x21u, "mask big-endian at [1..2]");
+        check(buf[3] == (uint8_t)(s.ch[0].mv >> 8), "peer mv[0] starts at [3]");
+        memset(&back, 0, sizeof(back));
+        check(MeasPack_UnpackCcBlock(buf, n, &cc_flags, &mask, &back) == 1u, "cc unpack succeeds");
+        check(cc_flags == (MEAS_CC_F_DONE | MEAS_CC_F_MISMATCH) && mask == 0x0121u,
+              "cc flags/mask round-trip");
+        check(back.ch[MEAS_CH_CUR2].mv == s.ch[MEAS_CH_CUR2].mv,
+              "all 9 peer mv values round-trip");
+
+        /* 边界与非法参数 */
+        check(MeasPack_Snapshot(buf, 10u, &s) == 0u, "snapshot: buffer too small refused");
+        check(MeasPack_Snapshot(NULL, sizeof(buf), &s) == 0u, "snapshot: NULL refused");
+        check(MeasPack_Snapshot(buf, sizeof(buf), NULL) == 0u, "snapshot: NULL src refused");
+        check(MeasPack_UnpackSnapshot(buf, 10u, &back) == 0u, "unpack: short input refused");
+        check(MeasPack_UnpackSnapshot(NULL, sizeof(buf), &back) == 0u, "unpack: NULL refused");
+        check(MeasPack_CcBlock(buf, 4u, 0u, 0u, &s) == 0u, "cc block: buffer too small refused");
+        check(MeasPack_UnpackCcBlock(buf, 4u, NULL, NULL, NULL) == 0u, "cc unpack: short refused");
+        check(MeasPack_CcBlock(buf, sizeof(buf), MEAS_CC_F_NO_PEER, 0u, NULL) == MEAS_PACK_CC_LEN,
+              "cc block with NULL peer still encodes (mv = 0)");
     }
 
     printf("\n============================================================\n");

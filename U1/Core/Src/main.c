@@ -105,7 +105,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   /* 板上 SPI Flash (GD25Q128) — 显式把 PB12 从 AF_PP 改回推挽输出作软件 CS */
   GD25Q_Init();
-  /* 应用层: 帧状态机 / 上传状态机 / ISP 串口 / 烧录引脚 */
+  /* 应用层: 帧状态机 / 上传状态机 / 串口链路 / SWD 烧录 / 测量与脉冲 */
   APP_Init();
   /* 测量功能: ADC1 校准 + DMA 循环扫描（9 路模拟量 + 内部基准） */
   MEAS_Init();

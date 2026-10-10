@@ -35,7 +35,8 @@ extern "C" {
 extern ADC_HandleTypeDef hadc1;
 
 /* USER CODE BEGIN Private defines */
-
+/* ADC1 用 DMA1_Channel1 循环搬运扫描结果（见 adc.c，与 U1 一致） */
+extern DMA_HandleTypeDef hdma_adc1;
 /* USER CODE END Private defines */
 
 void MX_ADC1_Init(void);

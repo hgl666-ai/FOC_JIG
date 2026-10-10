@@ -18,7 +18,16 @@
 #define MGR_CMD_FW_END          0x000Bu   /* 固件 结束帧       (PC→治具, LEN=0)  */
 #define MGR_CMD_QUERY_FLASH_VER 0x000Cu   /* 查询固件版本(Flash中) (LEN=0)       */
 #define MGR_CMD_QUERY_FOC_VER   0x000Du   /* 查询固件版本(FOC板中) (LEN=0)       */
+#define MGR_CMD_MEASURE         0x000Eu   /* 测量 ADC:   请求 1B mode, 应答 77B (meas_pack.h) */
+#define MGR_CMD_PULSE           0x000Fu   /* 脉冲捕获:   请求 1B mode, 应答 91B (pulse_pack.h) */
 #define MGR_CMD_PROGRAM         0x0112u   /* 烧录Flash固件到FOC板  (LEN=0)       */
+
+/* 0x000E / 0x000F 请求里共用的 mode 字节（两条命令语义一致，各自独立） */
+#define MGR_MODE_READ           0x00u   /* 只读最近一批结果, 不触发测量(调试用) */
+#define MGR_MODE_TEST           0x01u
+/* 兼容旧写法（0x000E 早期版本用的名字） */
+#define MGR_MEAS_MODE_READ      MGR_MODE_READ
+#define MGR_MEAS_MODE_TEST      MGR_MODE_TEST   /* 触发一次测量: 跑完判定才回 ACK       */
 
 /*==============================================================================
  * 二、通用状态码
@@ -27,7 +36,7 @@
 #define APP_STATUS_BUSY             0x01u   /* 系统忙 (非 IDLE 收到命令)      */
 #define APP_STATUS_ERR_SIZE         0x02u   /* 文件大小异常                  */
 #define APP_STATUS_ERR_FLASH        0x03u   /* SPI Flash 读写失败            */
-#define APP_STATUS_ERR_PROG         0x04u   /* FOC 板 ISP 烧录失败           */
+#define APP_STATUS_ERR_PROG         0x04u   /* FOC 板烧录失败 (SWD)           */
 #define APP_STATUS_ERR_TEST         0x05u   /* 治具测试失败                  */
 #define APP_STATUS_ERR_NO_FW        0x06u   /* 固件不存在 (大小为0或越界)     */
 #define APP_STATUS_ERR_INCOMPLETE   0x07u   /* 固件不完整 (完整标志缺失)      */

@@ -36,8 +36,9 @@
  *============================================================================*/
 #define LINK_CMD_PING       0x0100u   /* 回环自检: U2 把 payload 原样回显        */
 #define LINK_CMD_STATUS     0x0101u   /* U2 状态: 版本 / 存活计数 / 自身串口统计  */
-#define LINK_CMD_MEAS_GET   0x0102u   /* [③ 预留] 读 U2 的 9 路测量值             */
-#define LINK_CMD_MEAS_XCHK  0x0103u   /* [③ 预留] 送 U1 的测量值给 U2 交叉校验     */
+#define LINK_CMD_MEAS_GET   0x0102u   /* 未使用（XCHK 已经覆盖"取 U2 数据"的需求）*/
+#define LINK_CMD_MEAS_XCHK  0x0103u   /* U1↔U2 交换 55B 测量快照（比对由 U1 做）  */
+#define LINK_CMD_PULSE_XCHK 0x0104u   /* U1↔U2 交换 45B 脉冲结果（输入/输出端对比）*/
 
 /* U2 固件版本 (LINK_CMD_STATUS 上报) */
 #define LINK_U2_VER_MAJOR   0x00u
@@ -53,7 +54,7 @@
  *       必须把这个值 +1**（两份副本一起改），两片一起重编重烧。
  * 从机在 STATUS 里回这个值，主机比对；不一致时 U1 会把 APP_U2VerOk() 置 0。
  *============================================================================*/
-#define LINK_CODE_VER     0x0101u   /* v1.1: STATUS 增加代码版本字段([2..3]) */
+#define LINK_CODE_VER     0x0102u   /* v1.2: 新增 PULSE_XCHK(0x0104) 交换脉冲结果 */
 
 /* 链路级状态码: 放在应答数据第 1 字节 (PING 除外, 它的数据区是回环内容) */
 #define LINK_ST_OK          0x00u   /* 正常      */

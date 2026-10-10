@@ -459,6 +459,31 @@
               <FilePath>../Core/Src/u2_app.c</FilePath>
             </File>
             <File>
+              <FileName>measure.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/measure.c</FilePath>
+            </File>
+            <File>
+              <FileName>meas_pack.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/meas_pack.c</FilePath>
+            </File>
+            <File>
+              <FileName>pulse_cap.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/pulse_cap.c</FilePath>
+            </File>
+            <File>
+              <FileName>pulse_pack.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/pulse_pack.c</FilePath>
+            </File>
+            <File>
+              <FileName>pulse_cfg.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/pulse_cfg.c</FilePath>
+            </File>
+            <File>
               <FileName>protocol_frame.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/protocol_frame.c</FilePath>

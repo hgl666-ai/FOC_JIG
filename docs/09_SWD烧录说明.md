@@ -1,9 +1,9 @@
 # 09 FOC 固件烧录（SWD 两线）说明
 
 > 状态：**已实现，并通过验证 + 已按权威资料逐条核对**（第 15 轮）
->  - 宿主全链路 170 项（含 9 项 SWD 专项）、SWD 引擎 spike 86 项（含 27 项规范自检）
+>  - 全量回归的断言数字只在 `docs/02` §1 记账（本文件不复述，免得改一处忘一处）
 >  - Keil 0 Error / 0 Warning
-> 取代旧的 UART ISP 方案（`isp_programmer.c` 已退出固件构建，源码与测试保留作回退）
+> 取代旧的 UART ISP 方案（ISP 源码与测试已**整体删除**，退役说明见 `docs/02` 附录 A）
 >
 > 复核资料：ADIv5 规范 `IHI0031H`、F4 参考手册 `rm0090`、
 > Cortex-M4 编程手册 `PM0214`、Arm 开源实现 `DAPLink`（含 STM32F103 平台移植）。
@@ -17,7 +17,7 @@
 | 目标 | STM32F405RGT6，SW-DP IDCODE `0x2BA01477`，DEV_ID `0x413` |
 | 入口 | 协议 `0x0112`（不变），走治具 U1 内部状态机 |
 | 固件来源 | 治具板载 GD25Q128 的两个槽（Slot0=Bootloader / Slot1=App），协议 `0x0009/0x000A/0x000B` 上传 |
-| 引脚 | **占位：SWCLK=PB10 / SWDIO=PB11**（`swd_config.h`），等真实板子定下来再改 |
+| 引脚 | **占位：SWCLK=PB1 / SWDIO=PB3**（`swd_config.h`），上板接线核对后把 `SWD_PINS_CONFIRMED` 改 1 |
 | 时钟 | `SWD_DELAY_LOOPS=8` ≈ 1 MHz（上板确认稳定后可以降到 4/2/0 提频） |
 
 **为什么不用 NRST**：目标只要没把 PA13/PA14 当普通 IO 用、也没进 STOP/Standby，
@@ -78,30 +78,31 @@
 
 ## 2. 引脚怎么填（重要）
 
-`U1/Core/Inc/swd_config.h` 是**唯一**要改的文件：
+`U1/Core/Inc/swd_config.h` 是**唯一**要改的文件，当前值：
 
 ```c
-#define SWD_CLK_PORT   GPIOB          /* ← 改成真实引脚 */
-#define SWD_CLK_PIN    GPIO_PIN_10
-#define SWD_CLK_PINNUM 10u
-#define SWD_DIO_PORT   GPIOB
-#define SWD_DIO_PIN    GPIO_PIN_11
-#define SWD_DIO_PINNUM 11u
+#define SWD_CLK_PORT   GPIOB           /* 现在：PB1 */
+#define SWD_CLK_PIN    GPIO_PIN_1
+#define SWD_CLK_PINNUM 1u
+#define SWD_DIO_PORT   GPIOB           /* 现在：PB3 */
+#define SWD_DIO_PIN    GPIO_PIN_3
+#define SWD_DIO_PINNUM 3u
 #ifndef SWD_PINS_CONFIRMED
-#define SWD_PINS_CONFIRMED 0          /* ← 接线确认后改 1 */
+#define SWD_PINS_CONFIRMED 0           /* ← 接线核对后改 1 */
 #endif
 ```
 
-占位值的选择依据（现有原理图上"已经引出来"的脚）：
-U1 空闲且已引出的脚只有 **PB10/PB11**（USART3 → 2 脚排针）与 **PA9/PA10**（USART1 → 4 脚排针）；
-**PA13/PA14 是 U1 自己的 SWD，绝不能占用**（一旦当普通 IO 用，U1 自己就再也接不上调试器）。
-选 PB10/PB11 的理由：同属 GPIOB、位操作与方向切换都在 CRH，代码最省事，
-而且这两脚原本就是准备接被烧板的。
+**引脚演进**：最早占位用的是 PB10/PB11，但 USART3 后来改成了 U1↔U2 的内部链路
+（见 `docs/10_UART四路驱动设计.md`），这两脚必须让出来。现在的 PB1/PB3 不再和任何串口冲突：
 
-> ⚠ 副作用：`MX_USART3_UART_Init()` 仍然把 PB10/PB11 配成串口复用；`SWDP_Init()`
-> 在 `APP_Init()` 里随后把它们抢回来当 GPIO（引脚模式一改，串口输出就与引脚断开）。
-> 真实引脚确定后，如果不再需要 USART3，建议把它从 CubeMX 里去掉，避免混淆。
+| 脚 | 为什么能用 | 注意 |
+|---|---|---|
+| **PB1** | F103C8 的 ADC_IN9；本工程 ADC 只用到 IN0..IN8（PA0..PA7 + PB0） | 空闲 |
+| **PB3** | 复位后是 JTDO，`stm32f1xx_hal_msp.c` 里的 `__HAL_AFIO_REMAP_SWJ_NOJTAG()` 已把它释放成 GPIO | **U1 自己的 SWD（PA13/PA14）不受影响** |
 
+> `PA13/PA14` 是 U1 自己的下载调试口，**绝不能**当普通 IO 占用（一占就再也连不上调试器）。
+> `SWD_PINS_CONFIRMED` 目前仍是 `0`：引脚属**占位值**，上板接线核对后再改 `1`。
+> 不用 NRST（`SWD_USE_NRST 0`）：烧完靠目标的 `AIRCR.SYSRESETREQ` 复位运行。
 ## 3. 烧录流程（非阻塞状态机）
 
 ```
@@ -184,10 +185,10 @@ SWDP_Start()
 | `0x000D` 查版本 | 要目标配合（UART 协议未知，一直没做） | **直接读目标 Flash**（偏移待 FOC 工程确认） |
 | ROM 占用 | 约 5.5 KB | 约 4.2 KB（且更少的外设依赖） |
 
-> `isp_programmer.c` / `isp_config.h` / `bsp_uart.c` 里的 ISP 串口收发**保留在源码树里**
-> （`test/isp_test.c` 的 189 项断言仍然全过），但**不再进 Keil 工程**：
-> 既不占 ROM，又保留了"万一要回退"的可能。
-
+> ISP 时代的源码（`isp_programmer.c` / `isp_config.h` / `bsp_uart.c` 里的 ISP 收发段）
+> 与测试（`test/isp_test.c`）已**整体删除**。删除理由：ISP 走 USART3，
+> 而 USART3 现在是 U1↔U2 的内部链路（`docs/10_UART四路驱动设计.md`）。
+> 实现要点与历史留在 `docs/02` 附录 A 备查。
 ## 7. 明确没做（需要时再补）
 
 1. **RDP 读保护**：量产板若开了 RDP1，AP 访问会被拒绝，需要先整片擦除。

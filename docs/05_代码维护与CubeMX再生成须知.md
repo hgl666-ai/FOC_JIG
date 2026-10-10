@@ -62,12 +62,13 @@
 >   （SWJ_CFG = JTAG-DP 关 / SW-DP 开）已经把它释放成 GPIO，**SWD 下载调试口 PA13/PA14 不受影响**；
 > - 不用 NRST（`SWD_USE_NRST 0`）：目标板复位走 SWD 的 AIRCR.SYSRESETREQ。
 
-现在 U1 的 USART3 是**到 U2 的内部链路**（见 `docs/10_UART四路驱动设计.md`），所以：
+现在 U1 的 USART3 是**到 U2 的内部链路**（见 `docs/10_UART四路驱动设计.md`）。
 
-- 老方案里"ISP 走 USART3 直连被测板"与现在的链路**引脚冲突**，
-  因此 `bsp_uart.c` 的 ISP 部分默认**不编进固件**（`BSP_ISP_UART_ENABLE = 0`），
-  调试打印也默认关（`BSP_DBG_ENABLE = 0`，否则会把调试字符灌到 DUT 串口线上）。
-  真要用 ISP，必须先把链路挪到别的 USART 或放弃链路。
+- **ISP 方案已整体退役**（源码与测试全部删除，留存说明见 `docs/02` 附录 A）：
+  老方案是"ISP 走 USART3 直连被测板"，和现在这条链路**抢同一个串口**，
+  所以 `bsp_uart.c` 现在只做**调试打印**（`BSP_DBG_Send`），开关 `BSP_DBG_ENABLE`
+  由 `jig_mode.h` 按模式派生，U1 工程另外用 Keil Define `JIG_HAS_DEBUG_UART=1` 打开。
+  调试打印和 DUT 串口**二选一**：同时开会把调试字符灌到 DUT 串口线上。
 - `swd_config.h` 里 `SWD_PINS_CONFIRMED 0` 仍表示"引脚是占位、等真实板确认"。
 
 ---
@@ -108,12 +109,14 @@ U1 与 U2 是同一颗 MCU（STM32F103C8T6），协议帧 / 串口驱动 / 链�
 | `Core/Src/protocol_frame.c` + `Core/Inc/protocol_frame.h` | A5 5B 帧 + CRC16-MODBUS |
 | `Core/Src/uart_port.c` + `Core/Inc/uart_port.h` | 串口端口驱动（环形缓冲 + 中断收发） |
 | `Core/Src/uart_link.c` + `Core/Inc/uart_link.h` | U1↔U2 链路协议（请求/应答 + STATUS 编解码） |
+| `Core/Src/measure.c` + `Core/Inc/measure.h` | 测量：信号表/换算/EMA/判定/快照/交叉校验 |
+| `Core/Src/meas_pack.c` + `Core/Inc/meas_pack.h` | 测量数据的定长线格式（55B 快照 / 21B 校验块 / 77B 应答） |
 
 两个工程的 `uvprojx` 就是普通的 `../Core/Src/xxx.c`，**没有任何跨工程路径**，不需要额外的 Include 路径。
 
 ⚠ **代价是"改一边忘一边"**，所以有两条机械保护（别删）：
 
-1. **回归脚本第 7 阶段**（`test\run_all_tests.cmd`）用 `fc /b` 逐字节比对这 6 个文件对，
+1. **回归脚本第 7 阶段**（`test\run_all_tests.cmd`）用 `fc /b` 逐字节比对这 **15 个文件对**，
    只要有一对不一致就报 `[FAIL]` 并让整个回归失败。
    确实需要两份不同时，把这一阶段删掉即可（脚本里有注释说明）。
 2. `uart_link.h` 里的 `LINK_CODE_VER`：改变了链路的对外行为（帧格式 / 字段布局 / 时序）就 +1。
@@ -124,6 +127,63 @@ U1 与 U2 是同一颗 MCU（STM32F103C8T6），协议帧 / 串口驱动 / 链�
 
 ---
 
+## 2.5 `tim.c` 的定时器被改成了**输入捕获**（再生成会退回去）
+
+| 片 | 定时器/通道 | 引脚 | 用途 |
+|---|---|---|---|
+| U1 | TIM4 CH1/CH2/CH3 | PB6 / PB7 / PB8 | **输入捕获** ← MA0_OUT/MB0_OUT/MC0_OUT（电机输出端，经 3kΩ） |
+| U2 | TIM3 CH1/CH2 | PB4 / PB5 | **输入捕获** ← MB_IN / MA_IN（主控驱动信号） |
+| U2 | TIM1 CH1 | PA8 | **输入捕获** ← MC_IN |
+
+再生成后必须手工恢复（原因见 `docs/12` §2）：
+
+1. `MX_TIM4_Init()`：`HAL_TIM_PWM_Init` → `HAL_TIM_IC_Init`，三个通道改用
+   `HAL_TIM_IC_ConfigChannel`（`ICPolarity=RISING`、`ICSelection=DIRECTTI`、
+   `ICPrescaler=DIV1`、`ICFilter=0`）。U2 的 `MX_TIM3_Init`（CH1/CH2）与
+   `MX_TIM1_Init`（CH1）同理。
+2. `HAL_TIM_MspPostInit()`：上面这几个脚的 `GPIO_MODE_AF_PP` 全部改成
+   `GPIO_MODE_INPUT + GPIO_PULLDOWN`；**本工程用不到的定时器引脚**（U1 的 PA8/PB4/PB5，
+   U2 的 PA15/PB3/PB1/PB6/PB7/PB8）也要配成输入。
+   ⚠ 原来是推挽输出且输出常低：U1 的 PB6/7/8 会经 3kΩ **把被测板的三相输出节点拉低**，
+   连相电压的 ADC 读数都会跟着偏低，还等于跟被测板对打。
+3. 捕获中断入口写在**手写文件** `pulse_cfg.c` 里（U1 的 `TIM4_IRQHandler`；U2 还要
+   `TIM3_IRQHandler` + `TIM1_CC_IRQHandler` + `TIM1_UP_IRQHandler`），NVIC 优先级 4；
+   再生成不会动它们，但 `stm32f1xx_it.c` 里**不要**再出现同名处理函数。
+
+> `test/pulse_test.c`（84 项）只测算法，测不到寄存器配置。定时器配错的典型现象是
+> "一直判无信号"——先查 `CCER/CCMR` 与引脚模式。
+
+---
+
+## 2.6 编译开关汇总表（统一入口 `jig_mode.h`）
+
+**生产/调试只改一个宏**（`Core/Inc/jig_mode.h` §2，两片都要改，回归会比对）：
+
+| 模式 | 含义 |
+|---|---|
+| `JIG_MODE_DEBUG`（默认） | 台架调试：判定放宽/关掉，调试打印可用，方便看清现象 |
+| `JIG_MODE_PRODUCTION` | 产线生产：判定全开（规格门限 + 交叉校验必需 + 脉冲判据） |
+
+由模式派生、也可单独覆盖的开关：
+
+| 开关 | 默认（DEBUG / PRODUCTION） | 作用 | 打开后的影响 |
+|---|---|---|---|
+| `MEAS_CC_REQUIRED` | 0 / 1 | U2 没应答是否判测试失败 | 1 = U2 不在 → `05 ERR_TEST` |
+| `PULSE_JUDGE_ENABLE` | 0 / 1 | 脉冲是否参与判定 | 1 = 两端对不上/没信号 → `05 ERR_TEST` |
+| `MEAS_THRESHOLDS_ENABLED` | 0 / 1 | 电压门限用哪套 | 0 = 全量程（先不判）；1 = 用 `measure.c` 的规格门限 |
+| `MEAS_PRINT_ENABLE` / `BSP_DBG_ENABLE` | DEBUG 且 `JIG_HAS_DEBUG_UART=1` | 调试打印（USART1） | 打开会占用 DUT 串口，二选一 |
+| `MEAS_USE_VREFINT` | 0 / 0（标定项，与模式无关） | 用 VREFINT 反算 VDDA | 需先标定 `MEAS_VREFINT_MV` |
+
+板级差异（写在**各工程的 Keil Define**里，不在 `jig_mode.h` 里改）：
+
+| Define | 谁用 | 说明 |
+|---|---|---|
+| `JIG_HAS_DEBUG_UART=1` | 只有 U1 工程 | U1 有 `bsp_uart.c`；U2 没有 → 打印恒关 |
+
+> 已删除的开关：`BSP_ISP_UART_ENABLE`、`ISP_VERIFY_ENABLED`、`ISP_CTRL_PINS_CONFIRMED`
+> （ISP 方案整体退役，见 `docs/02` 附录 A）。
+
+---
 ## 3. 为什么最危险的是 `usb.c`
 
 CubeMX 生成的 `Core/Src/usb.c` 会定义：
@@ -180,12 +240,12 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef* pcdHandle) { ... }
 5. **`Core/Src/usart.c` / `stm32f1xx_it.c`**：USART 的 NVIC 使能与中断入口（见 §2.3）。
 6. 编译确认 **0 Error / 0 Warning**，并跑一遍 `test\run_all_tests.cmd`。
 
-> 手写文件（`flash_map.h` `protocol_frame.*` `app_frame.*` `gd25q128.*` `fw_upload.*` `isp_config.h`
-> `isp_programmer.*` `bsp_uart.*` `app.*` `uart_cfg.*` `swd_*` `cortex_m.*` `stm32f4_flash.*` `measure.*`
+> 手写文件（`flash_map.h` `protocol_frame.*` `app_frame.*` `gd25q128.*` `fw_upload.*` `meas_pack.*`
+> `bsp_uart.*` `app.*` `uart_cfg.*` `uart_port.*` `uart_link.*` `jig_mode.h` `swd_*` `cortex_m.*` `stm32f4_flash.*` `measure.*` `pulse_cap.*` `pulse_pack.*`
 > 以及 `USB_DEVICE/`、`Middlewares/` 都不是 CubeMX 管理的，
 > **再生成不会动它们**。
 >
-> ⚠ `U2` 工程的 `U2.uvprojx` 同样需要它自己的三个副本（`uart_port.c` `uart_link.c` `protocol_frame.c`）+
+> ⚠ `U2` 工程的 `U2.uvprojx` 同样需要它自己的 15 个副本（`uart_port.*` `uart_link.*` `protocol_frame.*` `measure.*` `meas_pack.*` `pulse_cap.*` `pulse_pack.*` `jig_mode.h`）+
 > `uart_cfg.c` `u2_app.c`。
 
 ---
