@@ -66,11 +66,24 @@ static uint8_t       s_link_rx[LINK_MAX_PAYLOAD];
 /* 测试推进阶段 */
 typedef enum {
     APP_MEAS_ST_IDLE = 0,
+    APP_MEAS_ST_WAIT_ARM_ACK,   /* 已发 ARM(本片窗口同时已开), 等对侧确认同窗 */
     APP_MEAS_ST_WAIT_STABLE,    /* 等 9 路连续稳定 (MEAS_STABLE_N 次) */
     APP_MEAS_ST_WAIT_PULSE,     /* 等脉冲捕获窗口结束 */
     APP_MEAS_ST_WAIT_PEER,      /* 已发测量快照交换请求, 等 U2 的快照 */
     APP_MEAS_ST_WAIT_PULSE_PEER /* 已发脉冲结果交换请求, 等 U2 的结果 */
 } APP_MeasStage_t;
+
+/* ARM 同步触发 (docs/13 §5.5): 窗口长度按测试类型给 —— 电压只需要几十毫秒稳定,
+ * 脉冲要用整个捕获窗口。 */
+#define APP_ARM_WIN_MEAS_MS       20u
+#define APP_ARM_WIN_PULSE_MS      PULSE_WINDOW_MS
+#define APP_MEAS_ARM_TIMEOUT_MS   50u   /* ARM 是"收到就回"的快命令 */
+
+/* 断链恢复 (docs/13 §3.6) */
+#define APP_LINK_FAIL_LIMIT       3u      /* 连续超时到这个数就复位链路 */
+#define APP_LINK_RESET_TIMEOUT_MS 50u
+#define APP_LINK_RESET_BACKOFF_MS 5000u   /* 复位也失败 → 退避 5s 再试, 别刷屏 */
+#define APP_EV_GET_TIMEOUT_MS     50u     /* EVENT_GET 补拉的等待上限 */
 
 static APP_MeasStage_t s_meas_stage;
 static uint16_t        s_meas_seq;                       /* 受理时的帧序号 */
@@ -87,6 +100,84 @@ static uint8_t          s_pulse_diff[PULSE_PH_COUNT];    /* 两端差异标记 *
 static uint8_t          s_last_cc_flags;                 /* 最近一次交叉校验标志 */
 static uint16_t        s_last_cc_mask;                   /* 最近一次超差掩码 */
 static uint8_t         s_last_cc_peer;                   /* 最近一次是否拿到 U2 数据 */
+
+/*===== ARM 同步触发 / 断链恢复 / 事件 (docs/13) =====*/
+static uint16_t s_arm_session;          /* 每次测量 +1, 防重传把窗口重开 */
+static uint8_t  s_arm_tried;            /* 本次测量是否发过 ARM */
+static uint8_t  s_arm_ok;               /* 对侧是否确认"同一时间窗" */
+static uint8_t  s_link_fail;            /* 连续请求超时次数 */
+static uint32_t s_reset_t0;             /* 上次链路复位的时刻 */
+static uint32_t s_reset_backoff_ms;     /* 复位失败后的退避窗口 */
+static uint8_t  s_ev_fetch;             /* 有一次 EVENT_GET 补拉在进行 */
+
+/*------------------------------------------------------------------------------
+ * 几个小工具 (都在主循环上下文)
+ *----------------------------------------------------------------------------*/
+/* 对端是否声明支持某条能力 (docs/13 §7.2); 没收到过 STATUS 前一律按"不支持" */
+static uint8_t APP_U2CapsHas(uint16_t bit)
+{
+    return ((s_u2_status.caps & bit) != 0u) ? 1u : 0u;
+}
+
+/* 本片开始采集: 脉冲开捕获窗口; 电压只是清稳定计数重新累计 */
+static void APP_MeasStartLocal(uint16_t win)
+{
+    if (s_test_cmd == MGR_CMD_PULSE) {
+        PULSE_CfgStart(win);
+        s_meas_stage = APP_MEAS_ST_WAIT_PULSE;
+    } else {
+        MEAS_TestBegin();
+        s_meas_stage = APP_MEAS_ST_WAIT_STABLE;
+    }
+}
+
+/* U2 报上来的事件: 先打调试口; 将来要上报 PC 就在这里加 */
+static void APP_LogU2Event(uint8_t code, uint8_t sev, uint16_t arg0)
+{
+#if (MEAS_PRINT_ENABLE != 0)
+    BSP_DBG_Send("  [U2-EV] code=");
+    BSP_DBG_SendHexByte(code);
+    BSP_DBG_Send(" sev=");
+    BSP_DBG_SendHexByte(sev);
+    BSP_DBG_Send(" arg=");
+    BSP_DBG_SendHexByte((uint8_t)(arg0 >> 8));
+    BSP_DBG_SendHexByte((uint8_t)(arg0));
+    BSP_DBG_Send("\r\n");
+#else
+    (void)code;
+    (void)sev;
+    (void)arg0;
+#endif
+}
+
+/* mode=1 的统一入口: **先 ARM 让两端同窗**, 再开本片窗口 (docs/13 §6.2) */
+static void APP_MeasStartWithArm(uint16_t cmd, uint16_t win)
+{
+    uint8_t req[LINK_ARM_REQ_LEN];
+
+    s_test_cmd = cmd;
+    s_meas_seq = pc_seq;
+    s_arm_tried = 0u;
+    s_arm_ok    = 0u;
+    s_arm_session++;
+    if (s_arm_session == 0u) {
+        s_arm_session = 1u;
+    }
+
+    /* 对端不支持 ARM(老固件) / 链路正忙 → 退回"各自最近一次"的老流程 */
+    if ((APP_U2CapsHas(LINK_CAP_ARM) == 0u) ||
+        (Link_ArmPackReq(req, (uint16_t)sizeof(req), s_arm_session, win, 0u) != LINK_ARM_REQ_LEN) ||
+        (Link_RequestStart(&s_u2_link, LINK_CMD_ARM, req, LINK_ARM_REQ_LEN) == 0u)) {
+        APP_MeasStartLocal(win);
+        app_state = APP_STATE_TESTING;
+        return;
+    }
+
+    APP_MeasStartLocal(win);            /* 发完 ARM 立刻开本片窗口: 两端错位 < 2ms */
+    s_arm_tried  = 1u;
+    s_meas_stage = APP_MEAS_ST_WAIT_ARM_ACK;
+    app_state    = APP_STATE_TESTING;
+}
 
 /*==============================================================================
  * 帧发送
@@ -288,6 +379,23 @@ static void APP_MeasStep(void)
 
     switch (s_meas_stage) {
 
+    /* ── 等对侧确认"同一时间窗"(ARM 应答)。本片窗口在这一刻已经在跑了 ── */
+    case APP_MEAS_ST_WAIT_ARM_ACK: {
+        uint8_t  resp[LINK_MAX_PAYLOAD];
+        uint16_t rlen = 0u;
+
+        st = Link_RequestPoll(&s_u2_link, APP_MEAS_ARM_TIMEOUT_MS, resp, &rlen);
+        if (st == 0u) {
+            return;                              /* 还在等 ARM 应答 */
+        }
+        s_arm_ok = ((st == 1u) && (Link_ArmCheckResp(resp, rlen, s_arm_session) != 0u)) ? 1u : 0u;
+        /* 注意: 即使 ARM 没成功也不打断本片的采集 —— 让本片结果照样有效,
+         * 只是后面**不做交叉校验**(两端不同窗的数据比对没有意义)。 */
+        s_meas_stage = (s_test_cmd == MGR_CMD_PULSE) ? APP_MEAS_ST_WAIT_PULSE
+                                                     : APP_MEAS_ST_WAIT_STABLE;
+        return;
+    }
+
     case APP_MEAS_ST_WAIT_STABLE:
         st = MEAS_TestPoll();
         if (st == 0u) {
@@ -303,6 +411,11 @@ static void APP_MeasStep(void)
         if (MeasPack_Snapshot(s_meas_req, (uint16_t)sizeof(s_meas_req), &s_snap)
                 != MEAS_PACK_SNAP_LEN) {
             APP_MeasFinish(APP_STATUS_ERR_PARAM, 0u, 0u, 0u);
+            return;
+        }
+        /* ARM 试过但没对上窗 → 两端不是同一段时间, 交叉校验没意义 */
+        if ((s_arm_tried != 0u) && (s_arm_ok == 0u)) {
+            APP_MeasFinish(APP_MeasVerdict(MEAS_CC_F_NO_PEER, 0u), MEAS_CC_F_NO_PEER, 0u, 0u);
             return;
         }
         /* 把本片快照发给 U2, 换回它的快照 (一条链路命令完成交换+可比对) */
@@ -349,6 +462,11 @@ static void APP_MeasStep(void)
             uint8_t preq[PULSE_PACK_LEN];
             if (PulsePack_Pack(preq, (uint16_t)sizeof(preq), &s_pulse) != PULSE_PACK_LEN) {
                 APP_MeasFinish(APP_STATUS_ERR_PARAM, 0u, 0u, 0u);
+                return;
+            }
+            /* ARM 试过但没对上窗 → 两端不是同一段时间, 不做交叉校验 */
+            if ((s_arm_tried != 0u) && (s_arm_ok == 0u)) {
+                APP_MeasFinish(APP_PulseVerdict(), 0u, 0u, 0u);
                 return;
             }
             if (Link_RequestStart(&s_u2_link, LINK_CMD_PULSE_XCHK,
@@ -400,11 +518,7 @@ static void APP_PulseCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     }
 
     if (mode == MGR_MODE_TEST) {
-        s_test_cmd   = cmd;
-        s_meas_seq   = pc_seq;
-        PULSE_CfgStart(PULSE_WINDOW_MS);
-        s_meas_stage = APP_MEAS_ST_WAIT_PULSE;
-        app_state    = APP_STATE_TESTING;
+        APP_MeasStartWithArm(cmd, APP_ARM_WIN_PULSE_MS);
         return;                                  /* ACK 由 APP_MeasStep 发 */
     }
 
@@ -436,11 +550,7 @@ static void APP_MeasCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     }
 
     if (mode == MGR_MODE_TEST) {
-        MEAS_TestBegin();
-        s_test_cmd   = cmd;
-        s_meas_seq   = pc_seq;
-        s_meas_stage = APP_MEAS_ST_WAIT_STABLE;
-        app_state    = APP_STATE_TESTING;
+        APP_MeasStartWithArm(cmd, APP_ARM_WIN_MEAS_MS);
         return;                                  /* ACK 由 APP_MeasStep 发 */
     }
 
@@ -640,6 +750,32 @@ static void APP_HandlePendingFrame(void)
  *   主循环里不能有 >50ms 的阻塞——USB 侧(协议帧)和 SWD 烧录都靠这个循环推进。
  *   Start 只负责把请求塞进发送队列, Poll 每轮推进一次, 全程零阻塞。
  *============================================================================*/
+/* 连续超时到阈值 → 复位链路 (docs/13 §3.6)。
+ * 只在空闲状态下被调用；复位也失败就退避 5s，避免一直刷屏重试。 */
+static void APP_LinkRecover(void)
+{
+    uint8_t  resp[4];
+    uint16_t rlen = 0u;
+    uint32_t now;
+    uint8_t  ok;
+
+    if (s_link_fail < APP_LINK_FAIL_LIMIT) {
+        return;
+    }
+    now = HAL_GetTick();
+    if ((uint32_t)(now - s_reset_t0) < s_reset_backoff_ms) {
+        return;                                     /* 退避中 */
+    }
+
+    (void)Link_Request(&s_u2_link, LINK_CMD_RESET, 0, 0u, resp, &rlen, APP_LINK_RESET_TIMEOUT_MS);
+    ok = ((rlen == 1u) && (resp[0] == LINK_ST_OK)) ? 1u : 0u;
+    Link_MasterReset(&s_u2_link);                   /* 无论成败都清本地会话 */
+
+    s_link_fail        = 0u;
+    s_reset_t0         = now;
+    s_reset_backoff_ms = (ok != 0u) ? 0u : APP_LINK_RESET_BACKOFF_MS;
+}
+
 static void APP_LinkTask(void)
 {
     uint8_t  st;
@@ -650,11 +786,26 @@ static void APP_LinkTask(void)
         return;
     }
 
+    /* 事件补拉（慢路径, docs/13 §6.4）: STATUS 说"有位待决"就取一条回来 */
+    if (s_ev_fetch != 0u) {
+        st = Link_RequestPoll(&s_u2_link, APP_EV_GET_TIMEOUT_MS, s_link_rx, &rxlen);
+        if (st == 0u) {
+            return;
+        }
+        s_ev_fetch = 0u;
+        if ((st == 1u) && (rxlen >= LINK_EVENT_GET_LEN) && (s_link_rx[1] != 0u)) {
+            APP_LogU2Event(s_link_rx[1], s_link_rx[2],
+                           (uint16_t)(((uint16_t)s_link_rx[3] << 8) | s_link_rx[4]));
+        }
+        return;
+    }
+
     if (Link_Busy(&s_u2_link) != 0u) {
         st = Link_RequestPoll(&s_u2_link, APP_U2_PROBE_TIMEOUT_MS, s_link_rx, &rxlen);
         if (st == 1u) {
             s_probe_ok++;
-            s_u2_alive = 1u;
+            s_u2_alive  = 1u;
+            s_link_fail = 0u;                       /* 通了 → 连续失败清零 */
             /* 只有在"发的是 STATUS 且回来的也是 STATUS"时才解析:
              * 0 长度的 PING 应答没有数据区, 拿去解包只会解出误判。 */
             if ((s_probe_is_status != 0u) &&
@@ -664,16 +815,33 @@ static void APP_LinkTask(void)
                     s_u2_status      = tmp;
                     s_u2_ver_ok      = Link_CheckVersion(&tmp);
                     s_u2_ver_checked = 1u;
+                    /* 对侧还有待决事件 → 安排一次 EVENT_GET 补拉 */
+                    if ((tmp.ev_pending != 0u) &&
+                        (Link_RequestStart(&s_u2_link, LINK_CMD_EVENT_GET, 0, 0u) != 0u)) {
+                        s_ev_fetch = 1u;
+                    }
                 }
             }
         } else if (st == 2u) {
             s_probe_fail++;
             s_u2_alive = 0u;
+            if (s_link_fail < 0xFFu) {
+                s_link_fail++;
+            }
+            APP_LinkRecover();                      /* 连续超时 → 链路复位 */
         }
         return;
     }
 
     Link_Poll(&s_u2_link);              /* 空闲时也收: U2 主动上报/U2 侧的应答 */
+
+    /* 快路径: U2 主动发来的事件帧, 主循环里慢慢取出来 */
+    {
+        link_event_t ev;
+        while (Link_TakeEvent(&s_u2_link, &ev) != 0u) {
+            APP_LogU2Event(ev.code, ev.sev, ev.arg0);
+        }
+    }
 
     if ((uint32_t)(HAL_GetTick() - s_probe_tick) >= APP_U2_PROBE_PERIOD_MS) {
         s_probe_tick = HAL_GetTick();

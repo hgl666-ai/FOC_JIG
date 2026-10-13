@@ -443,7 +443,8 @@ static uint8_t slave_handler(uint16_t cmd, const uint8_t *in, uint16_t inlen,
         static const uint8_t ver[2] = { 0x00u, 0x01u };
         *outlen = Link_PackStatus(out, LINK_MAX_PAYLOAD, ver, 7u,
                                   Link_Stats(&s_slave),
-                                  UartPort_Stats(UART_PORT_1));
+                                  UartPort_Stats(UART_PORT_1),
+                                  LINK_CAP_ALL, 0u, 0u);
         return (*outlen != 0u) ? 1u : 0u;
     }
     default:
@@ -785,7 +786,9 @@ static void test_link_status(void)
     us.rx_bytes   = 0x0A0B0C0Du;
     us.rx_drop    = 9u;
 
-    CHECK(Link_PackStatus(buf, sizeof(buf), ver, 0x5566u, &ls, &us) == LINK_STATUS_LEN,
+    CHECK(LINK_STATUS_LEN == 28u, "STATUS 应答固定 28B (v1.3 起)");
+    CHECK(Link_PackStatus(buf, sizeof(buf), ver, 0x5566u, &ls, &us,
+                          LINK_CAP_ALL, 0x0003u, 0x0007u) == LINK_STATUS_LEN,
           "打包返回 LINK_STATUS_LEN 字节");
     CHECK(buf[0] == 0x12u && buf[1] == 0x34u, "版本字节");
     CHECK(buf[2] == (uint8_t)(LINK_CODE_VER >> 8) && buf[3] == (uint8_t)LINK_CODE_VER,
@@ -795,6 +798,9 @@ static void test_link_status(void)
           "rx_frames 大端 u32 排在 [6..9]");
     CHECK(buf[14] == 0x0Au && buf[17] == 0x0Du, "rx_bytes 排在 [14..17]");
     CHECK(buf[18] == 0u && buf[21] == 9u, "rx_drop 排在 [18..21]");
+    CHECK(buf[22] == 0x00u && buf[23] == 0xFFu, "caps 大端排在 [22..23]");
+    CHECK(buf[24] == 0x00u && buf[25] == 0x03u, "ev_pending 大端排在 [24..25]");
+    CHECK(buf[26] == 0x00u && buf[27] == 0x07u, "ev_overflow 大端排在 [26..27]");
 
     memset(&st, 0, sizeof(st));
     CHECK(Link_UnpackStatus(buf, LINK_STATUS_LEN, &st) == 1u, "解包成功");
@@ -806,12 +812,14 @@ static void test_link_status(void)
     CHECK(st.rx_bytes == us.rx_bytes, "rx_bytes 一致");
     CHECK(st.rx_drop == us.rx_drop, "rx_drop 一致");
     CHECK(Link_CheckVersion(&st) == 1u, "同版本 → 一致性检查通过");
+    CHECK(st.caps == LINK_CAP_ALL, "caps 解出一致");
+    CHECK(st.ev_pending == 0x0003u && st.ev_overflow == 0x0007u, "事件字段解出一致");
 
     /* 长度不足必须拒绝, 不许读越界 */
     CHECK(Link_UnpackStatus(buf, LINK_STATUS_LEN - 1u, &st) == 0u, "长度不足被拒");
-    CHECK(Link_PackStatus(buf, 4u, ver, 1u, &ls, &us) == 0u, "缓冲不足被拒");
+    CHECK(Link_PackStatus(buf, 4u, ver, 1u, &ls, &us, 0u, 0u, 0u) == 0u, "缓冲不足被拒");
     /* 空指针统计必须当成 0 而不是崩 */
-    CHECK(Link_PackStatus(buf, sizeof(buf), 0, 0u, 0, 0) == LINK_STATUS_LEN,
+    CHECK(Link_PackStatus(buf, sizeof(buf), 0, 0u, 0, 0, 0u, 0u, 0u) == LINK_STATUS_LEN,
           "空指针安全");
 }
 
@@ -826,7 +834,7 @@ static void test_code_ver(void)
 
     SECTION("10b) 链路代码版本一致性检查");
     memset(&st, 0, sizeof(st));
-    CHECK(Link_PackStatus(buf, sizeof(buf), ver, 1u, 0, 0) == LINK_STATUS_LEN, "打包成功");
+    CHECK(Link_PackStatus(buf, sizeof(buf), ver, 1u, 0, 0, 0u, 0u, 0u) == LINK_STATUS_LEN, "打包成功");
     CHECK(Link_UnpackStatus(buf, sizeof(buf), &st) == 1u, "解包成功");
     CHECK(Link_CheckVersion(&st) == 1u, "两片版本相同 → 一致");
 
@@ -873,6 +881,261 @@ static void test_link_status_e2e(void)
     }
 }
 
+/*==============================================================================
+ * 14) 半截帧超时 (docs/13 §3.5)
+ *============================================================================*/
+static void test_link_half_frame(void)
+{
+    static const uint8_t junk[5] = { 0xA5u, 0x5Bu, 0x01u, 0x00u, 0x00u };
+
+    SECTION("14) 半截帧超时");
+    link_setup(1u);
+
+    sim_inject_buf(SIM_SIDE_B, junk, 5u);      /* 只发到"半个帧头"就断了 */
+    Link_Poll(&s_slave);
+    CHECK(Link_Stats(&s_slave)->rx_half == 0u, "刚到的字节不算半截帧");
+
+    g_tick += (LINK_HALF_FRAME_MS + 2u);       /* 时间跳过阈值 */
+    Link_Poll(&s_slave);
+    CHECK(Link_Stats(&s_slave)->rx_half == 1u, "超过 5ms 未续 → 判半截帧并丢弃");
+
+    CHECK(Link_Request(&s_master, LINK_CMD_PING, 0, 0u, 0, 0, 50u) == 1u,
+          "半截帧之后链路仍能正常收发");
+}
+
+/*==============================================================================
+ * 15) 请求重传 + 从机幂等缓存 (docs/13 §3.4)
+ *============================================================================*/
+static void test_link_retry_dup(void)
+{
+    uint8_t  one = 0x5Au;
+    uint8_t  rx[LINK_MAX_PAYLOAD];
+    uint16_t rxlen = 0u;
+
+    SECTION("15) 请求重传 + 从机幂等");
+    link_setup(1u);
+    s_peer_poll = 0;                        /* 对侧主循环先"罢工" */
+
+    CHECK(Link_RequestStart(&s_master, LINK_CMD_PING, &one, 1u) == 1u, "第一发发出");
+    g_tick += 60u;                          /* 越过 50ms 超时点 */
+    CHECK(Link_RequestPoll(&s_master, 50u, 0, 0) == 0u, "超时点到了 → 自动重传, 仍在等");
+    CHECK(Link_Stats(&s_master)->tx_retry == 1u, "tx_retry = 1");
+    CHECK(Link_Stats(&s_master)->tx_timeout == 0u, "重传成功前不计超时");
+
+    s_peer_poll = slave_poll_fn;            /* 对侧恢复 */
+    Link_Poll(&s_slave);                    /* 对侧处理积压的两帧(同序号) */
+    CHECK(Link_Stats(&s_slave)->slave_reply == 2u, "两帧都回了");
+    CHECK(Link_Stats(&s_slave)->slave_dup == 1u, "第二帧识别为重复请求(未重复执行)");
+
+    CHECK(Link_RequestPoll(&s_master, 50u, rx, &rxlen) == 1u, "重传后拿到应答");
+    CHECK(rxlen == 1u && rx[0] == one, "回显内容正确");
+    CHECK(Link_Stats(&s_master)->tx_timeout == 0u, "重传成功 → 不计超时");
+    CHECK(Link_Busy(&s_master) == 0u, "请求已收尾");
+
+    /* 两次都不成(重传也用尽)才算超时失败 */
+    link_setup(0u);
+    CHECK(Link_Request(&s_master, LINK_CMD_PING, 0, 0u, 0, 0, 20u) == 0u, "对侧不在 → 失败");
+    CHECK(Link_Stats(&s_master)->tx_retry == 1u, "用尽 1 次重传");
+    CHECK(Link_Stats(&s_master)->tx_timeout == 1u, "最终计 1 次超时");
+}
+
+/*==============================================================================
+ * 16) 事件上报: 快路径 EVENT(N=0) + 慢路径 EVENT_GET (docs/13 §5.7/§5.8)
+ *============================================================================*/
+static void test_link_event(void)
+{
+    uint8_t      resp[LINK_MAX_PAYLOAD];
+    uint16_t     rxlen = 0u;
+    uint16_t     dup_seq;
+    link_event_t ev;
+
+    SECTION("16) 事件上报 (EVENT / EVENT_GET)");
+    link_setup(1u);
+
+    /* ── 快路径: 从机登记事件 → 立刻主动发 EVENT(N=0) ── */
+    Link_SlaveEvent(&s_slave, LINK_EV_ADC_SAT, LINK_SEV_WARN, 5u, 4095u);
+    Link_Poll(&s_master);
+    CHECK(Link_Stats(&s_master)->rx_event == 1u, "主机收到 1 帧主动事件");
+    CHECK(Link_Stats(&s_master)->rx_stale == 0u, "事件帧不会被当成陈旧帧");
+    CHECK(Link_TakeEvent(&s_master, &ev) == 1u, "取出事件");
+    CHECK(ev.code == LINK_EV_ADC_SAT && ev.sev == LINK_SEV_WARN, "事件码/严重度正确");
+    CHECK(ev.arg0 == 5u && ev.arg1 == 4095u, "参数正确");
+    CHECK(ev.count == 1u, "累计次数 = 1");
+    CHECK(Link_TakeEvent(&s_master, &ev) == 0u, "取过就没了");
+
+    /* 同一事件再发生 → 计数累加、位图置位、再发一帧 */
+    Link_SlaveEvent(&s_slave, LINK_EV_ADC_SAT, LINK_SEV_WARN, 5u, 4095u);
+    Link_Poll(&s_master);
+    CHECK(Link_Stats(&s_master)->rx_event == 2u, "又收到一帧 EVENT");
+    CHECK(Link_SlaveEventPending(&s_slave) == (uint16_t)(1u << (LINK_EV_ADC_SAT - 1u)),
+          "从机待决位图置位");
+
+    /* ── 慢路径: STATUS 看到位图 → EVENT_GET 取一条并清位 ── */
+    CHECK(Link_Request(&s_master, LINK_CMD_EVENT_GET, 0, 0u, resp, &rxlen, 50u) == 1u,
+          "EVENT_GET 有应答");
+    CHECK(rxlen == LINK_EVENT_GET_LEN, "应答固定 9B");
+    CHECK(resp[0] == LINK_ST_OK, "状态 OK");
+    CHECK(resp[1] == LINK_EV_ADC_SAT && resp[2] == LINK_SEV_WARN, "取到事件码/严重度");
+    CHECK(resp[8] == 2u, "累计次数 = 2");
+    CHECK(Link_SlaveEventPending(&s_slave) == 0u, "取即清 → 位图清零");
+
+    CHECK(Link_Request(&s_master, LINK_CMD_EVENT_GET, 0, 0u, resp, &rxlen, 50u) == 1u,
+          "再取一次也有应答");
+    CHECK(resp[1] == 0u, "没有待决事件 → ev_code = 0");
+
+    /* ── 幂等: 重放"同一序号同一命令", 必须回缓存而不是再取一条 ── */
+    Link_SlaveEvent(&s_slave, LINK_EV_EDGE_LOST, LINK_SEV_INFO, 3u, 0u);
+    CHECK(Link_Request(&s_master, LINK_CMD_EVENT_GET, 0, 0u, resp, &rxlen, 50u) == 1u,
+          "取走 EDGE_LOST");
+    CHECK(resp[1] == LINK_EV_EDGE_LOST, "取到 EDGE_LOST");
+    CHECK(Link_SlaveEventPending(&s_slave) == 0u, "位图已清空（现在没有待决事件了）");
+
+    dup_seq = s_master.wait_seq;                 /* 刚才那一发用的序号 */
+    {
+        uint8_t  raw[LINK_RAW_MAX];
+        uint16_t n = Frame_Build(raw, LINK_CMD_EVENT_GET, dup_seq, 0, 0);
+        CHECK(UartPort_Write(UART_PORT_0, raw, n) == n, "手工重放同一请求(同序号同命令)");
+    }
+    Link_Poll(&s_slave);
+    CHECK(Link_Stats(&s_slave)->slave_dup == 1u, "被识别为重复请求");
+    {
+        uint8_t  rxb[LINK_RAW_MAX];
+        uint8_t  dat[LINK_MAX_PAYLOAD];
+        uint16_t c2 = 0u, s2 = 0u, d2 = 0u;
+        uint16_t got = UartPort_Read(UART_PORT_0, rxb, (uint16_t)sizeof(rxb));
+
+        CHECK(got > 0u, "拿到应答字节");
+        CHECK(Frame_Parse(rxb, got, &c2, &s2, dat, &d2) == 1u, "应答帧可解析");
+        CHECK(c2 == LINK_CMD_EVENT_GET && s2 == dup_seq, "命令码与序号回显");
+        CHECK(d2 == LINK_EVENT_GET_LEN && dat[1] == LINK_EV_EDGE_LOST,
+              "回的是缓存内容(EDGE_LOST) 而不是空事件 → 幂等成立");
+    }
+
+    /* 事件码越界 → 只计数, 不进入事件表 */
+    Link_SlaveEvent(&s_slave, 0x42u, LINK_SEV_INFO, 0u, 0u);
+    CHECK(Link_SlaveEventOverflow(&s_slave) == 1u, "认不出的码计入 ev_overflow");
+    CHECK(Link_SlaveEventPending(&s_slave) == 0u, "越界码不进待决位图");
+}
+
+/*==============================================================================
+ * 17) ARM 同步触发: 两端在同一个时间窗里采 (docs/13 §5.5)
+ *============================================================================*/
+static void test_link_arm(void)
+{
+    uint8_t  req[LINK_ARM_REQ_LEN];
+    uint8_t  resp[LINK_MAX_PAYLOAD];
+    uint16_t rxlen = 0u;
+    uint16_t win = 0u;
+
+    SECTION("17) ARM 同步触发");
+    link_setup(1u);
+
+    CHECK(Link_ArmPackReq(req, sizeof(req), 7u, 200u, 0u) == LINK_ARM_REQ_LEN,
+          "请求打包固定 5B");
+    CHECK(Link_Request(&s_master, LINK_CMD_ARM, req, LINK_ARM_REQ_LEN, resp, &rxlen, 50u) == 1u,
+          "ARM 有应答");
+    CHECK(rxlen == LINK_ARM_RESP_LEN, "应答固定 3B");
+    CHECK(Link_ArmCheckResp(resp, rxlen, 7u) == 1u, "状态 OK 且 session 回显一致");
+    CHECK(Link_ArmCheckResp(resp, rxlen, 8u) == 0u, "session 对不上 → 不算成功");
+    CHECK(resp[1] == 0u && resp[2] == 7u, "session 大端回显");
+
+    /* 从机侧: 应用层应当被通知一次, 并且只通知一次 */
+    CHECK(Link_SlaveArmState(&s_slave) == LINK_ARM_ARMED, "状态 = ARMED");
+    CHECK(Link_SlaveArmTake(&s_slave, &win) == 1u, "应用层取到本次 ARM");
+    CHECK(win == 200u, "窗口长度传过来了");
+    CHECK(Link_SlaveArmTake(&s_slave, &win) == 0u, "同一次 ARM 不会再通知一次");
+
+    /* 窗口还在跑, 来个**新 session** → BUSY (不打断当前窗口, 也不排队) */
+    CHECK(Link_ArmPackReq(req, sizeof(req), 8u, 200u, 0u) == LINK_ARM_REQ_LEN, "换 session");
+    CHECK(Link_Request(&s_master, LINK_CMD_ARM, req, LINK_ARM_REQ_LEN, resp, &rxlen, 50u) == 1u,
+          "有应答");
+    CHECK(resp[0] == LINK_ST_BUSY, "窗口进行中 → BUSY");
+    CHECK(Link_SlaveArmTake(&s_slave, &win) == 0u, "BUSY 时不会开新窗");
+
+    /* 窗口结束 → READY；此时新 session 可以覆盖 */
+    Link_SlaveArmDone(&s_slave);
+    CHECK(Link_SlaveArmState(&s_slave) == LINK_ARM_READY, "状态 = READY");
+    CHECK(Link_Request(&s_master, LINK_CMD_ARM, req, LINK_ARM_REQ_LEN, resp, &rxlen, 50u) == 1u,
+          "READY 时接受新 ARM");
+    CHECK(resp[0] == LINK_ST_OK, "新 ARM 被接受");
+    CHECK(Link_SlaveArmTake(&s_slave, &win) == 1u && win == 200u, "又通知一次");
+
+    /* 幂等: 同一 session 再来(换了个序号, 模拟主机主动重发) → 回 OK 但不重开窗 */
+    CHECK(Link_ArmPackReq(req, sizeof(req), 8u, 500u, 0u) == LINK_ARM_REQ_LEN, "同 session 改窗口");
+    CHECK(Link_Request(&s_master, LINK_CMD_ARM, req, LINK_ARM_REQ_LEN, resp, &rxlen, 50u) == 1u,
+          "有应答");
+    CHECK(resp[0] == LINK_ST_OK, "同 session → 回 OK");
+    CHECK(Link_SlaveArmTake(&s_slave, &win) == 0u, "同 session 不重开窗(不该再通知)");
+
+    /* 参数校验: 一律 ERR_PARAM, 且不改变状态 */
+    CHECK(Link_ArmPackReq(req, sizeof(req), 0u, 200u, 0u) == LINK_ARM_REQ_LEN, "session = 0");
+    CHECK(Link_Request(&s_master, LINK_CMD_ARM, req, LINK_ARM_REQ_LEN, resp, &rxlen, 50u) == 1u,
+          "有应答");
+    CHECK(resp[0] == LINK_ST_ERR_PARAM, "session=0 → ERR_PARAM");
+    CHECK(Link_ArmPackReq(req, sizeof(req), 9u, 0u, 0u) == LINK_ARM_REQ_LEN, "window = 0");
+    CHECK(Link_Request(&s_master, LINK_CMD_ARM, req, LINK_ARM_REQ_LEN, resp, &rxlen, 50u) == 1u,
+          "有应答");
+    CHECK(resp[0] == LINK_ST_ERR_PARAM, "window=0 → ERR_PARAM");
+    CHECK(Link_ArmPackReq(req, sizeof(req), 9u, (uint16_t)(LINK_ARM_WIN_MAX + 1u), 0u) == LINK_ARM_REQ_LEN,
+          "window 越界");
+    CHECK(Link_Request(&s_master, LINK_CMD_ARM, req, LINK_ARM_REQ_LEN, resp, &rxlen, 50u) == 1u,
+          "有应答");
+    CHECK(resp[0] == LINK_ST_ERR_PARAM, "window 越界 → ERR_PARAM");
+    CHECK(Link_ArmPackReq(req, sizeof(req), 9u, 200u, LINK_ARM_F_HWSYNC) == LINK_ARM_REQ_LEN,
+          "flags 硬触发");
+    CHECK(Link_Request(&s_master, LINK_CMD_ARM, req, LINK_ARM_REQ_LEN, resp, &rxlen, 50u) == 1u,
+          "有应答");
+    CHECK(resp[0] == LINK_ST_ERR_PARAM, "本版不支持硬触发 → ERR_PARAM");
+
+    /* 长度不对也要回 ERR_PARAM, 而不是 NIY */
+    CHECK(Link_Request(&s_master, LINK_CMD_ARM, req, (uint16_t)(LINK_ARM_REQ_LEN - 1u),
+                       resp, &rxlen, 50u) == 1u, "短请求也有应答");
+    CHECK(resp[0] == LINK_ST_ERR_PARAM, "长度不足 → ERR_PARAM");
+}
+
+/*==============================================================================
+ * 18) LINK_RESET: 清会话（收发环 / 半截帧 / ARM / 幂等），事件与统计要留
+ *============================================================================*/
+static void test_link_reset(void)
+{
+    uint8_t  resp[LINK_MAX_PAYLOAD];
+    uint16_t rxlen = 0u;
+
+    SECTION("18) LINK_RESET 链路复位");
+    link_setup(1u);
+
+    /* 先制造中间态: ARM 已开窗 */
+    {
+        uint8_t req[LINK_ARM_REQ_LEN];
+        CHECK(Link_ArmPackReq(req, sizeof(req), 3u, 200u, 0u) == LINK_ARM_REQ_LEN, "打包 ARM");
+        CHECK(Link_Request(&s_master, LINK_CMD_ARM, req, LINK_ARM_REQ_LEN, resp, &rxlen, 50u) == 1u,
+              "先 ARM 一发");
+        CHECK(Link_SlaveArmState(&s_slave) == LINK_ARM_ARMED, "ARMED");
+    }
+    Link_SlaveEvent(&s_slave, LINK_EV_ADC_SAT, LINK_SEV_WARN, 1u, 4095u);
+    CHECK(Link_SlaveEventPending(&s_slave) != 0u, "有一条待决事件");
+
+    /* 从机接收环里再堆点垃圾（不含帧头），复位时应当被一起清掉 */
+    {
+        uint8_t junk[16];
+        memset(junk, 0x11, sizeof(junk));
+        sim_inject_buf(SIM_SIDE_B, junk, (uint16_t)sizeof(junk));
+        CHECK(UartPort_Available(UART_PORT_1) == (uint16_t)sizeof(junk), "垃圾先堆在环里");
+    }
+
+    CHECK(Link_Request(&s_master, LINK_CMD_RESET, 0, 0u, resp, &rxlen, 50u) == 1u, "RESET 有应答");
+    CHECK(rxlen == 1u && resp[0] == LINK_ST_OK, "RESET → OK");
+    CHECK(Link_SlaveArmState(&s_slave) == LINK_ARM_IDLE, "从机 ARM 状态被复位");
+    CHECK(UartPort_Available(UART_PORT_1) == 0u, "从机接收环被清空");
+    CHECK(Link_SlaveEventPending(&s_slave) != 0u, "事件表不清（故障证据要留）");
+
+    /* 主机侧：复位自己的会话 */
+    Link_MasterReset(&s_master);
+    CHECK(Link_Busy(&s_master) == 0u, "主机不再忙");
+    CHECK(Link_Request(&s_master, LINK_CMD_PING, 0, 0u, 0, 0, 50u) == 1u, "复位后链路仍可用");
+    CHECK(Link_SlaveEventPending(&s_slave) != 0u, "事件仍在（没被复位动作吃掉）");
+}
+
 /*============================================================================*/
 int main(void)
 {
@@ -894,6 +1157,11 @@ int main(void)
     test_link_status_e2e();
     test_meas_xchk();
     test_pulse_xchk();
+    test_link_half_frame();
+    test_link_retry_dup();
+    test_link_event();
+    test_link_arm();
+    test_link_reset();
 
     printf("\n========================================\n");
     printf(" checks: %d, failed: %d\n", g_checks, g_fails);

@@ -9,7 +9,11 @@
   *   本文件只负责"收到命令做什么"——U2 就三件事: 报状态、交测量快照、
   *   交脉冲结果。**不做任何判定**（判定归 U1，避免两套判据跑偏）。
   *
-  * 脉冲捕获在本片是**连续滚动**的：一个 200ms 窗口接一个窗口地跑
+  * 脉冲捕获在本片有两种模式（docs/13 §5.5 / §6.2）：
+ *   1) **被 U1 的 ARM 叫醒**：按 U1 给的窗口长度采一次 —— 两端采的是**同一段时间**，
+ *      这是交叉校验能对得上的前提；
+ *   2) **空闲时滚动**：一个 200ms 窗口接一个地跑，作为兜底 —— PC 单独用 mode=0
+ *      读结果、或对端还不支持 ARM 时仍然可用。
   * （U2 没有别的活，10% 左右的 CPU 完全吃得下），这样 U1 一问就有
   * 不超过 200ms 的"新鲜"结果，不需要事先打招呼。
   ******************************************************************************
@@ -26,6 +30,10 @@
 static link_t   s_u1_link;          /* 与 U1 的链路 (本片是从机) */
 static uint16_t s_alive;            /* STATUS 里的存活计数: 证明"这一发是真的新应答" */
 static meas_snapshot_t s_snap;      /* 交给 U1 的快照（55B 线格式由 meas_pack 编码） */
+
+static uint8_t  s_arm_active;       /* 正在跑"被 ARM 触发"的那次窗口 */
+static uint8_t  s_last_none;        /* 上个窗口是否整段无信号（事件边沿触发用） */
+static uint16_t s_last_sat_mask;    /* 上个窗口哪些通道饱和（事件边沿触发用） */
 
 /*------------------------------------------------------------------------------
  * 链路命令处理 (主循环上下文, 由 Link_Poll → link_deliver 调用)
@@ -52,7 +60,10 @@ static uint8_t U2_LinkHandler(uint16_t cmd, const uint8_t *in, uint16_t inlen,
         s_alive++;
         *outlen = Link_PackStatus(out, LINK_MAX_PAYLOAD, ver, s_alive,
                                   Link_Stats(&s_u1_link),
-                                  UartPort_Stats(UART_CFG_PORT_LINK));
+                                  UartPort_Stats(UART_CFG_PORT_LINK),
+                                  LINK_CAP_ALL,
+                                  Link_SlaveEventPending(&s_u1_link),
+                                  Link_SlaveEventOverflow(&s_u1_link));
         return (*outlen != 0u) ? 1u : 0u;
     }
 
@@ -105,12 +116,77 @@ void U2App_Init(void)
     PULSE_CfgStart(PULSE_WINDOW_MS);
 }
 
+/*------------------------------------------------------------------------------
+ * 把"本片自己发现的异常"变成事件回报给 U1（docs/13 §5.7）
+ * 边沿触发：只在状态**变化**时喊一声，不是每个窗口都喊（否则就是刷屏）。
+ *----------------------------------------------------------------------------*/
+static void U2App_ReportAnomaly(void)
+{
+    meas_snapshot_t  ms;
+    pulse_snapshot_t ps;
+    uint8_t  i;
+    uint8_t  none = 0u;
+    uint16_t sat  = 0u;
+
+    MEAS_Snapshot(&ms);
+    for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
+        if ((ms.ch[i].flags & MEAS_CHF_SAT) != 0u) {
+            sat |= (uint16_t)(1u << i);
+        }
+    }
+    {
+        uint16_t fresh = (uint16_t)(sat & (uint16_t)~s_last_sat_mask);
+
+        for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
+            if ((fresh & (uint16_t)(1u << i)) != 0u) {
+                Link_SlaveEvent(&s_u1_link, LINK_EV_ADC_SAT, LINK_SEV_WARN,
+                                (uint16_t)i, ms.ch[i].raw);
+            }
+        }
+        s_last_sat_mask = sat;
+    }
+
+    PULSE_Snapshot(&ps);
+    for (i = 0u; i < (uint8_t)PULSE_PH_COUNT; i++) {
+        if ((ps.ph[i].flags & PULSE_F_NOSIGNAL) != 0u) {
+            none++;
+        }
+    }
+    if (none == (uint8_t)PULSE_PH_COUNT) {
+        if (s_last_none == 0u) {
+            Link_SlaveEvent(&s_u1_link, LINK_EV_PULSE_NONE, LINK_SEV_WARN, 0u, 0u);
+        }
+        s_last_none = 1u;
+    } else {
+        s_last_none = 0u;
+    }
+}
+
 void U2App_Run(void)
 {
+    uint16_t win;
+
     Link_Poll(&s_u1_link);
 
-    /* 滚动窗口：窗口到时结算，然后立刻开下一个 —— 这样 U1 一问就有新鲜结果 */
-    if (PULSE_CfgPoll() != 0u) {
-        PULSE_CfgStart(PULSE_WINDOW_MS);
+    /* 1) U1 喊"开始" → 暂停滚动窗口，按它给的窗口采一次（两端同一个时间窗） */
+    if (Link_SlaveArmTake(&s_u1_link, &win) != 0u) {
+        PULSE_CfgStart(win);
+        s_arm_active = 1u;
+    }
+
+    /* 2) 被 ARM 触发的那次窗口结束 → 结果就绪, 顺便看看要不要报告异常 */
+    if ((s_arm_active != 0u) && (PULSE_CfgPoll() != 0u)) {
+        s_arm_active = 0u;
+        Link_SlaveArmDone(&s_u1_link);          /* ARMED → READY：等 U1 来取 */
+        U2App_ReportAnomaly();
+    }
+
+    /* 3) 空闲时保持原来的滚动窗口兜底（PC 单独用 mode=0 读结果仍然可用） */
+    if ((s_arm_active == 0u) &&
+        (Link_SlaveArmState(&s_u1_link) != (uint8_t)LINK_ARM_ARMED)) {
+        if (PULSE_CfgPoll() != 0u) {
+            PULSE_CfgStart(PULSE_WINDOW_MS);
+            U2App_ReportAnomaly();
+        }
     }
 }

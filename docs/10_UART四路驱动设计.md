@@ -101,6 +101,11 @@ STM32F1 HAL 收到 **ORE（溢出）** 时走的是"阻塞错误"分支：先 `U
 
 ## 5. 链路协议（U1↔U2）
 
+> ⚠ **完整规范已独立成文：`docs/13_U1U2内部链路协议.md`**（帧格式、命令表、ARM 同步触发、
+> 事件上报、重传与幂等、断链恢复、版本与能力协商）。本节只保留设计背景，**命令与字段以下面那份为准**：
+> 本节提到的 PING/STATUS/MEAS_XCHK/PULSE_XCHK 之外，v1.3 还多了 `0x0105` ARM、`0x0106` LINK_RESET、
+> `0x0107` EVENT、`0x0108` EVENT_GET，STATUS 也从 22B 扩到 28B。
+
 - 帧格式与 PC 协议**完全一致**：`A5 5B | CMD(2) | SEQ(2) | LEN(2) | DATA | CRC16(2)`，全大端，CRC16-MODBUS。
 - 命令码用 `LINK_CMD_*`（`0x0100` 起），与 PC 协议的 `MGR_CMD_*` 不冲突（U1 独占解析 PC 帧）。
 

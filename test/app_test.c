@@ -32,6 +32,8 @@
 #include "pulse_pack.h"
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
+#include "uart_link.h"      /* 链路层：T16 的"假 U2"要用 */
+#include "uart_cfg.h"       /* 端口号定义 */
 
 /*==============================================================================
  * 虚拟时间
@@ -158,23 +160,172 @@ static uint8_t flash_xfer(uint8_t tx)
 /* ---- HAL 替身 ---- */
 SPI_HandleTypeDef hspi2;                    /* gd25q128.c 里 &hspi2 需要实体 */
 
-/* 串口替身：app.c 现在会初始化 U1 的两路串口并建立到 U2 的内部链路，所以要有
+/* 串口替身：app.c 会初始化 U1 的两路串口并建立到 U2 的内部链路，所以要有
  * 两个句柄 (uart_cfg.c 里 extern 的就是它们) 和 HAL_UART_*_IT。
- * 本测试关心的是 PC 协议链路，串口只要"能初始化、发了不崩"：
- * 发送永不完成 → 链路保活 PING 必然超时(等于 U2 不在)，正是预期。 */
+ *
+ * 默认行为（g_u2_on == 0）：发送永不完成 → 链路保活 PING 必然超时，等于"U2 不在"。
+ * T14/T15 依赖这个场景（对侧缺席的路径）。
+ *
+ * 打开 g_u2_on 之后：两路串口被当作"交叉的两根线"（U1 的端口1 ↔ 假 U2 的端口0），
+ * 由 test/app_test.c 里的 U2Fake_* 扮演 U2 —— T16 用它覆盖 **ARM 主路径**。 */
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart3;
 
+static uint8_t  g_u2_on;                /* 1 = 链路上有一个会应答的"假 U2" */
+static uint8_t *s_rxp1;                 /* huart1 的接收落点 (假 U2 那一侧) */
+static uint8_t *s_rxp3;                 /* huart3 的接收落点 (U1 链路那一侧) */
+
 HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size)
 {
-    (void)huart; (void)pData; (void)Size;
+    (void)Size;
+    if (huart == &huart1) {
+        s_rxp1 = pData;
+    } else if (huart == &huart3) {
+        s_rxp3 = pData;
+    }
     return HAL_OK;
+}
+
+/* 往某一侧的接收落点塞一个字节，并走真 HAL 的回调 → UartPort_OnRxComplete */
+static void u2_deliver(uint8_t **slot, UART_HandleTypeDef *hu, uint8_t b)
+{
+    if (*slot == 0) {
+        return;                         /* 对侧没挂接收: 这字节真的丢了 */
+    }
+    **slot = b;
+    *slot  = 0;                         /* 落点已消费, 等回调里重挂 */
+    HAL_UART_RxCpltCallback(hu);
+    g_tick++;
 }
 
 HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size)
 {
+    if (g_u2_on != 0u) {
+        uint16_t i;
+        /* 交叉接线: U1(huart3) 发的 → 进假 U2 那一侧; 假 U2(huart1) 发的 → 进 U1 */
+        if (huart == &huart3) {
+            for (i = 0u; i < Size; i++) {
+                u2_deliver(&s_rxp1, &huart1, pData[i]);
+            }
+        } else {
+            for (i = 0u; i < Size; i++) {
+                u2_deliver(&s_rxp3, &huart3, pData[i]);
+            }
+        }
+        HAL_UART_TxCpltCallback(huart);         /* 发完这一段 → 驱动推进 tx_tail */
+        return HAL_OK;
+    }
     (void)huart; (void)pData; (void)Size;
     return HAL_OK;              /* 故意不回调 TxCplt：模拟"线没接/对端不在" */
+}
+
+/*==============================================================================
+ * 假 U2（T16 用）：真的跑一份 uart_link 从机 + 采集模块，只把"板级"那层换成替身
+ *============================================================================*/
+static link_t   s_u2;
+static uint8_t  s_u2_inited;
+static uint8_t  s_u2_arm_active;
+static uint16_t s_u2_win;
+static uint32_t s_u2_arm_t0;
+static uint16_t s_u2_alive;
+
+static uint8_t U2Fake_Handler(uint16_t cmd, const uint8_t *in, uint16_t inlen,
+                              uint8_t *out, uint16_t *outlen)
+{
+    switch (cmd) {
+    case LINK_CMD_PING: {
+        uint16_t i;
+        if (inlen > LINK_MAX_PAYLOAD) {
+            return 0u;
+        }
+        for (i = 0u; i < inlen; i++) {
+            out[i] = in[i];
+        }
+        *outlen = inlen;
+        return 1u;
+    }
+    case LINK_CMD_STATUS: {
+        static const uint8_t ver[2] = { LINK_U2_VER_MAJOR, LINK_U2_VER_MINOR };
+        s_u2_alive++;
+        *outlen = Link_PackStatus(out, LINK_MAX_PAYLOAD, ver, s_u2_alive,
+                                  Link_Stats(&s_u2), UartPort_Stats(UART_PORT_0),
+                                  LINK_CAP_ALL,
+                                  Link_SlaveEventPending(&s_u2),
+                                  Link_SlaveEventOverflow(&s_u2));
+        return (*outlen != 0u) ? 1u : 0u;
+    }
+    case LINK_CMD_MEAS_XCHK: {
+        meas_snapshot_t ms;
+        if ((in == 0) || (inlen < MEAS_PACK_SNAP_LEN)) {
+            out[0] = LINK_ST_NIY; *outlen = 1u; return 1u;
+        }
+        MEAS_Snapshot(&ms);
+        *outlen = MeasPack_Snapshot(out, LINK_MAX_PAYLOAD, &ms);
+        return (*outlen != 0u) ? 1u : 0u;
+    }
+    case LINK_CMD_PULSE_XCHK: {
+        pulse_snapshot_t ps;
+        if ((in == 0) || (inlen < PULSE_PACK_LEN)) {
+            out[0] = LINK_ST_NIY; *outlen = 1u; return 1u;
+        }
+        PULSE_Snapshot(&ps);
+        /* 故意报成"另一个频率"(40kHz)，这样能证明对侧那段数据**真的传过来了**，
+         * 而不是把本片的 20kHz 又抄了一遍。 */
+        {
+            uint8_t i;
+            for (i = 0u; i < (uint8_t)PULSE_PH_COUNT; i++) {
+                ps.ph[i].period_ns     = 25000u;
+                ps.ph[i].high_ns       = 12500u;
+                ps.ph[i].duty_permille = 500u;
+                ps.ph[i].flags         = PULSE_F_VALID;
+            }
+        }
+        *outlen = PulsePack_Pack(out, LINK_MAX_PAYLOAD, &ps);
+        return (*outlen != 0u) ? 1u : 0u;
+    }
+    default:
+        out[0] = LINK_ST_NIY; *outlen = 1u; return 1u;
+    }
+}
+
+/* 假 U2 使用"U1 的端口0"当自己的链路端口（真实板子上那是 DUT 串口排针） */
+static void U2Fake_Init(void)
+{
+    if (s_u2_inited == 0u) {
+        Link_Init(&s_u2, UART_PORT_0, 0u /* 从机 */);
+        Link_SetSlaveHandler(&s_u2, U2Fake_Handler);
+        s_u2_inited = 1u;
+    }
+    g_u2_on = 1u;
+}
+
+/* 每轮都推一下假 U2：收帧 → 应答；被 ARM 之后模拟窗口跑完 */
+static void U2Fake_Poll(void)
+{
+    if (g_u2_on == 0u) {
+        return;
+    }
+    Link_Poll(&s_u2);
+
+    if (Link_SlaveArmTake(&s_u2, &s_u2_win) != 0u) {
+        s_u2_arm_active = 1u;
+        s_u2_arm_t0     = HAL_GetTick();
+    }
+    if ((s_u2_arm_active != 0u) &&
+        ((uint32_t)(HAL_GetTick() - s_u2_arm_t0) >= (uint32_t)s_u2_win)) {
+        s_u2_arm_active = 0u;
+        Link_SlaveArmDone(&s_u2);
+    }
+}
+
+/* U1 是否已经从 STATUS 拿到了对端能力（T16 用） */
+static int u2fake_caps_has_arm(void)
+{
+    link_status_t st;
+    if (APP_U2Status(&st) == 0u) {
+        return 0;
+    }
+    return ((st.caps & LINK_CAP_ARM) != 0u) ? 1 : 0;
 }
 
 /* GPIO 替身一肩挑两件事：
@@ -690,6 +841,7 @@ static void t13_flash_offline_detected(void)
 static void pump_meas(int n)
 {
     for (int i = 0; i < n; i++) {
+        U2Fake_Poll();        /* 有假 U2 时推它一把；没开就是空转 */
         MEAS_Poll();          /* 固件里 main.c 就是这么调的 */
         APP_Run();
     }
@@ -735,6 +887,7 @@ static int wait_meas_ack(uint16_t expect_cmd, uint16_t *seq_out, uint8_t *st_out
 {
     for (uint32_t i = 0; i < 200000u; i++) {
         tx_len = 0;
+        U2Fake_Poll();        /* 有假 U2 时推它一把；没开就是空转 */
         MEAS_Poll();
         APP_Run();
         if (tx_len > 0) {
@@ -1003,9 +1156,86 @@ static void t15_pulse_cmd(void)
     }
 }
 
+/*==============================================================================
+ * T16: ARM 同步触发主路径（链路上真的有一个 U2 时走的那条）
+ *----------------------------------------------------------------------------
+ * T14/T15 覆盖的是"U2 缺席"的降级路径；这里覆盖生产时真正走的那条：
+ *   U1 收到 0x000F mode=1 → 发 ARM 让两端同窗 → 各自采 → PULSE_XCHK 取回对侧结果。
+ *============================================================================*/
+static void t16_arm_sync_path(void)
+{
+    uint16_t seq = 0xC000;
+    uint8_t  mode = MGR_MODE_TEST;
+    uint8_t  status = 0xFF;
+    pulse_snapshot_t pm, pp;
+    uint8_t  i;
+
+    printf("[T16] ARM 同步触发主路径（有 U2）\n");
+    init_env();
+    U2Fake_Init();
+
+    /* 1) 先跑保活：U1 必须从 STATUS 里拿到对端能力位图（含 ARM）才会用 ARM。
+     *    PING 每 500ms 一发、每 5 发插一次 STATUS，所以这里等到拿到为止（有上限）。 */
+    {
+        int tries;
+        for (tries = 0; (tries < 40) && (u2fake_caps_has_arm() == 0); tries++) {
+            host_advance(600u);
+            pump_meas(200);
+        }
+    }
+    CHECK(APP_U2Alive() != 0u, "链路保活通了");
+    CHECK(APP_U2VerOk() != 0u, "两片链路代码版本一致");
+    CHECK(u2fake_caps_has_arm() != 0, "对端能力位图里有 ARM");
+
+    /* 2) 0x000F mode=1：先 ARM(两端同窗)，再取对侧结果 */
+    {
+        uint8_t  raw[8 + 1];
+        uint16_t n = Frame_Build(raw, MGR_CMD_PULSE, seq++, &mode, 1);
+        uint16_t rseq = 0;
+        uint8_t  rst = 0xFF;
+
+        tx_len = 0;
+        APP_USB_Receive(raw, n);
+        CHECK(wait_meas_ack(MGR_CMD_PULSE, &rseq, &rst) == 1, "跑完给出应答");
+        CHECK(rst == APP_STATUS_OK, "默认不判脉冲 → 结论 OK");
+        CHECK(rseq == (uint16_t)(seq - 1), "应答 SEQ = 受理序号");
+        CHECK(app_state == APP_STATE_IDLE, "结束后回到 IDLE");
+    }
+
+    memset(&pm, 0, sizeof(pm));
+    memset(&pp, 0, sizeof(pp));
+    CHECK(parse_pulse_resp(&status, &pm, &pp) == 1, "91B 应答可解析");
+    CHECK(status == APP_STATUS_OK, "命令状态 OK");
+    for (i = 0u; i < (uint8_t)PULSE_PH_COUNT; i++) {
+        CHECK(pm.ph[i].period_ns == 50000u, "本片: 20kHz → 50us 周期");
+    }
+    CHECK(pp.ph[PULSE_PH_A].period_ns == 25000u,
+          "对侧段是 U2 自己的数据(40kHz) → ARM 之后确实取到了对侧结果");
+    CHECK(pp.ph[PULSE_PH_A].duty_permille == 500u, "对侧占空比也带回来了");
+    CHECK((pp.ph[PULSE_PH_A].flags & PULSE_F_VALID) != 0u, "对侧那段标记有效");
+    CHECK((pp.ph[PULSE_PH_A].flags & PULSE_F_NOSIGNAL) == 0u, "对侧那段不是无信号");
+
+    /* 3) 关掉假 U2 再跑一次：应当退回"对侧缺席"(NO_PEER)，证明两条路都在 */
+    g_u2_on = 0u;
+    {
+        uint8_t  raw[8 + 1];
+        uint16_t n = Frame_Build(raw, MGR_CMD_PULSE, seq++, &mode, 1);
+        uint16_t rseq = 0;
+        uint8_t  rst = 0xFF;
+
+        tx_len = 0;
+        APP_USB_Receive(raw, n);
+        CHECK(wait_meas_ack(MGR_CMD_PULSE, &rseq, &rst) == 1, "U2 又不在时仍能收尾");
+    }
+    memset(&pp, 0, sizeof(pp));
+    CHECK(parse_pulse_resp(&status, &pm, &pp) == 1, "应答仍可解析");
+    CHECK((pp.ph[PULSE_PH_A].flags & PULSE_F_NOSIGNAL) != 0u,
+          "对侧缺席时按无数据打包");
+}
+
 int main(void)
 {
-    printf("=== FOC JIG U1 全链路宿主仿真 (PC帧→上传→SPI Flash→ISP→被烧板) ===\n\n");
+    printf("=== FOC JIG U1 全链路宿主仿真 (PC帧→上传→SPI Flash→SWD→被烧板) ===\n\n");
     t1_flash_id();
     t2_empty_and_unknown();
     t3_upload_and_slot_switch();
@@ -1019,6 +1249,7 @@ int main(void)
     t13_flash_offline_detected();
     t14_measure_cmd();
     t15_pulse_cmd();
+    t16_arm_sync_path();
     CHECK(g_tx_oversize == 0u, "没有任何应答被 CDC 替身缓冲截断");
     printf("\n=== 共 %d 项检查, 失败 %d 项 ===\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
