@@ -93,6 +93,19 @@ void HAL_GPIO_Init(GPIO_TypeDef *port, GPIO_InitTypeDef *init);
 void HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state);
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *port, uint16_t pin);
 
+/* ---- 临界区替身 ----
+ * 固件里 uart_port.c 的发送路径用 __disable_irq()/__enable_irq() 做几拍的
+ * 临界区（挡"发送完成中断"插进来）。宿主测试是**单线程顺序执行**的：
+ * HAL 替身在 HAL_UART_Transmit_IT 里同步回调 TxCplt，也就是说"中断"
+ * 是被显式调用出来的，不会有真正并发的中断上下文 → 这里退化成空动作。
+ * 目标工程用的是 CMSIS 的真身（cmsis_armcc.h / cmsis_gcc.h），不经过本文件。 */
+#ifndef __disable_irq
+#define __disable_irq()  do { } while (0)
+#endif
+#ifndef __enable_irq
+#define __enable_irq()   do { } while (0)
+#endif
+
 /* ---- UART 替身 (uart_port 驱动 / uart_cfg 需要) ---- */
 HAL_StatusTypeDef HAL_UART_Receive_IT(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size);
 HAL_StatusTypeDef HAL_UART_Transmit_IT(UART_HandleTypeDef *huart, uint8_t *pData, uint16_t Size);

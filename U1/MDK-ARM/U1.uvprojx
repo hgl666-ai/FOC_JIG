@@ -534,6 +534,41 @@
               <FilePath>../Core/Src/pulse_cfg.c</FilePath>
             </File>
             <File>
+              <FileName>dut_proto.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/dut_proto.c</FilePath>
+            </File>
+            <File>
+              <FileName>phase_chk.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/phase_chk.c</FilePath>
+            </File>
+            <File>
+              <FileName>cur_chk.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/cur_chk.c</FilePath>
+            </File>
+            <File>
+              <FileName>vol_chk.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/vol_chk.c</FilePath>
+            </File>
+            <File>
+              <FileName>enc_plan.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/enc_plan.c</FilePath>
+            </File>
+            <File>
+              <FileName>enc_gen.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/enc_gen.c</FilePath>
+            </File>
+            <File>
+              <FileName>enc_chk.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/enc_chk.c</FilePath>
+            </File>
+            <File>
               <FileName>swd_programmer.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/swd_programmer.c</FilePath>

@@ -36,31 +36,25 @@ void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 0 */
 
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
   TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
   TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
   /* USER CODE BEGIN TIM1_Init 1 */
-
+  /* ⚠ 本函数被改成**输入捕获**（原来是 OC/TIMING 输出配置）：
+   *   TIM1_CH1 = PA8 ← MC_IN（主控驱动信号 C 相），见 docs/12 与 docs/00 §3.5。
+   *   改的原因：两片现在测**同一组** MA_IN/MB_IN/MC_IN 做真冗余互比；
+   *   U1 原来采的 TIM4（PB6/7/8）其实是编码器座 CN2 的线，不是电机输出端。
+   *   原来的 AF_PP 输出会把 PA8 钉在低电平上。CubeMX 再生成后要照这里改回（docs/05 §2.5）。 */
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 0;
+  htim1.Init.Prescaler = 0;                 /* 72MHz，1 tick = 125/9 ns */
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 65535;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_OC_Init(&htim1) != HAL_OK)
+  if (HAL_TIM_IC_Init(&htim1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -70,14 +64,11 @@ void MX_TIM1_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.OCMode = TIM_OCMODE_TIMING;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
-  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim1, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -107,18 +98,21 @@ void MX_TIM3_Init(void)
   /* USER CODE END TIM3_Init 0 */
 
   TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
 
   /* USER CODE BEGIN TIM3_Init 1 */
-
+  /* ⚠ 本函数被改成**输入捕获**（原来是 PWM 输出）：
+   *   TIM3_CH1 = PB4 ← MB_IN，TIM3_CH2 = PB5 ← MA_IN（主控驱动信号 A/B 相）。
+   *   注意走的是 **TIM3 部分重映射**（PB4/PB5），不能用默认的 PA6/PA7 ——
+   *   那两个脚是 U1 的 A/B 相 ADC 脚，动不得。CubeMX 再生成后要照这里改回（docs/05 §2.5）。 */
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 0;
+  htim3.Init.Prescaler = 0;                 /* 72MHz，1 tick = 125/9 ns */
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 65535;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  if (HAL_TIM_IC_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
   }
@@ -128,15 +122,15 @@ void MX_TIM3_Init(void)
   {
     Error_Handler();
   }
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim3, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
-  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  if (HAL_TIM_IC_ConfigChannel(&htim3, &sConfigIC, TIM_CHANNEL_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -261,8 +255,9 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* timHandle)
     /**TIM1 GPIO Configuration
     PA8     ------> TIM1_CH1
     */
-    /* ⚠ 本工程不用 TIM1：引脚配成**输入**（原来是 AF_PP 输出）。
-     * 定时器没启动却把引脚配成推挽输出，等于把它钉在低电平上，没意义还有风险。 */
+    /* ⚠ TIM1_CH1 = PA8 ← MC_IN：**输入捕获**，引脚必须是输入。
+     * 原来是 AF_PP 输出，会把被测板上报的驱动信号顶掉。
+     * 带下拉：被测板不在时读到 0 → 干净地判"没信号"。 */
     GPIO_InitStruct.Pin = GPIO_PIN_8;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_PULLDOWN;
@@ -283,7 +278,8 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* timHandle)
     PB4     ------> TIM3_CH1
     PB5     ------> TIM3_CH2
     */
-    /* ⚠ 本工程不用 TIM3：引脚配成**输入**（同上） */
+    /* ⚠ TIM3_CH1 = PB4 ← MB_IN，TIM3_CH2 = PB5 ← MA_IN：**输入捕获**，引脚必须是输入。
+     * 走 TIM3 部分重映射（PB4/PB5），不碰 PA6/PA7（那是 U1 的 A/B 相 ADC 脚）。 */
     GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_PULLDOWN;
@@ -302,13 +298,13 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* timHandle)
   /* USER CODE END TIM4_MspPostInit 0 */
 
     __HAL_RCC_GPIOB_CLK_ENABLE();
-    /**TIM4 GPIO Configuration —— **输入捕获**，不是输出！
-    PB6     ------> TIM4_CH1  ← MC0_OUT
-    PB7     ------> TIM4_CH2  ← MB0_OUT
-    PB8     ------> TIM4_CH3  ← MA0_OUT
-    ⚠ 必须是 GPIO_MODE_INPUT：这三个脚接被测板的三相输出节点，
-      配成 AF_PP 推挽输出会和被测板对打、并把节点拉低（相电压读数也会跟着低）。
-      带下拉：被测板不在时读到 0 → 干净地判"没信号"。 */
+    /**TIM4 GPIO Configuration —— **本工程暂不用 TIM4**（留给 ⑤ 编码器脉冲发生）
+    PB6     ------> TIM4_CH1  ← CN2 编码器 A
+    PB7     ------> TIM4_CH2  ← CN2 编码器 B
+    PB8     ------> TIM4_CH3  ← CN2 编码器 Z
+    ⚠ 这三个脚接的是**编码器座 CN2**（3kΩ 上拉到 3.3V + SMF3.3A），而且 **U2 也挂在同一根线上**。
+      所以做 ⑤ 的时候：U1 配成输出、U2 必须保持输入，且发完要把脚收回输入态，
+      否则两片推挽输出 + 编码器 = 三个驱动源抢同一根线（见 docs/12 §2、docs/15 §9）。 */
     GPIO_InitStruct.Pin = GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_8;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_PULLDOWN;

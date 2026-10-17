@@ -619,6 +619,80 @@ uint8_t Link_SlaveArmTake(link_t *l, uint16_t *window_ms)
     return 1u;
 }
 
+/*==============================================================================
+ * ENC_XCHK 载荷编解码（⑤ 编码器回环，v1.4）
+ *============================================================================*/
+uint16_t Link_EncPackReq(uint8_t *out, uint16_t max, uint8_t action)
+{
+    if ((out == 0) || (max < LINK_ENC_REQ_LEN)) {
+        return 0u;
+    }
+    if ((action != LINK_ENC_ACT_CLEAR) && (action != LINK_ENC_ACT_READ)) {
+        return 0u;                          /* 非法动作**不发出去**：发了对面也只能回 0B */
+    }
+    out[0] = action;
+    return LINK_ENC_REQ_LEN;
+}
+
+uint8_t Link_EncUnpackReq(const uint8_t *in, uint16_t len, uint8_t *action)
+{
+    if ((in == 0) || (len < LINK_ENC_REQ_LEN)) {
+        return 0u;
+    }
+    if ((in[0] != LINK_ENC_ACT_CLEAR) && (in[0] != LINK_ENC_ACT_READ)) {
+        return 0u;
+    }
+    if (action != 0) {
+        *action = in[0];
+    }
+    return 1u;
+}
+
+uint16_t Link_EncPackResp(uint8_t *out, uint16_t max, uint8_t status,
+                          const link_enc_cnt_t *c)
+{
+    link_enc_cnt_t z;
+
+    if ((out == 0) || (max < LINK_ENC_RESP_LEN)) {
+        return 0u;
+    }
+    if (c == 0) {
+        memset(&z, 0, sizeof(z));
+        c = &z;
+    }
+    out[0] = status;
+    out[1]  = (uint8_t)(c->a >> 24); out[2]  = (uint8_t)(c->a >> 16);
+    out[3]  = (uint8_t)(c->a >> 8);  out[4]  = (uint8_t)(c->a);
+    out[5]  = (uint8_t)(c->b >> 24); out[6]  = (uint8_t)(c->b >> 16);
+    out[7]  = (uint8_t)(c->b >> 8);  out[8]  = (uint8_t)(c->b);
+    out[9]  = (uint8_t)(c->z >> 24); out[10] = (uint8_t)(c->z >> 16);
+    out[11] = (uint8_t)(c->z >> 8);  out[12] = (uint8_t)(c->z);
+    out[13] = (uint8_t)(c->lost >> 8);
+    out[14] = (uint8_t)(c->lost);
+    return LINK_ENC_RESP_LEN;
+}
+
+uint8_t Link_EncUnpackResp(const uint8_t *in, uint16_t len, uint8_t *status,
+                           link_enc_cnt_t *c)
+{
+    if ((in == 0) || (len < LINK_ENC_RESP_LEN)) {
+        return 0u;
+    }
+    if (status != 0) {
+        *status = in[0];
+    }
+    if (c != 0) {
+        c->a = ((uint32_t)in[1] << 24) | ((uint32_t)in[2] << 16) |
+               ((uint32_t)in[3] << 8)  | (uint32_t)in[4];
+        c->b = ((uint32_t)in[5] << 24) | ((uint32_t)in[6] << 16) |
+               ((uint32_t)in[7] << 8)  | (uint32_t)in[8];
+        c->z = ((uint32_t)in[9] << 24) | ((uint32_t)in[10] << 16) |
+               ((uint32_t)in[11] << 8) | (uint32_t)in[12];
+        c->lost = (uint16_t)(((uint16_t)in[13] << 8) | (uint16_t)in[14]);
+    }
+    return 1u;
+}
+
 void Link_SlaveArmDone(link_t *l)
 {
     if ((l != 0) && (l->arm_state == (uint8_t)LINK_ARM_ARMED)) {

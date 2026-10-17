@@ -21,6 +21,107 @@
 #define MGR_CMD_MEASURE         0x000Eu   /* 测量 ADC:   请求 1B mode, 应答 77B (meas_pack.h) */
 #define MGR_CMD_PULSE           0x000Fu   /* 脉冲捕获:   请求 1B mode, 应答 91B (pulse_pack.h) */
 #define MGR_CMD_PROGRAM         0x0112u   /* 烧录Flash固件到FOC板  (LEN=0)       */
+/*── DUT 链路（被烧 FOC 板）: 协议见 docs/15, 命令空间 0x0200~0x02FF ──*/
+#define MGR_CMD_DUT_RAW         0x0011u   /* DUT 透传: 请求 cmd(2)+data, 应答 status(1)+data */
+                                          /* 调试/上板用: PC 可以直接发任意 DUT 命令并看原样应答 */
+/*── ⑤ 编码器脉冲发生（治具自己发，不依赖 DUT）──*/
+#define MGR_CMD_ENC_GEN         0x0012u   /* 请求 12B = cnt_a/b/z + freq_a/b/z（各 2B 大端）,
+                                           * 或 LEN=0 用默认参数（A=1000@5kHz/B=2000@10kHz/Z=1）
+                                           * 应答 9B = 状态(1)+完成掩码(1)+超时位(1)+三路翻转数(2×3) */
+#define MGR_ENC_GEN_REQ_LEN     12u       /* 请求长度（LEN=0 也算合法，表示用默认） */
+#define MGR_ENC_GEN_RESP_LEN    9u        /* 应答长度 */
+#define MGR_CMD_ENC_PEER        0x0013u   /* ⑤ 回环：向 U2 要编码器线边沿计数
+                                           * 请求 1B = 动作（0 清零 / 1 读取），转成内部链路
+                                           *       的 ENC_XCHK(0x0109)；
+                                           * 应答 1B jig 状态 + U2 的原始应答（清零 1B / 读取 15B） */
+#define MGR_ENC_PEER_TIMEOUT_MS 50u       /* 等 U2 应答的上限（115200 下往返 < 2ms） */
+/*── ⑥ 相电流检测：一条命令跑完整流程（治具侧闭环，需要 DUT 实现 CURRENT/GET_ADC）──*/
+#define MGR_CMD_CUR_TEST        0x0014u   /* 请求 8B 或 0B（用默认）：
+                                           *   hi_mask(1) + lo_mask(1) + duty_permille(2)
+                                           *   + duration_ms(2) + ch_mask(1) + rsvd(1)
+                                           * 应答 22B 报告 = status(1)+dut_st(1)+ch_count(1)+rsvd(1)
+                                           *   + 每路 9B × 2：flags(1)+jig_idle(2)+jig_on(2)
+                                           *                    +dut_idle(2)+dut_on(2) */
+#define MGR_CUR_TEST_REQ_LEN    8u
+#define MGR_CUR_TEST_RESP_LEN   22u       /* 4 + 9×2 */
+#define MGR_CUR_TIMEOUT_MS      100u      /* 每个 DUT 往返的上限 */
+#define MGR_CUR_SETTLE_MS       20u       /* 通流之后再等一会儿（电流稳定 + DUT 快照更新） */
+/*── ② 电压检测：治具 9 路 vs 被测板自己报的 ──*/
+#define MGR_CMD_VOL_TEST        0x0015u   /* 请求 LEN=0（不用参数）
+                                           * 流程：问 DUT 的 INFO（拿能力位图）→ 按位图问 GET_ADC
+                                           *       → 与治具 9 路逐通道判定 → 报告
+                                           * 应答 71B = 头 8B + 每路 7B × 9
+                                           *   头: status(1)+dut_st(1)+dut_ver(2)+adc_mask(2)+sum(2)
+                                           *   每路: flags(1)+jig_mv(2)+dut_mv(2)+err_mv(2, 有符号) */
+#define MGR_VOL_TEST_RESP_LEN   71u       /* 8 + 7×9 */
+#define MGR_VOL_CH_ITEM_LEN     7u
+/*── ④ 三相输出判据：对**已有的**测量/脉冲结果做判定，不需要新的采集流程 ──
+ * 用法（PC 侧）：先 0x0011 透传 DUT_PWM 让被测板输出已知 PWM → 0x000F mode=1 开窗采集
+ *              → 再发本命令判定。治具不需要自己串流程，PC 按顺序发即可。 */
+#define MGR_CMD_PHASE_JUDGE     0x0016u   /* 请求 7B = mode(1) + duty_a/b/c(各 2B, ‰ 大端)
+                                           *   mode: 0 = 静态电平（不查脉冲）, 1 = PWM（查脉冲）
+                                           *   duty: 0xFFFF = 该相高阻 → 不判
+                                           * 应答 34B = 状态(1)+汇总(2)+相数(1) + 每相 10B
+                                           *   每相: flags(2) + expect_mv(2) + err_mv(2, 有符号)
+                                           *         + tol_mv(2) + duty_pm(2) */
+#define MGR_PHASE_JUDGE_REQ_LEN  7u
+#define MGR_PHASE_JUDGE_RESP_LEN 34u      /* 4 + 10×3 */
+#define MGR_PHASE_ITEM_LEN       10u
+#define MGR_PHASE_MODE_STATIC    0u
+#define MGR_PHASE_MODE_PWM       1u
+#define MGR_PHASE_DUTY_HIZ       0xFFFFu  /* 请求里 duty 填这个 = 该相不判 */
+
+/*── ⑤ 的判定层：三方对齐（治具意图 / U2 实测 / DUT 上报）──
+ * 请求 38B 一次把"三个数 × A/B/Z"全带上（判据层是纯函数，不缓存任何状态，
+ * 上位机手里本来就有这三组数：0x0012 的翻转数、0x0013 的 U2 计数、0x0011 透传的 DUT 计数）。 */
+#define MGR_CMD_ENC_JUDGE       0x0018u   /* 越界守卫: 见 APP_EncJudgeCmd 的 len 校验
+                                           * 应答 29B = 状态(1)+汇总(2)+路数(1)+U2丢沿(2)
+                                           *            +DUT方向(1)+保留(1) + 3 路 × 7B */
+#define MGR_ENC_JUDGE_REQ_LEN     38u     /* exp_a/b/z(6) + tol(2) + u2_a/b/z(12) + u2_lost(2)
+                                           *   + dut_a/b/z(12) + dut_dir(1) + 可用标志(1) + rsvd(2) */
+#define MGR_ENC_JUDGE_RESP_LEN    29u     /* 8 + 3×7 */
+#define MGR_ENC_JUDGE_ITEM_LEN    7u      /* flags(1)+exp(2)+u2(2)+dut(2)，两端饱和到 u16 */
+#define MGR_ENC_JUDGE_AV_U2       0x01u   /* 请求里的"可用标志"：有 U2 数据 */
+#define MGR_ENC_JUDGE_AV_DUT      0x02u   /* 请求里的"可用标志"：有 DUT 数据 */
+
+/*── 治具自检 / 在线状态（上位机"设备连接"页用）──
+ * 只读、无副作用、不依赖 JIG_DUT_LINK，任何时候都能问。 */
+#define MGR_CMD_JIG_STATUS      0x0017u   /* 请求 LEN=0；应答 32B，见 APP_JigStatusCmd */
+#define MGR_JIG_STATUS_RESP_LEN   32u
+#define MGR_JIG_ST_U2_ONLINE      0x01u   /* flags bit0：U2 在线 */
+#define MGR_JIG_ST_U2_VER_SAME    0x02u   /* flags bit1：两片链路代码版本一致 */
+#define MGR_JIG_ST_LINK_BUSY      0x04u   /* flags bit2：内部链路正忙 */
+#define MGR_JIG_ST_DUT_LINK       0x08u   /* flags bit3：本固件编进了 DUT 链路（JIG_DUT_LINK=1） */
+
+/*── 一键全流程：① 进测试模式 → ② 电压 → ③④ 脉冲+相电压 → ⑤ 编码器 → ⑥ 电流 → STOP ──
+ * 中途每一步的应答**照常回给 PC**（上位机可以选择收下或忽略），
+ * 最后再回一条本命令的汇总。详见 docs/17。 */
+#define MGR_CMD_RUN_ALL         0x0010u   /* 请求 LEN=0；应答 29B */
+#define MGR_RUN_ALL_RESP_LEN      29u     /* 4 + 12×2 + 1 */
+#define MGR_RUN_ALL_STEP_COUNT    12u
+#define MGR_RUN_ALL_STEP_LEN      2u      /* 每步：状态(1) + 结果码/摘要(1) */
+#define MGR_RUN_ST_IDLE           0x00u   /* 这一步没跑（被跳过） */
+#define MGR_RUN_ST_OK             0x01u
+#define MGR_RUN_ST_FAIL           0x02u
+#define MGR_RUN_ST_SKIP           0x03u   /* 数据不全/依赖缺失，未判 */
+#define MGR_RUN_ST_TIMEOUT        0x04u
+
+/*── 单项"一条命令跑完"：把"进测试模式 → 激励 → 采集 → 判定 → 关输出"打包 ──
+ * 目的（用户要求）：③ 原来要 3 条、④ 要 4 条、⑤ 要 6 条，现在各一条。
+ * 应答直接复用对应单项报告的线格式，上位机不用写两套解析：
+ *   0x0019(③) 应答 = 0x000F 的 91B    （U1 45B + U2 45B）
+ *   0x001A(④) 应答 = 0x0016 的 34B    （相电压判定）
+ *   0x001B(⑤) 应答 = 0x0018 的 29B    （三方对齐判定）
+ * 流程中途**不再把子命令的应答发给 PC**（只回最后那一条），所以真的"一条命令一条应答"。
+ * 参数 LEN=0 全部用默认值；也可以带参数覆盖（见各命令说明）。 */
+#define MGR_CMD_PULSE_TEST      0x0019u   /* ③ 一条命令 */
+#define MGR_CMD_PHASE_TEST      0x001Au   /* ④ 一条命令 */
+#define MGR_CMD_ENC_TEST        0x001Bu   /* ⑤ 一条命令 */
+#define MGR_PULSE_TEST_RESP_LEN   91u     /* = PULSE_PACK_RESP_LEN */
+#define MGR_PHASE_TEST_RESP_LEN   34u     /* = MGR_PHASE_JUDGE_RESP_LEN */
+#define MGR_ENC_TEST_RESP_LEN     29u     /* = MGR_ENC_JUDGE_RESP_LEN */
+#define MGR_FLOW_STEP_TIMEOUT_MS  4000u   /* 流程里每一步的超时上限 */
+#define MGR_FLOW_WDT_MS           4000u   /* 给 DUT 的失联看门狗（比单步超时略长） */
 
 /* 0x000E / 0x000F 请求里共用的 mode 字节（两条命令语义一致，各自独立） */
 #define MGR_MODE_READ           0x00u   /* 只读最近一批结果, 不触发测量(调试用) */

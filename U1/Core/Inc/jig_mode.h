@@ -65,11 +65,24 @@
 #define MEAS_THRESHOLDS_ENABLED ((JIG_MODE == JIG_MODE_PRODUCTION) ? 1 : 0)
 #endif
 
-/* --- 3.4 调试打印（走 U1 的 USART1 / PA9）--------------------------------
+/* --- 3.4 DUT 串口（USART1）占用开关 --------------------------------------
+ * U1 的 USART1（PA9/PA10）有**两个用途，只能二选一**：
+ *   - **DUT 链路**：跟被烧 FOC 板通信（任务 ①③④⑤⑥ 要用，规范见 docs/15）
+ *   - **调试打印**：SWD 烧录/测量的打点输出（`bsp_uart.c`）
+ * 同时开的话，调试字符会灌到被测板的串口线上，被测板收到的是垃圾帧。
+ *
+ * 由各工程的 Keil Define 提供（和 JIG_HAS_DEBUG_UART 同一套路），
+ * **默认 0**：不接 DUT 时保持现在的行为不变。
+ * 下面有一条 `#error` 做机械保证 —— 两个都开直接编译不过，不靠人记。 */
+#ifndef JIG_DUT_LINK
+#define JIG_DUT_LINK         0
+#endif
+
+/* --- 3.5 调试打印（走 U1 的 USART1 / PA9）--------------------------------
  * U2 没有调试串口 → 恒为 0（否则 measure.c 会去引用不存在的 bsp_uart）。
- * 注意：USART1 同时是 DUT 串口，打开打印就等于占用它（二选一）。 */
+ * **JIG_DUT_LINK=1 时强制关闭**（见 §3.4）。 */
 #ifndef MEAS_PRINT_ENABLE
-#define MEAS_PRINT_ENABLE    (((JIG_MODE == JIG_MODE_DEBUG) && (JIG_HAS_DEBUG_UART != 0)) ? 1 : 0)
+#define MEAS_PRINT_ENABLE    (((JIG_MODE == JIG_MODE_DEBUG) && (JIG_HAS_DEBUG_UART != 0) && (JIG_DUT_LINK == 0)) ? 1 : 0)
 #endif
 #ifndef BSP_DBG_ENABLE
 #define BSP_DBG_ENABLE       MEAS_PRINT_ENABLE
@@ -78,7 +91,12 @@
 #define MEAS_PRINT_PERIOD_MS 1000u
 #endif
 
-/* --- 3.5 标定项（与运行模式无关，标定完手动置 1）-------------------------
+/* USART1 二选一的机械保证：两个都开 = 编译期报错 */
+#if (JIG_DUT_LINK != 0) && (BSP_DBG_ENABLE != 0)
+#error "JIG_DUT_LINK=1 时不能开调试打印：两者都占用 U1 的 USART1（见 jig_mode.h 3.4/3.5）"
+#endif
+
+/* --- 3.6 标定项（与运行模式无关，标定完手动置 1）-------------------------
  * VDDA 默认写死 3300mV（LDO ±1%）；要用内部 VREFINT 跟踪漂移时：
  *   先用万用表量出本板 VREFINT 的真实值 → 填 MEAS_VREFINT_MV → 置 1。 */
 #ifndef MEAS_USE_VREFINT

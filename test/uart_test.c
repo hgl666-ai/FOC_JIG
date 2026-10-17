@@ -18,6 +18,7 @@
  *   3) 接收环满: 丢新字节 + rx_drop 计数(而不是丢最旧, 也不静默)
  *   4) 发送队列满: 发送卡住时写超量 → tx_drop 计数 + 卡住解除后自动继续
  *   5) ORE 溢出后必须重新挂接收(否则这一路永久哑掉且无任何报错)
+ *   5b) 发送途中继续入队: tail 只能按"这一段实际交给 HAL 的长度"推进(不许倒推)
  *   6) 链路 PING 往返 / 应答数据搬运
  *   7) 链路超时: 对侧不在 → 超时返回 + tx_timeout 计数 + 状态复位(下次还能用)
  *   8) 链路 CRC 错恢复 / 前置垃圾重同步 / 超长 LEN 拒绝
@@ -387,6 +388,48 @@ static void test_error_rearm(void)
         CHECK(UartPort_Read(UART_PORT_0, &out, 1u) == 1u, "重挂后收得到数据");
         CHECK(out == 0x77u, "内容正确");
     }
+}
+
+/*==============================================================================
+ * 5b) 发送途中继续入队: tail 只能按"这一段实际交给 HAL 的长度"推进
+ *     —— docs/03 §4 的 D6 回归用例（老代码在这里会静默丢字节）
+ *============================================================================*/
+static void test_tx_seg_snapshot(void)
+{
+    uint8_t  seg1[4] = { 0x11u, 0x12u, 0x13u, 0x14u };
+    uint8_t  seg2[3] = { 0x21u, 0x22u, 0x23u };
+    uint8_t  rx[16];
+    uint16_t n;
+    uart_port_t *p;
+
+    SECTION("5b) 飞行中再入队 → 不许把没发出去的字节当成已发 (D6)");
+    sim_setup();
+    ports_start();
+    p = UartPort_Get(UART_PORT_1);
+
+    /* 对侧"卡住" = 这一段挂上去就一直不完成。真实硬件里这就是"发送要花
+     * 几百 us ~ 几 ms"的那段窗口，主循环在这段时间里完全可能又塞一帧。 */
+    s_side[SIM_SIDE_B].hold_tx = 1u;
+    CHECK(UartPort_Write(UART_PORT_1, seg1, 4u) == 4u, "第一段 4B 入队");
+    CHECK(p->tx_busy != 0u, "这一段已在飞（busy=1）");
+    CHECK(p->tx_len == 4u, "在飞段长被记成 4");
+
+    /* 飞行途中又塞 3B: head 往前走了，但这 3B 一个字节都还没发出去 */
+    CHECK(UartPort_Write(UART_PORT_1, seg2, 3u) == 3u, "飞行途中再入队 3B");
+    CHECK(p->tx_busy != 0u, "队列里多了数据，但仍在飞同一段（没有重复发起）");
+
+    /* 放行: 第一段发完 → 完成中断只能推进 4，剩下的 3B 必须接着发 */
+    s_side[SIM_SIDE_B].hold_tx = 0u;
+    sim_pump();
+
+    CHECK(p->tx_tail == 7u, "tx_tail 推进到 7（4+3）");
+    n = UartPort_Read(UART_PORT_0, rx, (uint16_t)sizeof(rx));
+    CHECK(n == 7u, "对侧收满 7B（倒推段长的老代码这里只收到 4B）");
+    CHECK(memcmp(rx, seg1, 4u) == 0, "前 4B 内容正确");
+    CHECK(memcmp(&rx[4], seg2, 3u) == 0, "后 3B 内容正确（没有被 tail 跳过）");
+    CHECK(p->tx_busy == 0u, "发完回到空闲：busy=0");
+    CHECK(p->tx_len == 0u, "发完回到空闲：tx_len=0（不变式：busy≠0 ⟺ tx_len≠0）");
+    CHECK(UartPort_Stats(UART_PORT_1)->tx_err == 0u, "全程没有 HAL 拒发");
 }
 
 /*==============================================================================
@@ -798,7 +841,13 @@ static void test_link_status(void)
           "rx_frames 大端 u32 排在 [6..9]");
     CHECK(buf[14] == 0x0Au && buf[17] == 0x0Du, "rx_bytes 排在 [14..17]");
     CHECK(buf[18] == 0u && buf[21] == 9u, "rx_drop 排在 [18..21]");
-    CHECK(buf[22] == 0x00u && buf[23] == 0xFFu, "caps 大端排在 [22..23]");
+    /* 位置用常量推导（**不要写死字面量**：v1.4 加了 ENC_XCHK 之后
+     * 这里曾经因为硬编码 0x00FF 而误报一次），值本身另外显式钉住。 */
+    CHECK(buf[22] == (uint8_t)(LINK_CAP_ALL >> 8) && buf[23] == (uint8_t)LINK_CAP_ALL,
+          "caps 大端排在 [22..23]");
+    CHECK(LINK_CAP_ALL == 0x01FFu, "v1.4 的 caps 全集 = 0x01FF（bit0..8）");
+    CHECK(LINK_CAP_ENC_XCHK == 0x0100u, "ENC_XCHK 占 bit8");
+    CHECK(LINK_CODE_VER == 0x0104u, "v1.4 链路代码版本 = 0x0104");
     CHECK(buf[24] == 0x00u && buf[25] == 0x03u, "ev_pending 大端排在 [24..25]");
     CHECK(buf[26] == 0x00u && buf[27] == 0x07u, "ev_overflow 大端排在 [26..27]");
 
@@ -841,6 +890,78 @@ static void test_code_ver(void)
     st.code_ver = (uint16_t)(LINK_CODE_VER ^ 0x00A5u);   /* 假装对端是旧版本 */
     CHECK(Link_CheckVersion(&st) == 0u, "版本不同 → 检出不一致");
     CHECK(Link_CheckVersion(0) == 0u, "空指针安全 (按不一致处理)");
+}
+
+/*==============================================================================
+ * 10c) ENC_XCHK 载荷编解码（v1.4，⑤ 编码器回环采集）
+ *============================================================================*/
+static void test_enc_codec(void)
+{
+    uint8_t        buf[LINK_ENC_RESP_LEN + 4u];
+    uint8_t        act = 0xFFu;
+    uint8_t        st  = 0xFFu;
+    link_enc_cnt_t c;
+
+    SECTION("10c) ENC_XCHK 载荷编解码");
+
+    CHECK(LINK_ENC_REQ_LEN == 1u && LINK_ENC_RESP_LEN == 15u, "长度常量：请求 1B / 应答 15B");
+
+    /* 请求：两个合法动作 */
+    CHECK(Link_EncPackReq(buf, sizeof(buf), LINK_ENC_ACT_CLEAR) == 1u && buf[0] == 0x00u,
+          "打包清零动作 = 0x00");
+    CHECK(Link_EncPackReq(buf, sizeof(buf), LINK_ENC_ACT_READ) == 1u && buf[0] == 0x01u,
+          "打包读取动作 = 0x01");
+    CHECK(Link_EncPackReq(buf, sizeof(buf), 2u) == 0u, "非法动作**不发出去**（返回 0）");
+    CHECK(Link_EncPackReq(buf, 0u, LINK_ENC_ACT_READ) == 0u, "容量不足 → 0");
+    CHECK(Link_EncPackReq(0, sizeof(buf), LINK_ENC_ACT_READ) == 0u, "空指针 → 0");
+
+    /* 解请求 */
+    buf[0] = 0x00u;
+    CHECK(Link_EncUnpackReq(buf, 1u, &act) == 1u && act == LINK_ENC_ACT_CLEAR, "解清零动作");
+    buf[0] = 0x01u;
+    CHECK(Link_EncUnpackReq(buf, 1u, &act) == 1u && act == LINK_ENC_ACT_READ, "解读取动作");
+    buf[0] = 0x05u;
+    CHECK(Link_EncUnpackReq(buf, 1u, &act) == 0u, "非法动作 → 失败（对面应回 0B）");
+    CHECK(Link_EncUnpackReq(buf, 0u, &act) == 0u, "长度 0 → 失败");
+    CHECK(Link_EncUnpackReq(0, 1u, &act) == 0u, "空指针 → 失败");
+
+    /* 应答：逐字节大端 */
+    c.a = 0x000007D0u;      /* 2000 个边沿 = 1000 个脉冲 @5kHz */
+    c.b = 0x00000FA0u;      /* 4000 个边沿 = 2000 个脉冲 @10kHz */
+    c.z = 0x00000002u;      /* 2 个边沿 = 1 个脉冲 */
+    c.lost = 0x0000u;
+    CHECK(Link_EncPackResp(buf, sizeof(buf), LINK_ST_OK, &c) == LINK_ENC_RESP_LEN,
+          "打包返回 15B");
+    CHECK(buf[0] == 0x00u, "[0] 状态");
+    CHECK(buf[1] == 0x00u && buf[2] == 0x00u && buf[3] == 0x07u && buf[4] == 0xD0u,
+          "A 计数大端排在 [1..4]");
+    CHECK(buf[5] == 0x00u && buf[6] == 0x00u && buf[7] == 0x0Fu && buf[8] == 0xA0u,
+          "B 计数大端排在 [5..8]");
+    CHECK(buf[9] == 0x00u && buf[10] == 0x00u && buf[11] == 0x00u && buf[12] == 0x02u,
+          "Z 计数大端排在 [9..12]");
+    CHECK(buf[13] == 0x00u && buf[14] == 0x00u, "丢边沿数排在 [13..14]");
+
+    /* 解回来必须一模一样（往返） */
+    memset(&c, 0xA5, sizeof(c));
+    CHECK(Link_EncUnpackResp(buf, LINK_ENC_RESP_LEN, &st, &c) == 1u, "解包成功");
+    CHECK(st == LINK_ST_OK, "状态解出 00");
+    CHECK(c.a == 0x000007D0u && c.b == 0x00000FA0u && c.z == 2u && c.lost == 0u,
+          "三个计数与丢边沿都原样回来（往返一致）");
+    CHECK(Link_EncUnpackResp(buf, LINK_ENC_RESP_LEN - 1u, &st, &c) == 0u, "少 1 字节 → 失败");
+    CHECK(Link_EncUnpackResp(0, LINK_ENC_RESP_LEN, &st, &c) == 0u, "空指针 → 失败");
+
+    /* lost 非 0 也要能带回来（上板诊断用） */
+    c.lost = 0x1234u;
+    CHECK(Link_EncPackResp(buf, sizeof(buf), LINK_ST_OK, &c) == LINK_ENC_RESP_LEN, "打包带 lost");
+    CHECK(buf[13] == 0x12u && buf[14] == 0x34u, "lost 大端排在 [13..14]");
+    CHECK(Link_EncUnpackResp(buf, LINK_ENC_RESP_LEN, 0, &c) == 1u && c.lost == 0x1234u,
+          "lost 往返一致（status 传 0 = 不关心也能解）");
+
+    /* 空指针计数：status/c 传 0 不能崩 */
+    CHECK(Link_EncPackResp(buf, sizeof(buf), LINK_ST_OK, 0) == LINK_ENC_RESP_LEN,
+          "PackResp 计数传 NULL → 当成全 0 打包");
+    CHECK(buf[1] == 0u && buf[12] == 0u, "NULL 计数被打成全 0");
+    CHECK(Link_EncUnpackResp(buf, LINK_ENC_RESP_LEN, 0, 0) == 1u, "两个出参都传 NULL 也能解");
 }
 
 /*==============================================================================
@@ -1148,12 +1269,14 @@ int main(void)
     test_rx_overflow();
     test_tx_overflow();
     test_error_rearm();
+    test_tx_seg_snapshot();
     test_link_ping();
     test_link_timeout();
     test_link_garbage();
     test_link_busy_and_nonblock();
     test_link_status();
     test_code_ver();
+    test_enc_codec();
     test_link_status_e2e();
     test_meas_xchk();
     test_pulse_xchk();

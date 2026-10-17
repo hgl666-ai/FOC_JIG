@@ -1,14 +1,30 @@
 /**
   ******************************************************************************
   * @file    pulse_cfg.c
-  * @brief   U2 输入捕获的硬件层：TIM3(CH2/CH1) + TIM1(CH1) ← 主控驱动信号
+  * @brief   输入捕获的硬件层：TIM3(CH2=A / CH1=B) + TIM1(CH1=C) ← 主控驱动信号
   *
-  * 与 U1 同一套写法（自己写的精简中断，不走 HAL_TIM_IRQHandler），
-  * 差别只是通道分散在两个定时器、各自维护自己的溢出计数：
+  * ⚠ **两片逐字节相同**（同一组信号、同一套定时器），见 `pulse_cfg.h` 的说明。
+  *
+  * 中断写法是**自己写的精简版**（不走 HAL_TIM_IRQHandler）：
+  *   高速 PWM 时 3 相 × 2 边沿 × 20kHz = 12 万次/秒，
+  *   HAL 的通用处理函数每次要跑一圈状态机太贵；这里只做三件事：
+  *     1) 读 SR 一次（同时拿到"哪个通道捕获了"和"有没有溢出"）
+  *     2) 读 CCR（读动作本身就清标志）→ 拼出 32 位时间戳 → 交给算法层
+  *     3) 翻转该通道的捕获极性（下一次捕反方向的沿）
+  *
+  * 通道分散在两个定时器、各自维护自己的溢出计数：
   *   TIM3_IRQn     : CH1(B) / CH2(A) / 溢出   —— 一个向量全包
   *   TIM1_CC_IRQn  : CH1(C)                   —— 高级定时器的捕获单独一个向量
   *   TIM1_UP_IRQn  : 溢出
   * 每个相位的时间戳只来自它自己的定时器，所以两套时基互不影响。
+  *
+  * 溢出与捕获的相对顺序（会算错时间戳的那个坑）：
+  *   读 SR 时若 UIF 置位、且捕获值很小（<0x8000），说明**先溢出、后捕获**，
+  *   这一拍要按 overflow+1 记，否则时间戳会少 65536 个 tick（区间直接算错）。
+  *
+  * 开窗 `PULSE_CfgStart` 是一整段临界区（关 NVIC + 清 pending → 清寄存器/计数
+  *   → 清算法层边沿环 → 再打开）：只关 DIER 挡不住已经排在 NVIC 里的那一发。
+  *   原因与顺序见该函数里的注释（docs/03 §4 的 D4/D5）。
   ******************************************************************************
   */
 #include "pulse_cfg.h"
@@ -75,6 +91,39 @@ void PULSE_CfgInit(void)
 
 void PULSE_CfgStart(uint16_t window_ms)
 {
+    /* ── 开窗临界区（docs/03 §4 的 D4 / D5，2026-10 修）───────────────────
+     * 这里要复位三组"中断也在动"的状态：溢出计数 s_ovf3/s_ovf1、
+     * 边沿环 s_ph[]（在 PULSE_Start 里清）、极性影子 s_ccer3/s_ccer1。
+     *
+     * ⚠ 只关 DIER 是不够的（老代码就是这么写的，所以有 D4/D5）：
+     *   DIER 只挡"以后新产生"的中断请求；**在本函数进来之前就已经置起、
+     *   正排在 NVIC 里等着执行**的那一次溢出/捕获，关 DIER 挡不住 ——
+     *   它会在本函数返回后的某个时刻跑进来：
+     *     · 把刚清零的 s_ovf3 自增一次 → 该相时间戳的高位突然多 65536 个
+     *       tick（≈0.91 ms）→ 相邻两沿的区间、周期、占空比全错；
+     *     · 或者往刚清空的环里追加一个边沿 → head/count 不成对 → 奇偶判错。
+     *
+     * 顺序不能换（换了就等于没修）：
+     *   ① 关中断（PRIMASK）
+     *   ② 关 NVIC 的三个向量，并清它们的 pending 位
+     *      —— 清了 pending 才真正挡住"已经排上队的那一次"
+     *   ③ 清外设：CNT/SR/计数/极性影子
+     *      —— 必须在②之后：SR 里残留的 CCxIF/UIF 会在重开 NVIC 的瞬间
+     *         又置起一次 pending
+     *   ④ 复位算法层状态（PULSE_Start 清边沿环）—— 也必须在临界区里
+     *   ⑤ 先开 NVIC，再开 DIER，最后才放中断
+     *
+     * 代价：整段约几十个周期（<2 us）。115200 下一个字节要 87 us，
+     *       不会把串口收字节挡丢。 */
+    __disable_irq();
+
+    HAL_NVIC_DisableIRQ(TIM3_IRQn);
+    HAL_NVIC_DisableIRQ(TIM1_CC_IRQn);
+    HAL_NVIC_DisableIRQ(TIM1_UP_IRQn);
+    NVIC_ClearPendingIRQ(TIM3_IRQn);
+    NVIC_ClearPendingIRQ(TIM1_CC_IRQn);
+    NVIC_ClearPendingIRQ(TIM1_UP_IRQn);
+
     PCFG3_TIM->DIER &= (uint16_t)~PCFG3_DIER_CC;
     PCFG1_TIM->DIER &= (uint16_t)~PCFG1_DIER_CC;
 
@@ -82,20 +131,27 @@ void PULSE_CfgStart(uint16_t window_ms)
     PCFG1_TIM->CNT = 0u; PCFG1_TIM->SR = 0u; s_ovf1 = 0u; s_lost1 = 0u;
 
     /* 起始极性：都等上升沿；之后每个边沿翻一次。
-     * 和中断里一样走影子 + 关中断几拍，避免丢掉中断已做过的翻转。 */
-    __disable_irq();
+     * 和中断里一样走影子，避免丢掉中断已做过的翻转。 */
     s_ccer3 &= (uint16_t)~(TIM_CCER_CC1P | TIM_CCER_CC2P);
     s_ccer1 &= (uint16_t)~(TIM_CCER_CC1P);
     PCFG3_TIM->CCER = s_ccer3;
     PCFG1_TIM->CCER = s_ccer1;
-    __enable_irq();
 
     PULSE_Start(window_ms);
 
+    HAL_NVIC_EnableIRQ(TIM3_IRQn);
+    HAL_NVIC_EnableIRQ(TIM1_CC_IRQn);
+    HAL_NVIC_EnableIRQ(TIM1_UP_IRQn);
+
     PCFG3_TIM->DIER |= PCFG3_DIER_CC;
     PCFG1_TIM->DIER |= PCFG1_DIER_CC;
+
+    __enable_irq();
 }
 
+/* 关窗不需要那套"清 pending"的动作：关掉 DIER 之后即使还有一次中断排队，
+ * 它跑进来时 s_running 已经是 0（PULSE_Stop 置的），PULSE_OnEdge 会直接返回，
+ * 因此不会再往环里追加边沿；残留的 s_ovf 自增会被下一次开窗的临界区清掉。 */
 void PULSE_CfgStop(void)
 {
     PCFG3_TIM->DIER &= (uint16_t)~PCFG3_DIER_CC;

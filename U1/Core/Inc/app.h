@@ -17,7 +17,13 @@ typedef enum {
     APP_STATE_IDLE,
     APP_STATE_UPLOADING,     /* 固件上传中 (只接受 0x000A / 0x000B) */
     APP_STATE_PROGRAMMING,   /* SWD 烧录中  (只接受 0x0112, 回 BUSY) */
-    APP_STATE_TESTING        /* 测量测试中  (0x000E mode=1, 跑完判定才回 ACK) */
+    APP_STATE_TESTING,       /* 测量测试中  (0x000E mode=1, 跑完判定才回 ACK) */
+    APP_STATE_DUT,           /* DUT 透传中等应答 (0x0011; 需要 JIG_DUT_LINK=1) */
+    APP_STATE_ENC,           /* 编码器脉冲串发送中 (0x0012, 约 200ms 后回 ACK) */
+    APP_STATE_ENC_PEER,      /* 向 U2 要编码器计数中 (0x0013) */
+    APP_STATE_CUR,           /* ⑥ 相电流检测流程中 (0x0014; 需要 JIG_DUT_LINK=1) */
+    APP_STATE_VOL,           /* ② 电压检测流程中 (0x0015; 需要 JIG_DUT_LINK=1) */
+    APP_STATE_RUN            /* 0x0010 一键全流程编排中 (需要 JIG_DUT_LINK=1) */
 } APP_State_t;
 
 extern APP_State_t app_state;

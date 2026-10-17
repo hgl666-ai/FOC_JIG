@@ -43,6 +43,33 @@
 #define LINK_CMD_RESET      0x0106u   /* U1→U2 链路复位: 清收发环 + 复位会话         */
 #define LINK_CMD_EVENT      0x0107u   /* **U2→U1 主动事件**（帧序号 = 0, 无应答）    */
 #define LINK_CMD_EVENT_GET  0x0108u   /* U1→U2 拉取一条待决事件（取即清）             */
+#define LINK_CMD_ENC_XCHK   0x0109u   /* U1↔U2 编码器线边沿计数（⑤ 的回环采集）      */
+
+/* ------------------------------------------------------------------
+ * ENC_XCHK（⑤ 编码器检测的回环采集，v1.4 新增）
+ * ------------------------------------------------------------------
+ * ⑤ 的做法：U1 从 CN2 的 A/B/Z 发定量脉冲串，U2 **用独立计数器**数这三根线上的边沿，
+ * 拿回来和"U1 打算发多少"比 —— 证明信号真的到线上了。
+ * （被测板再报一份它自己的计数，就是三方对比的第三条腿，走 DUT 链路。）
+ *
+ * ⚠ 为什么不用 pulse_cap / PULSE_XCHK：`pulse_cap.c` 是**单例**，
+ *   而 U2 的滚动窗口一直在采 MA_IN 组。用独立计数器就能**同时**采两组，
+ *   不需要"采集源切换"，也不必改 ARM 的语义 —— 这是本版选它的主要原因。
+ *   代价是只数边沿、不给周期/占空比（⑤ 只需要个数）。
+ * ------------------------------------------------------------------ */
+#define LINK_ENC_REQ_LEN    1u    /* 动作: 0 = 清零并保持计数, 1 = 读取(不清零) */
+#define LINK_ENC_RESP_LEN   15u   /* status(1) + A/B/Z 计数(4×3) + 丢边沿(2)     */
+
+#define LINK_ENC_ACT_CLEAR  0u    /* 清零计数器（发脉冲之前调） */
+#define LINK_ENC_ACT_READ   1u    /* 读计数（发完之后调）       */
+
+/** ENC_XCHK 的计数结果（内存表示，与线格式无关） */
+typedef struct {
+    uint32_t a;        /* A 相累计边沿数（1 个完整脉冲 = 2 个边沿） */
+    uint32_t b;
+    uint32_t z;
+    uint16_t lost;     /* 捕获中断里发现"标志已置位还没处理"的次数；>0 说明可能数漏了 */
+} link_enc_cnt_t;
 
 /* ------------------------------------------------------------------
  * 事件（U2 自己发现问题就喊一声；可靠性靠"事件当状态用", 见 docs/13 §5.7）
@@ -92,7 +119,8 @@
  *       必须把这个值 +1**（两份副本一起改），两片一起重编重烧。
  * 从机在 STATUS 里回这个值，主机比对；不一致时 U1 会把 APP_U2VerOk() 置 0。
  *============================================================================*/
-#define LINK_CODE_VER     0x0103u   /* v1.3: ARM/RESET/EVENT/EVENT_GET + STATUS 28B (见 docs/13) */
+#define LINK_CODE_VER     0x0104u   /* v1.4: 新增 ENC_XCHK(0x0109) — ⑤ 编码器回环采集
+                                     *       v1.3: ARM/RESET/EVENT/EVENT_GET + STATUS 28B (见 docs/13) */
 
 /* 链路级状态码: 放在应答数据第 1 字节 (PING 除外, 它的数据区是回环内容)
  * 取值与 PC 协议的状态码表**一致** (docs/13 §3.2), 不自造一套。 */
@@ -123,7 +151,8 @@
 #define LINK_CAP_RESET      ((uint16_t)1u << 5)
 #define LINK_CAP_EVENT      ((uint16_t)1u << 6)
 #define LINK_CAP_EVENT_GET  ((uint16_t)1u << 7)
-#define LINK_CAP_ALL        ((uint16_t)0x00FFu)
+#define LINK_CAP_ENC_XCHK   ((uint16_t)1u << 8)
+#define LINK_CAP_ALL        ((uint16_t)0x01FFu)
 
 /* 帧内字节间隔超时 (§3.5): 超过这个时间还没等到后续字节 → 判半截帧丢弃 */
 #define LINK_HALF_FRAME_MS  5u
@@ -392,6 +421,21 @@ void     Link_SlaveArmDone(link_t *l);
 
 /** 从机：当前 ARM 状态 (LINK_ARM_*) */
 uint8_t  Link_SlaveArmState(const link_t *l);
+
+/* ------------------------------------------------------------------
+ * ENC_XCHK 载荷编解码（⑤ 编码器回环，v1.4）
+ * 编解码只有这一份代码 → 两片副本，回归 fc /b 比对。
+ * ------------------------------------------------------------------ */
+/** 主机/从机通用：打包请求（1B 动作）。@retval 写入字节数；容量不足返回 0 */
+uint16_t Link_EncPackReq(uint8_t *out, uint16_t max, uint8_t action);
+/** 解请求。@retval 1 = 成功（动作合法）；0 = 长度不对或动作非法 */
+uint8_t  Link_EncUnpackReq(const uint8_t *in, uint16_t len, uint8_t *action);
+/** 从机：打包应答（15B）。@retval 写入字节数；容量不足返回 0 */
+uint16_t Link_EncPackResp(uint8_t *out, uint16_t max, uint8_t status,
+                          const link_enc_cnt_t *c);
+/** 主机：解应答。@retval 1 = 成功；0 = 长度或参数不对 */
+uint8_t  Link_EncUnpackResp(const uint8_t *in, uint16_t len, uint8_t *status,
+                            link_enc_cnt_t *c);
 
 /**
   * @brief  主机：复位自己的链路会话（清收发环 + 半截帧 + 未完成请求 + 幂等缓存）

@@ -26,6 +26,7 @@
 #include "pulse_cap.h"
 #include "pulse_pack.h"
 #include "pulse_cfg.h"
+#include "enc_cap.h"
 
 static link_t   s_u1_link;          /* 与 U1 的链路 (本片是从机) */
 static uint16_t s_alive;            /* STATUS 里的存活计数: 证明"这一发是真的新应答" */
@@ -94,6 +95,29 @@ static uint8_t U2_LinkHandler(uint16_t cmd, const uint8_t *in, uint16_t inlen,
         return (*outlen != 0u) ? 1u : 0u;
     }
 
+    /*── ⑤ 编码器回环采集: 数 CN2 的 A/B/Z 上有多少个边沿 ──
+     * 请求 1B 动作: 0 = 清零并继续计数（U1 发脉冲之前调）, 1 = 读计数。
+     * 用的是**独立计数器**（enc_cap.c），所以和上面那个滚动窗口**同时**跑不打架。 */
+    case LINK_CMD_ENC_XCHK: {
+        uint8_t act = 0u;
+        link_enc_cnt_t c;
+
+        if (Link_EncUnpackReq(in, inlen, &act) == 0u) {
+            out[0]  = LINK_ST_ERR_PARAM;        /* 长度不对或动作非法 */
+            *outlen = 1u;
+            return 1u;
+        }
+        if (act == LINK_ENC_ACT_CLEAR) {
+            EncCap_Clear();
+            out[0]  = LINK_ST_OK;               /* 清零不需要回计数 */
+            *outlen = 1u;
+            return 1u;
+        }
+        EncCap_Read(&c);
+        *outlen = Link_EncPackResp(out, LINK_MAX_PAYLOAD, LINK_ST_OK, &c);
+        return (*outlen != 0u) ? 1u : 0u;
+    }
+
     /*── 其它测量命令(0x0102 预留): 明确回 NIY ──
      * 回 NIY(而不是不应答)是有意的: U1 才能区分"U2 不在/线没接"和
      * "U2 在, 但这条命令还没实现", 否则只能看到一个超时。 */
@@ -114,6 +138,11 @@ void U2App_Init(void)
     PULSE_Init();
     PULSE_CfgInit();
     PULSE_CfgStart(PULSE_WINDOW_MS);
+
+    /* ⑤ 编码器回环采集：TIM4 数 CN2 的 A/B/Z 边沿，**一直使能、自由计数**。
+     * 它有自己的计数器，和上面那个滚动窗口互不干扰（见 enc_cap.h 的说明）。
+     * 清零在 U1 发脉冲之前用 ENC_XCHK(action=0) 触发。 */
+    EncCap_Init();
 }
 
 /*------------------------------------------------------------------------------
