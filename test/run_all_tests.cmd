@@ -37,7 +37,7 @@ echo.
 echo ============================================================
 echo  2/12  Full-chain test (PC frame to target flash, all simulated)
 echo ============================================================
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%ROOT%\test\swdsim\sim_target.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%ROOT%\test\swdsim\sim_target.c"
 if errorlevel 1 goto :app_build_fail
 "%ROOT%\test\app_test.exe"
 if errorlevel 1 goto :app_fail
@@ -50,7 +50,7 @@ rem  are compiled out and the DUT passthrough cases (T17) run instead.
 :appdut
 echo.
 echo     --- app_test in DUT-link mode ---
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" "-DJIG_DUT_LINK=1" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_dut_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\cur_chk.c" "%SRC%\vol_chk.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%SRC%\dut_proto.c" "%ROOT%\test\swdsim\sim_target.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" "-DJIG_DUT_LINK=1" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_dut_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%SRC%\cur_chk.c" "%SRC%\vol_chk.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%SRC%\dut_proto.c" "%ROOT%\test\swdsim\sim_target.c"
 if errorlevel 1 goto :appdut_build_fail
 "%ROOT%\test\app_dut_test.exe"
 if errorlevel 1 goto :appdut_fail
@@ -202,12 +202,25 @@ if errorlevel 1 goto :curchk_fail
 if errorlevel 1 goto :curchk_build_fail
 "%ROOT%\test\vol_chk_test.exe"
 if errorlevel 1 goto :curchk_fail
+rem  sn_report: board SN upload (0x0024)
+"%GCC%" -std=c99 -Wall -Wextra -O1 -I"%ROOT%\U1\Core\Inc" -o "%ROOT%\test\sn_report_test.exe" "%ROOT%\test\sn_report_test.c" "%SRC%\sn_report.c"
+if errorlevel 1 goto :snrep_build_fail
+"%ROOT%\test\sn_report_test.exe"
+if errorlevel 1 goto :snrep_fail
 rem  enc_chk: encoder three-way judgement (jig intent vs U2 vs DUT)
 "%GCC%" -std=c99 -Wall -Wextra -O1 -I"%ROOT%\U1\Core\Inc" -o "%ROOT%\test\enc_chk_test.exe" "%ROOT%\test\enc_chk_test.c" "%SRC%\enc_chk.c"
 if errorlevel 1 goto :curchk_build_fail
 "%ROOT%\test\enc_chk_test.exe"
 if errorlevel 1 goto :curchk_fail
-echo [PASS] judgement tests (cur_chk + vol_chk + enc_chk)
+echo [PASS] judgement tests (cur_chk + vol_chk + enc_chk + sn_report)
+goto :py
+:snrep_build_fail
+echo [FAIL] sn_report_test compile error
+set FAILED=1
+goto :py
+:snrep_fail
+echo [FAIL] sn_report_test
+set FAILED=1
 goto :py
 :curchk_build_fail
 echo [FAIL] cur_chk_test compile error

@@ -37,6 +37,8 @@
 #include "phase_chk.h"
 #include "enc_plan.h"
 #include "enc_chk.h"
+#include "sn_report.h"      /* 0x0024 板子 SN 主动上报（烧录成功后） */
+#include "swd_memap.h"      /* SWD_MemReadBlock：读被测板 96-bit UID */
 #include "enc_gen.h"
 #include "jig_mode.h"
 #include "usbd_cdc_if.h"
@@ -2240,6 +2242,40 @@ static void APP_EncTestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
 #endif /* JIG_DUT_LINK */
 
 /*==============================================================================
+ * 板子 SN 主动上报（0x0024）
+ *----------------------------------------------------------------------------
+ * 烧录成功后读被测板 96-bit UID（RM0090 Unique device ID，F405 在 0x1FFF7A10），
+ * 组 16B（算法版本 + UID + XOR + 预留）后以**自发帧**（SEQ=0）推给 PC。
+ * 三条约定：读 UID 失败静默跳过 / 同板不重复报 / 绝不影响烧录结果。
+ *============================================================================*/
+static void APP_SnReport(void)
+{
+    uint32_t w[SN_UID_WORDS];
+    uint8_t  uid[SN_UID_LEN];
+    uint8_t  buf[MGR_BOARD_SN_RESP_LEN];
+    uint8_t  i;
+
+    /* 读 3 个 32 位字（地址/长度都在 sn_report.h 的占位宏里，D9 定了只改那儿） */
+    if (SWD_MemReadBlock(SN_UID_BASE, w, (uint32_t)SN_UID_WORDS) == 0) {
+        return;                                  /* 读不到 → 静默跳过 */
+    }
+    for (i = 0u; i < (uint8_t)SN_UID_WORDS; i++) {
+        uid[(i * 4u) + 0u] = (uint8_t)(w[i] >> 24);
+        uid[(i * 4u) + 1u] = (uint8_t)(w[i] >> 16);
+        uid[(i * 4u) + 2u] = (uint8_t)(w[i] >> 8);
+        uid[(i * 4u) + 3u] = (uint8_t)(w[i]);
+    }
+    if (SnReport_IsNewBoard(uid) == 0u) {
+        return;                                  /* 同一块板重复烧录 → 不重复上报 */
+    }
+    if (SnReport_Build(uid, buf) == 0u) {
+        return;
+    }
+    SnReport_MarkReported(uid);
+    APP_SendEvent(MGR_CMD_BOARD_SN, buf, MGR_BOARD_SN_RESP_LEN);
+}
+
+/*==============================================================================
  * 命令分发
  *============================================================================*/
 static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
@@ -2612,6 +2648,12 @@ void APP_Run(void)
             uint8_t st = SWDP_Result();
             app_state = APP_STATE_IDLE;
             APP_SendFrame(MGR_CMD_PROGRAM, prog_seq, &st, 1u);
+            /* 烧录成功 → 读被测板 96-bit UID，主动上报 SN（0x0024）。
+             * 放在 ACK **之后**发：先让 PC 拿到烧录结果，SN 帧随后到。
+             * 读不到就静默跳过，绝不影响烧录结果、也不推脏数据。 */
+            if (st == APP_STATUS_OK) {
+                APP_SnReport();
+            }
             /* SWDP_Step 内单个 128KB 扇区擦除要 ~1.3s, 期间 PC 若仍在发帧,
              * 512B 接收环形缓冲可能被填满而丢弃字节, 留下半截帧。
              * 协议规定 PC 必须等 0x0112 的 ACK 才继续, 因此这里直接清空

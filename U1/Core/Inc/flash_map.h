@@ -123,6 +123,12 @@
 #define MGR_FLOW_STEP_TIMEOUT_MS  4000u   /* 流程里每一步的超时上限 */
 #define MGR_FLOW_WDT_MS           4000u   /* 给 DUT 的失联看门狗（比单步超时略长） */
 
+/*── 板子 SN 码主动上传（治具 → PC 自发帧，SEQ=0）
+ * 0x0112 烧录成功后：读被测板 96-bit UID → 组 16B → 主动推给 PC。
+ * 去重：与上次上报的 UID 相同则不重复；读 UID 失败静默跳过（不影响烧录结果）。 */
+#define MGR_CMD_BOARD_SN        0x0024u
+#define MGR_BOARD_SN_RESP_LEN     16u     /* [1B 版本][12B UID][1B XOR][2B 预留] */
+
 /* 0x000E / 0x000F 请求里共用的 mode 字节（两条命令语义一致，各自独立） */
 #define MGR_MODE_READ           0x00u   /* 只读最近一批结果, 不触发测量(调试用) */
 #define MGR_MODE_TEST           0x01u

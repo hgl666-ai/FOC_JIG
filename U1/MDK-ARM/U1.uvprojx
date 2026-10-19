@@ -569,6 +569,11 @@
               <FilePath>../Core/Src/enc_chk.c</FilePath>
             </File>
             <File>
+              <FileName>sn_report.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/sn_report.c</FilePath>
+            </File>
+            <File>
               <FileName>swd_programmer.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/swd_programmer.c</FilePath>
