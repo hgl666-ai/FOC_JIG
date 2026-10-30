@@ -111,7 +111,11 @@ SR 轮询一次花 3 个事务（≈8.4 个事务/字）。
 
 - 本目录**不参与** Keil 工程构建，也不需要 CubeMX 再生成。
 - 搬进固件时：`swd_config.h` 里把 `SWD_SIM_BUILD` 分支去掉，改用 `main.h`；
-  引脚按被烧板 SWD 接口确认结果填（当前占位 SWCLK=PB1 / SWDIO=PB3 / NRST=PC13，
-  选 PB1+PB3 是因为都在 GPIOB 的 CRL 范围内，方向切换与数据更新各只需一次寄存器写）。
-- 上板前把 `SWD_DELAY_LOOPS` 从 0 调到合适值，并确认 PA15/PB3 的 JTDI/JTDO 释放
-  （本工程 `stm32f1xx_hal_msp.c` 已是 `SWJ_NOJTAG`）。
+  引脚**已确认（2026-10-27 新版治具原理图）**：`SWCLK = PA14`（`U1-SCLK`）、`SWDIO = PA13`（`U1-SWD`）、
+  `SWD_PINS_CONFIRMED = 1`、不用 NRST（`SWD_USE_NRST = 0`）。
+  > 历史：早期曾按"空闲脚"占位成 SWCLK=PB1 / SWDIO=PB3（都在 GPIOB 的 CRL 范围，切换方向只需一次寄存器写），
+  > 该占位值**已作废**，只作留档；详见 `docs/09` §2。
+- 上板前把 `SWD_DELAY_LOOPS` 从 8 逐步调到合适值；
+  ⚠ **PA13/PA14 就是 U1 自己的 SW-DP**，要把它们当普通 IO 打 DUT 必须让 `SWJ_CFG=100`
+  （`SWD_FREE_DEBUG_PINS=1`，见 `docs/09` §2.1）——这时 U1 自己的 SWD 调试/下载会失效，
+  升级/救砖走 H1(BOOT0)+复位+USART3。

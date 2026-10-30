@@ -3,6 +3,9 @@
 > 状态：**已实现，并通过验证 + 已按权威资料逐条核对**（第 15 轮）
 >  - 全量回归的断言数字只在 `docs/02` §1 记账（本文件不复述，免得改一处忘一处）
 >  - Keil 0 Error / 0 Warning
+>  - **2026-10-27 更新**：SWD 两个脚已按新版治具原理图确认为 **PA14(SWCLK) / PA13(SWDIO)**，
+>    代价是**关掉 U1 自己的 SW-DP**（`SWJ_CFG=100`）—— 取舍与 4 条补救路见 §2.1；
+>    仍**没有在真板上烧过一次**。
 > 取代旧的 UART ISP 方案（ISP 源码与测试已**整体删除**，退役说明见 `docs/02` 附录 A）
 >
 > 复核资料：ADIv5 规范 `IHI0031H`、F4 参考手册 `rm0090`、
@@ -17,7 +20,7 @@
 | 目标 | STM32F405RGT6，SW-DP IDCODE `0x2BA01477`，DEV_ID `0x413` |
 | 入口 | 协议 `0x0112`（不变），走治具 U1 内部状态机 |
 | 固件来源 | 治具板载 GD25Q128 的两个槽（Slot0=Bootloader / Slot1=App），协议 `0x0009/0x000A/0x000B` 上传 |
-| 引脚 | **占位：SWCLK=PB1 / SWDIO=PB3**（`swd_config.h`），上板接线核对后把 `SWD_PINS_CONFIRMED` 改 1 |
+| 引脚 | **SWCLK = PA14**（网络 `U1-SCLK`）/ **SWDIO = PA13**（网络 `U1-SWD`）；`SWD_PINS_CONFIRMED=1`（2026-10-27 新原理图确认，见 §2） |
 | 时钟 | `SWD_DELAY_LOOPS=8` ≈ 1 MHz（上板确认稳定后可以降到 4/2/0 提频） |
 
 **为什么不用 NRST**：目标只要没把 PA13/PA14 当普通 IO 用、也没进 STOP/Standby，
@@ -28,6 +31,9 @@
   固件会明确报 `ERR_PROG` 并打印底层错误码，不会死等。
 - 建议：真实板子上**留一个 NRST 测试点**，将来若遇到连不上的板子，把
   `swd_config.h` 里的 `SWD_USE_NRST` 置 1、填上引脚即可（`swd_phy.c` 里已经写好时序分支）。
+- **另一条代价（2026-10-27 新增，比上面更硬）**：SWD 两个脚就是 U1 自己的调试脚，
+  烧 DUT 的固件会**关掉 U1 自己的 SW-DP**（`SWJ_CFG=100`）→ 以后不能再对 U1 用 SWD 调试/下载。
+  这是硬取舍、不是 bug，4 条补救/升级路见 **§2.1**。
 
 ## 1.1 已按权威资料逐条核对（第 15 轮）
 
@@ -76,33 +82,68 @@
 > （`source/hic_hal/stm32/stm32f103xb/DAP_config.h`），
 > 将来若要给 SWD 提速（DMA/定时器打时序），那是一份直接可对照的参考。
 
-## 2. 引脚怎么填（重要）
+## 2. 引脚（已确认，2026-10-27）
 
 `U1/Core/Inc/swd_config.h` 是**唯一**要改的文件，当前值：
 
 ```c
-#define SWD_CLK_PORT   GPIOB           /* 现在：PB1 */
-#define SWD_CLK_PIN    GPIO_PIN_1
-#define SWD_CLK_PINNUM 1u
-#define SWD_DIO_PORT   GPIOB           /* 现在：PB3 */
-#define SWD_DIO_PIN    GPIO_PIN_3
-#define SWD_DIO_PINNUM 3u
+#define SWD_CLK_PORT   GPIOA           /* U1-SCLK：治具 → DUT 的 SWCLK */
+#define SWD_CLK_PIN    GPIO_PIN_14
+#define SWD_CLK_PINNUM 14u
+#define SWD_DIO_PORT   GPIOA           /* U1-SWD ：治具 → DUT 的 SWDIO */
+#define SWD_DIO_PIN    GPIO_PIN_13
+#define SWD_DIO_PINNUM 13u
 #ifndef SWD_PINS_CONFIRMED
-#define SWD_PINS_CONFIRMED 0           /* ← 接线核对后改 1 */
+#define SWD_PINS_CONFIRMED  1          /* 2026-10-27 按新版治具原理图确认 */
 #endif
+#ifndef SWD_FREE_DEBUG_PINS
+#define SWD_FREE_DEBUG_PINS 1          /* 1 = 关掉 U1 自己的 SW-DP，PA13/PA14 当普通 IO（见 §2.1） */
+#endif
+#define SWD_USE_NRST        0          /* 不用 NRST */
 ```
 
-**引脚演进**：最早占位用的是 PB10/PB11，但 USART3 后来改成了 U1↔U2 的内部链路
-（见 `docs/10_UART四路驱动设计.md`），这两脚必须让出来。现在的 PB1/PB3 不再和任何串口冲突：
+**为什么是这两脚**：2026-10-27 新版治具板把 **U1 自己的 SWD 口独立引出**，专门用来给 DUT（FOC 板）烧录，
+网络名 `U1-SCLK` / `U1-SWD` 对应的就是 U1 的 **PA14 / PA13**。
 
-| 脚 | 为什么能用 | 注意 |
-|---|---|---|
-| **PB1** | F103C8 的 ADC_IN9；本工程 ADC 只用到 IN0..IN8（PA0..PA7 + PB0） | 空闲 |
-| **PB3** | 复位后是 JTDO，`stm32f1xx_hal_msp.c` 里的 `__HAL_AFIO_REMAP_SWJ_NOJTAG()` 已把它释放成 GPIO | **U1 自己的 SWD（PA13/PA14）不受影响** |
+| 脚 | 网络名 | 接到 | 注意 |
+|---|---|---|---|
+| **PA14** | `U1-SCLK` | 被测板 **PA14**（SWCLK） | 同时也是 U1 自己的 SWCLK → 见 §2.1 |
+| **PA13** | `U1-SWD` | 被测板 **PA13**（SWDIO） | 同时也是 U1 自己的 SWDIO → 见 §2.1 |
+| — | NRST | 不接（`SWD_USE_NRST=0`） | 烧完靠目标的 `AIRCR.SYSRESETREQ` 复位运行 |
 
-> `PA13/PA14` 是 U1 自己的下载调试口，**绝不能**当普通 IO 占用（一占就再也连不上调试器）。
-> `SWD_PINS_CONFIRMED` 目前仍是 `0`：引脚属**占位值**，上板接线核对后再改 `1`。
-> 不用 NRST（`SWD_USE_NRST 0`）：烧完靠目标的 `AIRCR.SYSRESETREQ` 复位运行。
+> **历史（留档，别当成现状）**：这条线原先在原理图上根本不存在，只能占位（先 PB10/PB11、后 PB1/PB3），
+> 并用 `SWD_PINS_CONFIRMED=0` 标记"未确认"。2026-10-27 新图确认后改成 PA13/PA14 并把开关置 1。
+
+## 2.1 代价：`SWJ_CFG=100` 会关掉 U1 自己的 SW-DP（必读）
+
+PA13/PA14 在 F103 上**默认就是 U1 自己的 SWD 调试口**（SW-DP）。要把它们当普通 IO 去"打"板外的 DUT，
+就必须先把这块调试口关掉。`U1/Core/Src/stm32f1xx_hal_msp.c` 按 `swd_config.h` 的开关二选一：
+
+| `SWD_FREE_DEBUG_PINS` | `HAL_MspInit()` 里执行 | AFIO `MAPR.SWJ_CFG` | PA13/PA14 变成 | 能烧 DUT | 能调试/下载 U1 |
+|---|---|---|---|---|---|
+| **1（默认，生产）** | `__HAL_AFIO_REMAP_SWJ_DISABLE()` | **`100`**（三组全释放） | 普通 GPIO | ✅ | ❌ |
+| 0（开发期临时） | `__HAL_AFIO_REMAP_SWJ_NOJTAG()` | `010`（只留 SW-DP） | 仍是调试口 | ❌ | ✅ |
+
+**代价（硬取舍，不是 bug）**：烧 DUT 的固件刷进 U1 之后，**U1 自己的 SWD 调试/下载失效** ——
+PA13/PA14 已经不是调试口，调试器拿不到 DP 应答（连 IDCODE 都读不到）。
+"用 U1 的调试口去打板外 DUT"这件事本身只能选一边，**没有两全的接法**。
+
+**附带好处**：`SWJ_CFG=100` 同时把 **PA15 / PB3 / PB4** 释放成普通 IO，
+其中 **PB4 = TIM3_CH1（B 相捕获）**，少一层"NJTRST 重映射"的依赖。
+
+### 2.1.1 四条补救 / 升级路（按推荐顺序）
+
+| # | 办法 | 能干什么 | 代价 / 前提 |
+|---|---|---|---|
+| **1（首选）** | **短接板上 H1（BOOT0↔3.3V）→ 复位 → 芯片进系统 bootloader（不跑应用，`SWJ_CFG` 没被关）→ 用 USART3 两针烧** | 救砖 + 日常升级 | **板上 H1 跳线和那两针串口不能省** |
+| 2 | 调试器 "Connect under Reset"：按住复位连上、在 `HAL_MspInit` 执行前停住核再擦 Flash | 救砖 | NRST 未引出，要手工扶复位，**较看运气** |
+| 3 | 把 `SWD_FREE_DEBUG_PINS` 置 **0** 重编一版 | 能调 U1 | 这一版**不能烧 DUT**（开发期来回切） |
+| 4 | 芯片**全擦**后 `SWJ_CFG` 复位成 `000`，SWD 自动可用 | 空片/全擦救砖 | 出厂空片即此状态；已经有固件在跑就不成立 |
+
+> **今后 U1 固件统一走「H1(BOOT0) + USART3」升级**：这是唯一与 `SWJ_CFG=100` 无关、永远可用的通道。
+> 所以板上 **H1 跳线**（U1-BOOT0 ↔ 3.3V）和 **USART3 那两针串口**（PB10/PB11）属于**必须保留**的设计，
+> 选型/改板时不能省。
+
 ## 3. 烧录流程（非阻塞状态机）
 
 ```
@@ -152,8 +193,9 @@ SWDP_Start()
 
 ## 5. 上板检查清单（按顺序做，成本从低到高）
 
-1. **改引脚 → 编译 → 用 SWD 或串口把 U1 固件烧进去**（U1 自己的 SWD 在 4 脚排针上）。
-2. **接两根线 + 共地**：治具 SWCLK/SWDIO → 被烧板 PA14/PA13，GND 必须共。
+1. **确认引脚 → 编译 → 把 U1 固件烧进去**：空片/全擦状态可以用 ST-Link 走 4 脚排针（PA13/PA14）烧；
+   **已经有本固件在跑的板子不行**（`SWJ_CFG=100` 把 SW-DP 关了）→ 走 **H1(BOOT0) + 复位 + USART3**，见 §2.1.1。
+2. **接两根线 + 共地**：治具 **PA14(SCLK)/PA13(SWD)** → 被烧板 PA14/PA13，GND 必须共。
    建议串 22~100Ω（顶针/飞线较长时）。
 3. **先用 `0x000D` 做最小验证**：它只需要"连上 + 读 4 个字节"，
    不用上传任何固件，是最便宜的冒烟测试。
@@ -198,6 +240,8 @@ SWDP_Start()
 4. **目标内 flashloader**：见 §4 提速路径第 3 条。
 5. **`DUT_VER_OFFSET` 是占位值**（`flash_map.h`，当前 0x20）：0x000D 读的版本号在
    App 分区里的真实偏移要 FOC 工程确认。
-6. **分区地址是占位值**：Boot `0x08000000`+32KB（扇区 0+1）、App `0x08008000`+992KB（扇区 2~7）。
-   F4 的扇区是 16/16/16/16/64/128/128/128 KB，**分区边界必须落在扇区边界上**，
-   等 FOC 工程的链接脚本确定后替换（`flash_map.h` 里有 5 条编译期断言钉住这几条约束）。
+6. ~~分区地址是占位值~~ **已确认（2026-10-27，按 FOC 工程）**：
+   Boot `0x08000000` + `0x10000`（64KB，扇区 0..3）、App `0x08010000` + `0x80000`（512KB，扇区 4 起，
+   结束于 `0x08090000`），运行入口 `DUT_GO_ADDR = 0x08000000`（复位后先跑 Bootloader）。
+   F4 的扇区是 16/16/16/16/64/128/128/128 KB，**分区边界必须落在扇区边界上** —— 现在两个边界都在
+   16K 扇区线上（`flash_map.h` 里有一组编译期断言钉住这几条约束）。

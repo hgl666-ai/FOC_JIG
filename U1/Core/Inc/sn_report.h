@@ -50,13 +50,11 @@
 #define SN_UID_BASE      0x1FFF7A10u
 #endif
 
-/* SWD 引脚占位：等 docs/15 D9（治具用哪两个脚烧被测板）确认后改这里 */
-#ifndef SN_SWD_PIN_CLK
-#define SN_SWD_PIN_CLK   0u
-#endif
-#ifndef SN_SWD_PIN_DIO
-#define SN_SWD_PIN_DIO   0u
-#endif
+/* SWD 引脚：**本模块不再定义**（2026-10-27 清理死宏，全工程从未引用过它们）。
+ * 历史留档（便于回溯）：这里曾有两个占位宏
+ *     SN_SWD_PIN_CLK / SN_SWD_PIN_DIO   —— 都是 0u，从没被任何代码读取；
+ * 真正决定 SWD 引脚的是 `swd_config.h`（现为 SWCLK = PA14 / SWDIO = PA13，
+ * 2026-10-27 新版治具原理图确认）。以后别再往本文件加引脚宏。 */
 
 /* ------------------------------------------------------------------ */
 /* 2. API                                                             */

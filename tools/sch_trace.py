@@ -49,7 +49,12 @@ SCALE = 0.999905
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _EXTRACT = os.path.join(_REPO, 'docs', '_extract')
-_PDF = os.path.join(_REPO, 'INFO', 'SCH_Schematic1_FOC.pdf')
+# 原理图 PDF 路径可用环境变量 SCH_PDF 覆盖（换新版原理图时不改代码）：
+#   $env:SCH_PDF = 'INFO\SCH_xxx_2026-10-27.pdf'; python tools\sch_trace.py net SWD
+# ⚠ 换了 PDF 必须让抽取结果重新生成，否则会读到**旧图的缓存**（见下面 _EXTRACT 的判定）。
+_PDF = os.environ.get('SCH_PDF') or os.path.join(_REPO, 'INFO', 'SCH_Schematic1_FOC.pdf')
+if not os.path.isabs(_PDF):
+    _PDF = os.path.join(_REPO, _PDF)
 
 TOL = 0.30          # 端点归一化容差 (pt)
 NEAR = 5.0          # 文字认为"贴在这段导线上"的距离 (pt)

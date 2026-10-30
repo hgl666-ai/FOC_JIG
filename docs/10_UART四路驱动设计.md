@@ -18,7 +18,7 @@
 | U2（测量片） | 端口1 | USART3 | PB10(TX) / PB11(RX) | H3/H4 跳线 → U1 | **内部链路**（U2↔U1） |
 
 - 四路统一 **115200 8N1，无硬件流控**（CubeMX 生成值；两片必须一致，否则链路全错）。
-- 驱动与链路代码**两片各一份副本**（各自工程目录里，靠回归脚本第 7 阶段保证逐字节一致），U1 是链路主机、U2 是从机。
+- 驱动与链路代码**两片各一份副本**（各自工程目录里，靠回归脚本的副本阶段 11/12 保证逐字节一致），U1 是链路主机、U2 是从机。
 - 全程非阻塞：中断只搬字节，解析与组帧在主循环。
 
 ⚠ **上电前必须确认跳线是交叉的**：U1.PB10 → U2.PB11，U1.PB11 → U2.PB10。
@@ -104,7 +104,8 @@ STM32F1 HAL 收到 **ORE（溢出）** 时走的是"阻塞错误"分支：先 `U
 > ⚠ **完整规范已独立成文：`docs/13_U1U2内部链路协议.md`**（帧格式、命令表、ARM 同步触发、
 > 事件上报、重传与幂等、断链恢复、版本与能力协商）。本节只保留设计背景，**命令与字段以下面那份为准**：
 > 本节提到的 PING/STATUS/MEAS_XCHK/PULSE_XCHK 之外，v1.3 还多了 `0x0105` ARM、`0x0106` LINK_RESET、
-> `0x0107` EVENT、`0x0108` EVENT_GET，STATUS 也从 22B 扩到 28B。
+> `0x0107` EVENT、`0x0108` EVENT_GET，STATUS 也从 22B 扩到 28B；
+> **v1.4 再加 `0x0109` ENC_XCHK**（⑤ 编码器回环计数），`LINK_CODE_VER` 现为 **`0x0104`**、`LINK_CAP_ALL = 0x01FF`。
 
 - 帧格式与 PC 协议**完全一致**：`A5 5B | CMD(2) | SEQ(2) | LEN(2) | DATA | CRC16(2)`，全大端，CRC16-MODBUS。
 - 命令码用 `LINK_CMD_*`（`0x0100` 起），与 PC 协议的 `MGR_CMD_*` 不冲突（U1 独占解析 PC 帧）。
@@ -215,8 +216,8 @@ CRC 错/垃圾前缀/超长 LEN 的抗干扰与恢复、忙保护与非阻塞语
 
   | 烧到哪颗芯片 | 用哪个文件 | 用哪个工程 | 自己的调试口 |
   |---|---|---|---|
-  | U1（主控） | `U1/MDK-ARM/U1/U1.hex`（或 `.axf`） | `U1/MDK-ARM/U1.uvprojx` | PA13/PA14（`hal_msp.c` 保留了 SW-DP） |
-  | U2（测量片） | `U2/MDK-ARM/U2/U2.hex`（或 `.axf`） | `U2/MDK-ARM/U2.uvprojx` | PA13/PA14 |
+  | U1（主控） | `U1/MDK-ARM/U1/U1.hex`（或 `.axf`） | `U1/MDK-ARM/U1.uvprojx` | PA13/PA14。⚠ **生产固件把它们的 SW-DP 关了**（`SWD_FREE_DEBUG_PINS=1` → `SWJ_CFG=100`）给 DUT 烧录用；要调试 U1 得编一版 `SWD_FREE_DEBUG_PINS=0`，或者走 H1(BOOT0)+USART3 烧录（`docs/09` §2.1） |
+  | U2（测量片） | `U2/MDK-ARM/U2/U2.hex`（或 `.axf`） | `U2/MDK-ARM/U2.uvprojx` | PA13/PA14（U2 不做 SWD 烧录，SW-DP 一直保留） |
 
   烧录方式与普通 STM32 相同（SWD/JTAG：ST-Link、J-Link、DAPLink）。
 - 三个副本文件**不得依赖任何板级差异**（引脚、外设实例、`main.h` 里的宏）——
@@ -228,8 +229,9 @@ CRC 错/垃圾前缀/超长 LEN 的抗干扰与恢复、忙保护与非阻塞语
 字段布局变了而对面还是旧的 → STATUS 解出垃圾；帧格式变了 → 一直 CRC 错/超时。
 所以加了两道保护，**不要删**：
 
-1. **回归脚本第 7 阶段**：`test\run_all_tests.cmd` 用 `fc /b` 逐字节比对 6 个文件对
-   （`uart_port.{c,h}`、`uart_link.{c,h}`、`protocol_frame.{c,h}`），
+1. **回归脚本的副本比对阶段**：`test\run_all_tests.cmd` 用 `fc /b` 逐字节比对 **17 个文件对**
+   （`uart_port.{c,h}`、`uart_link.{c,h}`、`protocol_frame.{c,h}`、`measure.{c,h}`、`meas_pack.{c,h}`、
+   `pulse_cap.{c,h}`、`pulse_pack.{c,h}`、`pulse_cfg.{c,h}`、`jig_mode.h`），
    只要有一对不一致就打印 `xxx.c : DIFFERENT` 并让整个回归失败
    （已用"故意改一个字节"反证过：该阶段确实会失败、退出码 1）。
    确实需要两份不同时，把这一阶段删掉即可（脚本里有注释）。
@@ -243,7 +245,8 @@ CRC 错/垃圾前缀/超长 LEN 的抗干扰与恢复、忙保护与非阻塞语
 
 ### 10.3 一键回归会同时构建两片
 
-`test\run_all_tests.cmd` 现在是 8 个阶段，第 8 阶段**依次构建 U1 与 U2** 两个工程并分别判定
+`test\run_all_tests.cmd` 现在是 **12 个编号阶段 + 1 个子阶段（5b `pulse_cfg` 寄存器层）**，
+最后的编号阶段**依次构建 U1 与 U2** 两个工程并分别判定
 （Error 优先于 Warning，且按日志轮询而不是等 UV4 进程退出），
 所以"宿主测试全过 + 副本一致 + 两片都编译得过"是一条命令的事。
 

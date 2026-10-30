@@ -187,9 +187,9 @@
  * （F1/F0 是 1KB 页，怎么切都行；F4 不行）。
  *============================================================================*/
 #define DUT_BOOT_ADDR           (0x08000000u)     /* 扇区 0 起 */
-#define DUT_BOOT_SIZE           (0x8000u)         /* 32KB = 扇区 0+1 (16K+16K) */
-#define DUT_APP_ADDR            (0x08008000u)     /* 扇区 2 起 */
-#define DUT_APP_SIZE            (0xF8000u)        /* 992KB = 扇区 2..7 到片尾 (0x08100000) */
+#define DUT_BOOT_SIZE           (0x10000u)        /* 64KB = 扇区 0..3（4×16K）  ← 2026-10-27 按 FOC 工程确认 */
+#define DUT_APP_ADDR            (0x08010000u)     /* 扇区 4 起（0x10000 是 16K 扇区边界）*/
+#define DUT_APP_SIZE            (0x80000u)        /* 512KB，到 0x08090000 */
 #define DUT_GO_ADDR             (0x08000000u)     /* 烧完复位运行地址 */
 
 /* 被烧板运行态固件版本号在 App 分区中的偏移（0x000D 用）——
@@ -233,11 +233,14 @@ FOC_STATIC_ASSERT(DUT_GO_ADDR == DUT_BOOT_ADDR,                go_addr_must_be_b
 
 /* F405 扇区边界约束（改分区地址时最容易踩的就是这条）：
  *   扇区边界 = 0x00000,0x04000,0x08000,0x0C000,0x10000,0x20000,0x40000,0x60000
- *   这里把当前占位方案钉死：Boot = 扇区 0+1，App = 扇区 2 起到片尾。 */
+ *   当前方案（2026-10-27 按 FOC 工程确认）：
+ *     Boot = 0x08000000 + 0x10000（扇区 0..3）
+ *     App  = 0x08010000 + 0x80000（扇区 4 起，到 0x08090000）
+ *   两个边界都落在 16K 扇区线上，擦一个分区不会连带擦掉另一个。 */
 FOC_STATIC_ASSERT(DUT_BOOT_ADDR == 0x08000000u,                dut_boot_must_start_at_sector0);
-FOC_STATIC_ASSERT(DUT_BOOT_SIZE == 0x8000u,                    dut_boot_must_be_sector0_and_1);
-FOC_STATIC_ASSERT(DUT_APP_ADDR == 0x08008000u,                 dut_app_must_start_at_sector2);
-FOC_STATIC_ASSERT((DUT_APP_ADDR + DUT_APP_SIZE) == 0x08100000u, dut_app_must_end_at_flash_end);
+FOC_STATIC_ASSERT(DUT_BOOT_SIZE == 0x10000u,                   dut_boot_must_be_sector0_to_3);
+FOC_STATIC_ASSERT(DUT_APP_ADDR == 0x08010000u,                 dut_app_must_start_at_sector4);
+FOC_STATIC_ASSERT((DUT_APP_ADDR + DUT_APP_SIZE) <= 0x08100000u, dut_app_must_fit_in_flash);
 FOC_STATIC_ASSERT((DUT_VER_OFFSET % 4u) == 0u,                 dut_ver_offset_word_aligned);
 
 #endif /* __FLASH_MAP_H */

@@ -28,20 +28,27 @@
 #endif
 
 /* ------------------------------------------------------------------ */
-/* 1. 引脚（占位，待真实硬件确认）                                     */
+/* 1. 引脚（**已按 2026-10-27 新版治具原理图确认**）                    */
 /* ------------------------------------------------------------------ */
-/* 2026-xx 调整：原来占 PB10/PB11，但 PB10/PB11 是 U1 的 USART3（要留给
- * "U1<->U2 链路"），所以 SWD 让位到两片都用不到的空闲脚：
- *   SWCLK = PB1、SWDIO = PB3（都在 GPIOB 的 CRL 区，方向切换只写 CRL）
- * PB3 是 JTDO，需要 SWJ_NOJTAG —— 本工程 stm32f1xx_hal_msp.c 已经是 NOJTAG。
- * 真实板子排好脚之后只需改下面这几行 + 把 SWD_PINS_CONFIRMED 置 1。 */
-#define SWD_CLK_PORT        GPIOB
-#define SWD_CLK_PIN         GPIO_PIN_1
-#define SWD_CLK_PINNUM      1u
+/* 新版治具板把 U1 自己的 SWD 口**独立引出**，专门用于给 DUT（FOC 板）烧录：
+ *   SWCLK = PA14（U1-SCLK）
+ *   SWDIO = PA13（U1-SWD）
+ *
+ * ⚠ 这两根是 U1 **自己的 SWD 调试脚**，拿来当普通 IO 用就必须把 U1 的 SW-DP 关掉
+ *   （AFIO_MAPR 的 SWJ_CFG = 100，见 stm32f1xx_hal_msp.c 与下面的 SWD_FREE_DEBUG_PINS）。
+ *   代价：烧 DUT 的固件**不能再被 SWD 调试**（要调 U1 就把 SWD_FREE_DEBUG_PINS 置 0 重编；
+ *   万一砖了，板上 H1 的 BOOT0 跳线可走串口 bootloader 救回来）。
+ *   好处：PA15/PB3/PB4 一并变成普通 IO —— PB4 正好是 TIM3_CH1（B 相捕获），少一层重映射依赖。
+ *
+ * 历史（留档，别当成现状）：早先原理图上**没有**这条线，只能占位
+ *   （PB10/PB11 → 后来 PB1/PB3），并用 SWD_PINS_CONFIRMED=0 标记"未确认"。 */
+#define SWD_CLK_PORT        GPIOA
+#define SWD_CLK_PIN         GPIO_PIN_14
+#define SWD_CLK_PINNUM      14u
 
-#define SWD_DIO_PORT        GPIOB
-#define SWD_DIO_PIN         GPIO_PIN_3
-#define SWD_DIO_PINNUM      3u
+#define SWD_DIO_PORT        GPIOA
+#define SWD_DIO_PIN         GPIO_PIN_13
+#define SWD_DIO_PINNUM      13u
 
 /* NRST：本方案不用。保留宏是为了将来若接上可以做 connect-under-reset。 */
 #define SWD_NRST_PORT       GPIOC
@@ -50,7 +57,14 @@
 
 /* 1 = 引脚已按真实硬件填好并接线完成；0 = 占位值（上板前必须确认） */
 #ifndef SWD_PINS_CONFIRMED
-#define SWD_PINS_CONFIRMED  0
+#define SWD_PINS_CONFIRMED  1
+#endif
+
+/* 1 = 允许把 PA13/PA14 当普通 IO（**关闭 U1 自己的 SW-DP**）
+ *     烧 DUT 必须为 1；只想调试 U1、暂时不烧 DUT 时置 0 重编即可。
+ *     由 stm32f1xx_hal_msp.c 读取（SWJ_CFG = 100 ↔ NOJTAG 两种配置二选一）。 */
+#ifndef SWD_FREE_DEBUG_PINS
+#define SWD_FREE_DEBUG_PINS 1
 #endif
 
 /* 1 = 使用 NRST 做 connect-under-reset（本方案为 0） */

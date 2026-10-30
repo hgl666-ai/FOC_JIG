@@ -932,7 +932,11 @@ static void t9_full_program_chain(void)
     CHECK(sim_target_switch_seen() == 1u,   "JTAG→SWD 切换序列被目标识别");
     CHECK(sim_target_contention() == 0u,    "SWDIO 全程零总线冲突");
     CHECK(sim_target_parity_errors() == 0u, "线路层零奇偶校验错");
-    CHECK(sim_target_erases() == 3u,        "按扇区擦除: Boot 2 个 + App 1 个 = 3");
+    /* 擦除次数按**分区几何**推导，不写死数字（改分区地址时这条要跟着走）：
+     * Boot = 0x10000 (扇区 0..3) → 4 个 16K 扇区；App 镜像 g_app 只占 1 个 16K 扇区 → 共 5 个。 */
+    CHECK(sim_target_erases() ==
+              ((DUT_BOOT_SIZE / 0x4000u) + 1u),
+          "按扇区擦除次数 = Boot 扇区数(64K/16K=4) + App 1 个 = 5");
     CHECK(sim_target_locked_reject() == 0u, "没有在未解锁状态下碰过目标 Flash");
     CHECK(sim_target_halted() == 0u,        "烧完目标在运行态 (SYSRESETREQ 后 S_HALT=0)");
     CHECK(SWDP_LastIdcode() == 0x2BA01477u, "SW-DP IDCODE = 0x2BA01477");
