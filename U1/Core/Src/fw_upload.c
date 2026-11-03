@@ -198,10 +198,11 @@ uint8_t FwUpload_Handle(uint16_t cmd, const uint8_t *data, uint16_t len)
         if (resp == APP_STATUS_OK) {
             uint8_t hdr[FW_HEAD_SIZE];
             Flash_WriteCompleteFlag(cur_slot, FW_FLAG_COMPLETE);
-            /* 回读校验: 完整标志必须真的变成 0xA5 */
-            GD25Q_ReadBuffer(hdr, (cur_slot == 0u) ? FW_SLOT0_BASE : FW_SLOT1_BASE, FW_HEAD_SIZE);
-            if (hdr[FW_HEAD_OFF_FLAG] != FW_FLAG_COMPLETE)
+            /* 回读校验: 完整标志必须真的变成 0xA5 (读失败也按 ERR_FLASH 处理) */
+            if (!GD25Q_ReadBuffer(hdr, (cur_slot == 0u) ? FW_SLOT0_BASE : FW_SLOT1_BASE, FW_HEAD_SIZE) ||
+                (hdr[FW_HEAD_OFF_FLAG] != FW_FLAG_COMPLETE)) {
                 resp = APP_STATUS_ERR_FLASH;
+            }
         }
 
         /* 切槽, 为第二次上传 (App) 做准备 */

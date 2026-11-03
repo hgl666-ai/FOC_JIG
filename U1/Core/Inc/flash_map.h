@@ -129,6 +129,25 @@
 #define MGR_CMD_BOARD_SN        0x0024u
 #define MGR_BOARD_SN_RESP_LEN     16u     /* [1B 版本][12B UID][1B XOR][2B 预留] */
 
+/*── 诊断：SPI Flash 连通性（排"读不到 Flash"用，不参与正常流程）──
+ * 请求 LEN=0；应答 24B，布局见 gd25q128.h 的 GD25Q_Diag 注释。
+ * 加它的原因：现场只报 03 ERR_FLASH 时，光看现象分不清是"外设没跑/引脚被改回
+ * AF/芯片不答/没供电"哪一条，这条命令把 MCU 眼里的现场一次报出来。 */
+#define MGR_CMD_FLASH_DIAG      0x001Cu
+#define MGR_FLASH_DIAG_RESP_LEN   64u     /* 32B 现场 + 16B 全时钟 + 8B 多寄存器 + 8B USART3 只读探针 */
+
+/*── SWD 烧录自检（B1 方案）：不依赖 SPI Flash，单独验证 SWD 这一段 ──
+ * 治具的"固件仓库"是 SPI2 上的 GD25Q128。若这颗 MCU 的 SPI2 不可用，
+ * "上传→烧录"整条链就断了；但真正动手烧被烧板的是 SWD 两线，与 SPI Flash 无关。
+ * 本命令用**内置图样**顶替"从 Flash 取镜像"，把 SWD 这一段单独跑通：
+ *   连接 → 暂停 → 擦暂存扇区 → 写 4KB 图样 → SWD 回读逐字节比对 → 读 UID → 复位运行
+ * ⚠ 暂存扇区在 Boot/App 分区**之外**，板上原有 FOC 固件不受影响，可随时跑。 */
+#define MGR_CMD_SWD_SELFTEST     0x001Eu
+#define MGR_SWD_SELFTEST_RESP_LEN  16u
+#define DUT_SCRATCH_ADDR         (0x080E0000u)  /* F4 sector 11（最后一个 128KB） */
+#define DUT_SCRATCH_SECTOR       11u
+#define DUT_SELFTEST_BYTES       4096u          /* 自检写入的字节数（4KB） */
+
 /* 0x000E / 0x000F 请求里共用的 mode 字节（两条命令语义一致，各自独立） */
 #define MGR_MODE_READ           0x00u   /* 只读最近一批结果, 不触发测量(调试用) */
 #define MGR_MODE_TEST           0x01u
@@ -242,5 +261,9 @@ FOC_STATIC_ASSERT(DUT_BOOT_SIZE == 0x10000u,                   dut_boot_must_be_
 FOC_STATIC_ASSERT(DUT_APP_ADDR == 0x08010000u,                 dut_app_must_start_at_sector4);
 FOC_STATIC_ASSERT((DUT_APP_ADDR + DUT_APP_SIZE) <= 0x08100000u, dut_app_must_fit_in_flash);
 FOC_STATIC_ASSERT((DUT_VER_OFFSET % 4u) == 0u,                 dut_ver_offset_word_aligned);
+/* SWD 自检的暂存区必须在 Boot/App 分区之外（否则自检会擦掉真实固件） */
+FOC_STATIC_ASSERT((DUT_SCRATCH_ADDR >= (DUT_APP_ADDR + DUT_APP_SIZE)), scratch_must_be_outside_app);
+FOC_STATIC_ASSERT((DUT_SCRATCH_ADDR + 0x20000u) <= 0x08100000u,        scratch_must_fit_in_flash);
+FOC_STATIC_ASSERT((DUT_SELFTEST_BYTES % 4u) == 0u,                     selftest_bytes_word_aligned);
 
 #endif /* __FLASH_MAP_H */

@@ -39,6 +39,12 @@ void APP_SendAck(uint16_t cmd, const uint8_t *data, uint16_t len);   /* SEQ = pc
 void APP_SendEvent(uint16_t cmd, const uint8_t *data, uint16_t len); /* SEQ = 0      */
 
 /*===== SPI Flash 槽头部操作 =====*/
+/**
+  * @brief  读某一槽的固件头（大小/版本/完整标志）
+  * @retval 1 = 该槽有完整固件；0 = 空槽或不完整；
+  *         2 = **SPI 总线读失败**（调用方必须报 03 ERR_FLASH，不能当空槽）
+  * @note   "读不到"和"没上传过"是两件事：前者是硬件故障，后者才回 06 ERR_NO_FW。
+  */
 uint8_t Flash_ReadHead(uint8_t slot, uint32_t *p_size, uint8_t ver[3], uint8_t *p_flag);
 void    Flash_WriteCompleteFlag(uint8_t slot, uint8_t flag);
 

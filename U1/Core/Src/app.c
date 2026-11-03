@@ -38,11 +38,11 @@
 #include "enc_plan.h"
 #include "enc_chk.h"
 #include "sn_report.h"      /* 0x0024 板子 SN 主动上报（烧录成功后） */
+#include "swd_selftest.h"   /* 0x001E SWD 烧录自检（B1：不依赖 SPI Flash） */
 #include "swd_memap.h"      /* SWD_MemReadBlock：读被测板 96-bit UID */
 #include "enc_gen.h"
 #include "jig_mode.h"
-#include "usbd_cdc_if.h"
-#include "usb_device.h"
+#include "pc_link.h"        /* PC 通讯口: USB CDC 或 USART1（jig_mode.h §2.1） */
 #include <string.h>
 
 /*==============================================================================
@@ -52,6 +52,7 @@ APP_State_t app_state = APP_STATE_INIT;
 uint16_t    pc_seq    = 0u;
 
 static uint16_t prog_seq = 0u;      /* 0x0112 受理时的帧序号, 烧完 ACK 回显用 */
+static uint16_t s_sst_seq = 0u;     /* 0x001E SWD 自检受理时的帧序号 */
 static uint8_t  tx_buf[APP_FRAME_BUF_SIZE];
 
 /*===== 到 DUT（被烧 FOC 板）的链路 — USART1，协议见 docs/15 =====
@@ -256,11 +257,11 @@ static void APP_MeasStartWithArm(uint16_t cmd, uint16_t win)
  *============================================================================*/
 static void APP_WaitTxDone(void)
 {
-    USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
     uint32_t tick = HAL_GetTick();
 
-    if (hcdc == 0) return;
-    while (hcdc->TxState != 0u) {
+    /* 等"上一帧已经送到线上"。USB 分支看 TxState，串口分支看发送队列是否排空，
+     * 差异都收在 pc_link.c 里；这里的语义与原来完全相同：等不到就放弃本帧。 */
+    while (PcLink_TxIdle() == 0u) {
         if ((HAL_GetTick() - tick) > APP_TX_BUSY_TIMEOUT_MS) break;
     }
 }
@@ -268,16 +269,13 @@ static void APP_WaitTxDone(void)
 static void APP_SendFrame(uint16_t cmd, uint16_t seq, const uint8_t *data, uint16_t len)
 {
     uint16_t total;
-    uint32_t tick;
-    USBD_CDC_HandleTypeDef *hcdc;
 
     /* ⚠ 必须**先等上一次发完**，再往 tx_buf 里组帧：
-     *    超过 64B 的帧（0x000E 的 77B / 0x000F 的 91B 应答）由 USB 中断继续从
-     *    tx_buf 取后续包；上一帧还在飞就覆写 → 主机会收到混叠/截断的帧。
-     *    等不到（USB 卡住）就放弃这一帧：宁可让 PC 超时重试，也不发坏帧。 */
+     *    USB 分支里超过 64B 的帧（0x000E 的 77B / 0x000F 的 91B 应答）由 USB
+     *    中断继续从 tx_buf 取后续包；上一帧还在飞就覆写 → 主机会收到混叠/截断
+     *    的帧。等不到（链路卡住）就放弃这一帧：宁可让 PC 超时重试，也不发坏帧。 */
     APP_WaitTxDone();
-    hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
-    if ((hcdc != 0) && (hcdc->TxState != 0u)) {
+    if (PcLink_TxIdle() == 0u) {
         return;
     }
 
@@ -299,11 +297,8 @@ static void APP_SendFrame(uint16_t cmd, uint16_t seq, const uint8_t *data, uint1
 #endif
 
     total = Frame_Build(tx_buf, cmd, seq, data, len);
-    tick  = HAL_GetTick();
 
-    while (CDC_Transmit_FS(tx_buf, total) == USBD_BUSY) {
-        if ((HAL_GetTick() - tick) > APP_TX_BUSY_TIMEOUT_MS) return;
-    }
+    PcLink_Send(tx_buf, total);
     APP_WaitTxDone();
 }
 
@@ -665,7 +660,14 @@ uint8_t Flash_ReadHead(uint8_t slot, uint32_t *p_size, uint8_t ver[3], uint8_t *
     uint8_t  hdr[FW_HEAD_SIZE];
     uint32_t base = (slot == 0u) ? FW_SLOT0_BASE : FW_SLOT1_BASE;
 
-    GD25Q_ReadBuffer(hdr, base, FW_HEAD_SIZE);
+    /* SPI 总线读失败 → 返回 2（与"空槽/不完整"区分开）。
+     * 绝不能当空槽处理：那会把"Flash 坏了/没焊"伪装成"还没上传固件"，
+     * 真实案例见 gd25q128.c 顶部：0x000C 卡 24 秒后回了一个误导性的 06。 */
+    if (!GD25Q_ReadBuffer(hdr, base, FW_HEAD_SIZE)) {
+        if (p_size) *p_size = 0u;
+        if (p_flag) *p_flag = 0u;
+        return 2u;
+    }
 
     uint32_t size = (uint32_t)hdr[FW_HEAD_OFF_SIZE]
                   | ((uint32_t)hdr[FW_HEAD_OFF_SIZE + 1u] << 8)
@@ -700,9 +702,13 @@ static uint8_t APP_QueryFlashVersion(uint8_t ver[3])
         uint32_t size = 0u;
         uint8_t  flag = 0u;
         uint8_t  v[3] = {0};
+        uint8_t  r;
 
-        (void)Flash_ReadHead((uint8_t)slot, &size, v, &flag);
-
+        r = Flash_ReadHead((uint8_t)slot, &size, v, &flag);
+        if (r == 2u) {
+            /* SPI 总线读不到: 这才是真实故障, 必须报 ERR_FLASH 而不是"空槽" */
+            return APP_STATUS_ERR_FLASH;
+        }
         if (size == 0u || size > FW_MAX_IMAGE_SIZE) continue;    /* 空槽 */
         if (flag == FW_FLAG_COMPLETE) {
             ver[0] = v[0]; ver[1] = v[1]; ver[2] = v[2];
@@ -727,8 +733,10 @@ static uint8_t APP_ProgramPreCheck(void)
     for (uint8_t slot = 0u; slot < 2u; slot++) {
         uint32_t size = 0u;
         uint8_t  flag = 0u;
+        uint8_t  r;
 
-        (void)Flash_ReadHead(slot, &size, 0, &flag);
+        r = Flash_ReadHead(slot, &size, 0, &flag);
+        if (r == 2u) return APP_STATUS_ERR_FLASH;   /* SPI 总线读不到 */
 
         if (size == 0u || size > FW_MAX_IMAGE_SIZE) return APP_STATUS_ERR_NO_FW;
         if (size > max_size[slot])                return APP_STATUS_ERR_SIZE;
@@ -2299,9 +2307,59 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
 
     switch (cmd) {
 
+    /*── 0x001C 诊断: SPI Flash 连通性（排"读不到 Flash"用，不参与正常流程）──*/
+    case MGR_CMD_FLASH_DIAG: {
+        uint8_t d[MGR_FLASH_DIAG_RESP_LEN];
+        (void)GD25Q_Diag(d);
+        APP_SendAck(cmd, d, (uint16_t)MGR_FLASH_DIAG_RESP_LEN);
+        break;
+    }
+
+    /*── 0x001E SWD 烧录自检（B1：不依赖 SPI Flash，单独验证 SWD 这一段）──
+     * 擦一个 128KB 扇区约 1~1.5 秒，所以和 0x0112 一样"跑完才回 ACK"，
+     * 终态在 APP_Run 里发。自检写的是分区外的暂存扇区，不碰 Boot/App。 */
+    case MGR_CMD_SWD_SELFTEST: {
+        uint8_t busy;
+
+        /* DATA[0] = 1 → "SWD 引脚活动测试"（约 7 秒：2 秒方波 + 5 秒双线低，供万用表量）
+         * DATA[0] = 2 → "SWD 速度扫描"（一次试 8 档位翻转速度）
+         * DATA[0] = 3 → "SWD 波形捕捉"（抓 ACK 窗口 32 拍电平，替代示波器）
+         * DATA[0] = 4 → "连续连接尝试"（5 秒内不停重连，期间按被测板复位 → 验证复位下连接）
+         * 缺省/0     → 完整 SWD 烧录自检 */
+        if ((len >= 1u) && (data != 0) &&
+            (data[0] >= 1u) && (data[0] <= 5u)) {
+            uint8_t pr[MGR_SWD_SELFTEST_RESP_LEN];
+
+            if (data[0] == 1u) {
+                SST_PinActivityTest(pr);
+            } else if (data[0] == 2u) {
+                SST_SpeedProbe(pr);
+            } else if (data[0] == 3u) {
+                SST_WaveCapture(pr);
+            } else if (data[0] == 4u) {
+                SST_ConnectBurst(pr);
+            } else {
+                SST_ApWriteCapture(pr);
+            }
+            APP_SendAck(cmd, pr, (uint16_t)MGR_SWD_SELFTEST_RESP_LEN);
+            break;
+        }
+
+        if (SST_Busy() != 0u) {
+            busy = APP_STATUS_BUSY;
+            APP_SendAck(cmd, &busy, 1);
+            break;
+        }
+        s_sst_seq = pc_seq;
+        SST_Start();
+        break;
+    }
+
     /*── 0x000C 查询固件版本号 (Flash 中) ──*/
     case MGR_CMD_QUERY_FLASH_VER: {
-        uint8_t resp[4];
+        /* 版本字节先填占位 0.255.255：任何提前返回（含 SPI 坏 → ERR_FLASH）
+         * 都不会把栈上的垃圾当版本号发出去。 */
+        uint8_t resp[4] = { 0u, 0x00u, 0xFFu, 0xFFu };
         resp[0] = APP_QueryFlashVersion(&resp[1]);
         APP_SendAck(cmd, resp, 4);
         break;
@@ -2632,6 +2690,9 @@ void APP_Init(void)
 
 void APP_Run(void)
 {
+    /* 0) PC 口收到的字节搬进帧解析器（USB 分支是空操作，见 pc_link.c） */
+    PcLink_Poll();
+
     /* 1) 把接收环形缓冲里的字节喂给解析器, 处理收到的完整帧 */
     APP_Frame_Poll();
     if (APP_Frame_Pending()) {
@@ -2662,9 +2723,20 @@ void APP_Run(void)
         }
     }
 
+    /* 3b) 0x001E SWD 烧录自检推进 + 终态回 ACK（不依赖 SPI Flash，只走 SWD） */
+    if (SST_Busy() != 0u) {
+        SST_Step();
+        if (SST_Busy() == 0u) {
+            uint8_t r[MGR_SWD_SELFTEST_RESP_LEN];
+
+            (void)SST_Result(r);
+            APP_SendFrame(MGR_CMD_SWD_SELFTEST, s_sst_seq, r,
+                          (uint16_t)MGR_SWD_SELFTEST_RESP_LEN);
+        }
+    }
+
     /* 4) 到 U2 的内部链路 (非阻塞: 每轮最多推进一步) */
     APP_LinkTask();
-
 #if (JIG_DUT_LINK != 0)
     /* 4b) 到 DUT（被烧 FOC 板）的链路：同样每轮推进一步 */
     APP_DutTask();

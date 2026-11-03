@@ -10,6 +10,11 @@
 #ifndef HOST_SHIM_STM32F1XX_HAL_H
 #define HOST_SHIM_STM32F1XX_HAL_H
 
+/* 标记"这是宿主替身编译"：固件里直接读外设寄存器（如 SPI2->CR1）、
+ * 或调用替身没有的 HAL 接口（如 HAL_SPI_Init）的那几段，用这个宏圈起来。
+ * 目标工程（Keil）没有这个宏 → 那些代码只在真固件里成立。 */
+#define JIG_HOST_TEST   1
+
 #include <stdint.h>
 
 typedef enum { HAL_OK = 0, HAL_ERROR, HAL_BUSY, HAL_TIMEOUT } HAL_StatusTypeDef;

@@ -6,14 +6,22 @@
 #include "swd_memap.h"
 #include "stm32f4_flash.h"
 
-/* 扇区表：F405RG = 1MB = 16K x4 + 64K x1 + 128K x3 */
+/* 扇区表：F405RG = 1MB = 16K x4 + 64K x1 + 128K x7（共 12 个扇区）
+ * ⚠ 2026-10-28 修：原表只有 8 项（仅覆盖到 0x0807FFFF = 512KB），
+ *   而 F4_FLASH_SIZE 写的是 1MB、App 分区声明到 0x0808FFFF → 扇区 8~11
+ *   会被 F4_EraseSector 判成 SWD_ERR_PARAM，导致"稍大的 App 镜像永远烧不进去"。 */
 static const uint32_t k_sec_kb[F4_SECTOR_COUNT] = {
-    16u, 16u, 16u, 16u, 64u, 128u, 128u, 128u
+    16u, 16u, 16u, 16u, 64u, 128u, 128u, 128u, 128u, 128u, 128u, 128u
 };
 static const uint32_t k_sec_off[F4_SECTOR_COUNT] = {
     0x00000u, 0x04000u, 0x08000u, 0x0C000u,
-    0x10000u, 0x20000u, 0x40000u, 0x60000u
+    0x10000u, 0x20000u, 0x40000u, 0x60000u,
+    0x80000u, 0xA0000u, 0xC0000u, 0xE0000u
 };
+
+/* 扇区表必须正好覆盖整片 Flash：16K*4 + 64K + 128K*7 = 1024KB = F4_FLASH_SIZE */
+typedef char f4_sector_table_must_cover_flash[
+    (((16u * 4u) + 64u + (128u * 7u)) * 1024u == F4_FLASH_SIZE) ? 1 : -1];
 
 uint32_t F4_SectorBase(uint32_t sector)
 {

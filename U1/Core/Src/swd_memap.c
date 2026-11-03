@@ -41,6 +41,11 @@ int SWD_MemInit(void)
 {
     s_apok = 0u;
     s_csw  = 0u;
+
+    /* 进 AP 之前先清一次 sticky：上电后第一笔 AP 访问很容易 FAULT，
+     * 一旦锁上 STICKYERR，后续所有 AP 访问都会返回 FAULT（2026-11-03 实测）。 */
+    (void)SWD_ClearSticky();
+
     return memap_prepare(AHBAP_CSW_WORD);
 }
 
@@ -77,6 +82,7 @@ int SWD_MemRead32(uint32_t addr, uint32_t *value)
 int SWD_MemWrite32(uint32_t addr, uint32_t value)
 {
     uint32_t v = value;
+    uint32_t flush = 0u;
     int      r;
 
     r = memap_prepare(AHBAP_CSW_WORD);
@@ -91,6 +97,13 @@ int SWD_MemWrite32(uint32_t addr, uint32_t value)
     if (r != SWD_OK) {
         return r;
     }
+
+    /* MEM-AP 的 DRW 写是 **posted**（AP 先回 ACK，真正传输在后台做）。
+     * 写完立刻发起下一笔事务时，AP 可能还没收尾 → 下一笔容易拿到畸形 ACK。
+     * 这里读一次 RDBUFF 把这次写"推完"，这是 DAPLink/OpenOCD 的标准做法。
+     * ⚠ 这一步是**尽力而为**：即使它自己失败也不让整个写操作失败
+     *   （实测这笔记 flush 读偶尔拿到畸形 ACK，重试机制会兜住它）。 */
+    (void)SWD_DPRead(SWD_DP_RDBUFF, &flush);
     return SWD_OK;
 }
 

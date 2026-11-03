@@ -23,6 +23,7 @@
 #define SWD_AP_CSW       0x00u
 #define SWD_AP_TAR       0x04u
 #define SWD_AP_DRW       0x0Cu
+#define SWD_AP_IDR       0xFCu    /* 只读标识寄存器：F4 的 AHB-AP 应为 0x24770011 */
 
 /* ABORT 寄存器位（ADIv5 §B4.2.1）
  *   bit1 STKCMPCLR / bit2 STKERRCLR / bit3 WDERRCLR / bit4 ORUNERRCLR

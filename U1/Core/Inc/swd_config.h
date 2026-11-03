@@ -77,9 +77,11 @@
 /* ------------------------------------------------------------------ */
 /* 每个半周期插入的 NOP 循环次数（0 = 全速，仅仿真用）。
  * F103 @72MHz：8 大约 1MHz SWCLK，4 大约 2MHz，0 大约 3~4MHz。
- * 上板先用 8（慢而稳），确认能连上再往下调。 */
+ * ⚠ 2026-11-03：飞线 + 无串阻时 1 MHz 已经**边缘不可靠**（同一固件读 IDCODE
+ *   有时正确、有时错位），实测默认值改到 128（约 50~60 kHz），先求稳再提速。
+ *   要找最快可用速度，跑 0x001E 的 mode=2「速度扫描」。 */
 #ifndef SWD_DELAY_LOOPS
-#define SWD_DELAY_LOOPS     8u
+#define SWD_DELAY_LOOPS     128u
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -98,14 +100,15 @@
 #define SWD_TA_AFTER_ACK_WRITE  1u   /* ACK → 写数据：目标→主机，必须 1 */
 #define SWD_TA_BEFORE_READ_DATA 0u   /* ACK → 读数据：同为目标驱动，必须 0 */
 #define SWD_TA_TAIL             1u   /* 事务末 turnaround（读必须；写只在非 OK 时补） */
-#define SWD_TAIL_IDLE_CYCLES    1u   /* 末 turnaround 之后的空闲周期数 */
-#define SWD_IDLE_LEVEL          0u   /* 空闲周期 SWDIO 电平（DAPLink 即如此） */
+#define SWD_TAIL_IDLE_CYCLES    0u   /* 末 turnaround 之后的空闲周期数（照 DAPProg：SWD 用 0） */
+#define SWD_IDLE_LEVEL          1u   /* 空闲时 SWDIO 电平（照 DAPProg：事务结束驱动为高） */
 
 /* ------------------------------------------------------------------ */
 /* 4. 超时与重试                                                       */
 /* ------------------------------------------------------------------ */
 #define SWD_RETRY_WAIT          100u   /* WAIT 应答最大重试次数（对齐 DAPLink 的 MAX_SWD_RETRY） */
 #define SWD_RETRY_FAULT         2u     /* FAULT 应答最大重试次数 */
+#define SWD_RETRY_NOACK         8u     /* 畸形/无效 ACK 的最大重试次数（飞线噪声自愈） */
 #define SWD_CONNECT_RETRY       3u     /* 连接（读 IDCODE）重试次数 */
 #define SWD_POLL_MAX            500000u/* 轮询上限，防死循环 */
 #define F4_FLASH_TIMEOUT_MS     5000u  /* 擦/写等待 BSY 清零的超时 */
@@ -116,6 +119,6 @@
 /* ------------------------------------------------------------------ */
 #define F4_FLASH_BASE           0x08000000u
 #define F4_FLASH_SIZE           (1024u * 1024u)
-#define F4_SECTOR_COUNT         8u     /* 16,16,16,16,64,128,128,128 KB */
+#define F4_SECTOR_COUNT         12u    /* 16,16,16,16,64,128,128,128,128,128,128,128 KB（共 1MB） */
 
 #endif /* SWD_CONFIG_H */

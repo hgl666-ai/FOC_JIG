@@ -49,11 +49,15 @@
 #define T_CR_STRT         (1u << 16)     /* RM0090 §3.9.7：STRT 是 bit16（F40x/F41x） */
 #define T_CR_LOCK         (1u << 31)
 
-/* 扇区表：本文件独立再写一遍 */
-static const uint32_t k_sec_off[8] = {
-    0x00000u, 0x04000u, 0x08000u, 0x0C000u, 0x10000u, 0x20000u, 0x40000u, 0x60000u
+/* 扇区表：本文件独立再写一遍（12 项 = 1MB 全片，与固件 swd_config.h 的
+ * F4_SECTOR_COUNT 一致；原先是 8 项，扇区 8~11 无法擦除） */
+static const uint32_t k_sec_off[12] = {
+    0x00000u, 0x04000u, 0x08000u, 0x0C000u, 0x10000u, 0x20000u,
+    0x40000u, 0x60000u, 0x80000u, 0xA0000u, 0xC0000u, 0xE0000u
 };
-static const uint32_t k_sec_kb[8] = { 16u, 16u, 16u, 16u, 64u, 128u, 128u, 128u };
+static const uint32_t k_sec_kb[12] = {
+    16u, 16u, 16u, 16u, 64u, 128u, 128u, 128u, 128u, 128u, 128u, 128u
+};
 
 #define T_DHCSR           0xE000EDF0u
 #define T_DCRSR           0xE000EDF4u
@@ -222,7 +226,7 @@ static void flash_do_erase(void)
     }
     if (s_pend_erase != 0xFFFFFFFFu) {
         s = s_pend_erase;
-        if (s < 8u) {
+        if (s < 12u) {                       /* 1MB = 12 个扇区（原先写死 8，扇区 8~11 白擦） */
             flash_erase_bytes(k_sec_off[s], k_sec_kb[s] * 1024u);
             c_erases++;
         }

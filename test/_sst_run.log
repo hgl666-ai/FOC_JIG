@@ -1,0 +1,16 @@
+==================================================
+ SWD selftest (0x001E) on line-level target model
+==================================================
+  [FAIL] 正常自检通过 (status=00)  (line 98)
+  [FAIL] 应答[0] = 状态码  (line 99)
+  [FAIL] 应答[1] = 0xFF (全部完成)  (line 100)
+  [FAIL] DEV_ID = 0x413 (F405)  (line 105)
+  [FAIL] 至少擦除了 1 个扇区  (line 111)
+  [FAIL] 发生了页编程  (line 112)
+  [FAIL] scratch[0..3] = 00 00 00 00（图样每 256B 的低 4 字节）  (line 121)
+  [FAIL] scratch[8] = 0x32（(8*7) ^ 0x5A）  (line 127)
+  [FAIL] 4KB 末尾不是空白（确实写满了）  (line 129)
+--------------------------------------------------
+ 擦除 0 次  编程 0 次  SWD 事务 1  冲突 0
+ pass = 11, fail = 9
+ RESULT: FAILED

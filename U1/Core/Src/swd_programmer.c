@@ -84,13 +84,16 @@ static void swdp_fail(uint8_t status, uint8_t raw_err)
     BSP_DBG_Send("\r\n");
 }
 
-/* 读槽头并校验：大小非 0、不超分区上限、完整标志为 0xA5 */
+/* 读槽头并校验：大小非 0、不超分区上限、完整标志为 0xA5
+ * @retval 1 = 可用；0 = 槽里没有完整固件；**2 = SPI 总线读失败（硬件故障 → ERR_FLASH）** */
 static uint8_t swdp_load_image_head(uint32_t slot_base, uint32_t max_len, uint32_t *p_len)
 {
     uint8_t  hdr[FW_HEAD_SIZE];
     uint32_t size;
 
-    GD25Q_ReadBuffer(hdr, slot_base, (uint16_t)FW_HEAD_SIZE);
+    if (!GD25Q_ReadBuffer(hdr, slot_base, (uint16_t)FW_HEAD_SIZE)) {
+        return 2u;
+    }
 
     size = (uint32_t)hdr[FW_HEAD_OFF_SIZE]
          | ((uint32_t)hdr[FW_HEAD_OFF_SIZE + 1u] << 8)
@@ -207,13 +210,20 @@ void SWDP_Step(void)
         (void)CM_FreezeWatchdogs();       /* 冻结 IWDG/WWDG，防止擦写期间被复位 */
         (void)CM_ReadDevId(&s_dev_id);
 
-        if (swdp_load_image_head(FW_SLOT0_BASE, DUT_BOOT_SIZE, &s_img_len_boot) == 0u) {
-            swdp_fail(APP_STATUS_ERR_INCOMPLETE, 0u);
-            break;
-        }
-        if (swdp_load_image_head(FW_SLOT1_BASE, DUT_APP_SIZE, &s_img_len_app) == 0u) {
-            swdp_fail(APP_STATUS_ERR_INCOMPLETE, 0u);
-            break;
+        /* 4096 是 SPI Flash 的槽基址(字节)；2 = SPI 读失败 */
+        {
+            uint8_t r0 = swdp_load_image_head(FW_SLOT0_BASE, DUT_BOOT_SIZE, &s_img_len_boot);
+            uint8_t r1;
+
+            if (r0 != 1u) {
+                swdp_fail((r0 == 2u) ? APP_STATUS_ERR_FLASH : APP_STATUS_ERR_INCOMPLETE, 0u);
+                break;
+            }
+            r1 = swdp_load_image_head(FW_SLOT1_BASE, DUT_APP_SIZE, &s_img_len_app);
+            if (r1 != 1u) {
+                swdp_fail((r1 == 2u) ? APP_STATUS_ERR_FLASH : APP_STATUS_ERR_INCOMPLETE, 0u);
+                break;
+            }
         }
 
         /* 擦除计划：Boot 与 App 覆盖到的扇区并集（两个分区连续，见 flash_map.h 的静态断言） */
@@ -269,7 +279,12 @@ void SWDP_Step(void)
         }
         {
             uint16_t chunk = (uint16_t)swdp_min_u32(remain, (uint32_t)SWDP_CHUNK_BYTES);
-            GD25Q_ReadBuffer(s_buf, s_slot_base + FW_HEAD_SIZE + s_offset, chunk);
+            if (!GD25Q_ReadBuffer(s_buf, s_slot_base + FW_HEAD_SIZE + s_offset, chunk)) {
+                /* SPI 读不到镜像源：既不能把缓冲区里的垃圾写进被烧板，
+                 * 也不能拿它去做回读校验（否则"零 vs 零"会假通过）。*/
+                swdp_fail(APP_STATUS_ERR_FLASH, 0xFFu);
+                break;
+            }
             r = F4_ProgramWords(s_dst_addr + s_offset, s_buf, (uint32_t)chunk);
             if (r != SWD_OK) {
                 swdp_fail(APP_STATUS_ERR_PROG, (uint8_t)(-r));
@@ -294,7 +309,12 @@ void SWDP_Step(void)
         }
         {
             uint16_t chunk = (uint16_t)swdp_min_u32(remain, (uint32_t)SWDP_CHUNK_BYTES);
-            GD25Q_ReadBuffer(s_buf, s_slot_base + FW_HEAD_SIZE + s_offset, chunk);
+            if (!GD25Q_ReadBuffer(s_buf, s_slot_base + FW_HEAD_SIZE + s_offset, chunk)) {
+                /* SPI 读不到镜像源：既不能把缓冲区里的垃圾写进被烧板，
+                 * 也不能拿它去做回读校验（否则"零 vs 零"会假通过）。*/
+                swdp_fail(APP_STATUS_ERR_FLASH, 0xFFu);
+                break;
+            }
             r = F4_VerifyImage(s_dst_addr + s_offset, s_buf, (uint32_t)chunk);
             if (r != SWD_OK) {
                 swdp_fail(APP_STATUS_ERR_PROG, (uint8_t)(-r));

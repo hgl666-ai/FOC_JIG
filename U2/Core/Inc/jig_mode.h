@@ -40,6 +40,31 @@
 #endif
 
 /*==============================================================================
+ * 2.1 PC 通讯口：走 USB CDC 还是走串口（**特殊测试用的临时开关**）
+ *============================================================================*/
+/* 0 = USB CDC（默认，出厂/产线就是它：一根 USB 线，PC 侧是虚拟串口）
+ * 1 = 串口：PC 的字节直接进 U1 的 **USART1（PA9=TX / PA10=RX）**，115200 8N1
+ *
+ * 为什么需要它：临时换到 **STM32F103C6T6（32 KB Flash / 10 KB RAM）** 上做特殊
+ * 测试时，USB CDC 那一整套（HAL PCD + USBD 协议栈 + 描述符 + 两个 512B 缓冲）
+ * 要吃掉 ~9.4 KB 代码、~3.8 KB RAM，塞不进 32 KB。把 PC 口改走串口以后：
+ *     Flash ≈ 31.6 KB / 32 KB      RAM ≈ 8.8 KB / 10 KB
+ *
+ * **协议一点没变**：帧头 A5 5B、命令码、序号、CRC16、应答内容全部照旧，
+ * PC 侧只是把"打开 USB 虚拟串口"换成"打开 USB-TTL 的 COM 口"，
+ * INFO/命令大全.txt 里的示例帧可以原样粘到串口助手里发。
+ *
+ * ⚠ 三个连带影响（下面用 #error 做机械保证，不靠人记）：
+ *   1. USART1 只有一个 → 与 **DUT 链路（§3.4）** 和 **调试打印（§3.5）** 互斥；
+ *   2. 治具板 CN2 上那两根串口线必须**悬空**，否则会和 USB-TTL 抢线（PA10 顶 PA10）；
+ *   3. USB 那整套会被链接器整段丢掉；切回 USB 只要把下面这行改回 0、重编重烧。 */
+#define JIG_PC_LINK_USB      0
+#define JIG_PC_LINK_UART     1
+#ifndef JIG_PC_LINK
+#define JIG_PC_LINK          JIG_PC_LINK_USB   /* ← 特殊测试构建在 Keil Define 里覆盖成 1 */
+#endif
+
+/*==============================================================================
  * 3. 由模式派生的开关（都可以单独覆盖）
  *============================================================================*/
 
@@ -82,7 +107,7 @@
  * U2 没有调试串口 → 恒为 0（否则 measure.c 会去引用不存在的 bsp_uart）。
  * **JIG_DUT_LINK=1 时强制关闭**（见 §3.4）。 */
 #ifndef MEAS_PRINT_ENABLE
-#define MEAS_PRINT_ENABLE    (((JIG_MODE == JIG_MODE_DEBUG) && (JIG_HAS_DEBUG_UART != 0) && (JIG_DUT_LINK == 0)) ? 1 : 0)
+#define MEAS_PRINT_ENABLE    (((JIG_MODE == JIG_MODE_DEBUG) && (JIG_HAS_DEBUG_UART != 0) && (JIG_DUT_LINK == 0) && (JIG_PC_LINK == JIG_PC_LINK_USB)) ? 1 : 0)
 #endif
 #ifndef BSP_DBG_ENABLE
 #define BSP_DBG_ENABLE       MEAS_PRINT_ENABLE
@@ -94,6 +119,14 @@
 /* USART1 二选一的机械保证：两个都开 = 编译期报错 */
 #if (JIG_DUT_LINK != 0) && (BSP_DBG_ENABLE != 0)
 #error "JIG_DUT_LINK=1 时不能开调试打印：两者都占用 U1 的 USART1（见 jig_mode.h 3.4/3.5）"
+#endif
+
+/* PC 口改走串口时，USART1 又被 PC 占了 → 上面两个都必须为 0 */
+#if (JIG_PC_LINK == JIG_PC_LINK_UART) && (JIG_DUT_LINK != 0)
+#error "JIG_PC_LINK=UART 与 JIG_DUT_LINK=1 都要占 U1 的 USART1，只能留一个（见 jig_mode.h 2.1/3.4）"
+#endif
+#if (JIG_PC_LINK == JIG_PC_LINK_UART) && (BSP_DBG_ENABLE != 0)
+#error "JIG_PC_LINK=UART 时 USART1 归 PC，不能再开调试打印（见 jig_mode.h 2.1/3.5）"
 #endif
 
 /* --- 3.6 标定项（与运行模式无关，标定完手动置 1）-------------------------

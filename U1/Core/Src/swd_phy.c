@@ -10,6 +10,11 @@
 #include "swd_config.h"
 #include "swd_phy.h"
 
+/* 位翻转延时循环次数：**运行期可调**（给"SWD 速度扫描"用）。
+ * 默认值 = 编译期宏 SWD_DELAY_LOOPS，所以正常烧录行为不变。
+ * 定义放在两个分支外面：仿真分支不用它，但 SWD_PhySetDelay 两边都要能链接。 */
+static volatile uint16_t s_delay_loops = (uint16_t)SWD_DELAY_LOOPS;
+
 /* ================================================================== */
 /* 1. 底层原语（唯一与构建相关的部分）                                 */
 /* ================================================================== */
@@ -99,31 +104,48 @@ static uint8_t phy_dio_read(void)
     return (SWD_DIO_PORT->IDR & (uint32_t)SWD_DIO_PIN) ? 1u : 0u;
 }
 
+/* 位翻转延时（次数由 s_delay_loops 决定，见文件开头） */
 static void phy_delay(void)
 {
-#if (SWD_DELAY_LOOPS > 0u)
-    volatile uint32_t i;
-    for (i = 0u; i < SWD_DELAY_LOOPS; i++) {
+    volatile uint16_t i;
+    for (i = 0u; i < s_delay_loops; i++) {
         __NOP();
     }
-#endif
 }
 
 #endif /* SWD_SIM_BUILD */
 
+/* ---- 速度调节（两个分支共用） ---- */
+void SWD_PhySetDelay(uint16_t loops)
+{
+    s_delay_loops = loops;
+}
+
+uint16_t SWD_PhyGetDelay(void)
+{
+    return s_delay_loops;
+}
+
 /* 统计（便于上板前后观察实际打了多少个时钟） */
 static uint32_t s_clk_count = 0u;
 static uint8_t  s_last_ack  = 0u;   /* 最近一次读到的 3 位 ACK，诊断用 */
+static uint8_t  s_last_req  = 0u;   /* 最近一次发送的请求头字节，诊断用 */
 
 /* ================================================================== */
 /* 2. 上层：与构建无关                                                 */
 /* ================================================================== */
 
+/* ⚠ 2026-11-02 相位重构：完全照搬 DAPProg（INFO/SWD烧录参考的开源项目2）的
+ * 底层时序相位 —— **SWCLK 闲置高电平，每个时钟拍是一个"低脉冲"**：
+ *     SW_CLOCK_CYCLE = CLK低 → 延时 → CLK高 → 延时
+ * 我们原来的实现是"闲置低、高脉冲"，相位整体相反。虽然理论上两者都能工作，
+ * 但真板上一万多次连接尝试全部失败（ACK 恒 0b111、抓包全 FF），
+ * 而参考实现在同类硬件上是验证过的 —— 因此以参考实现的相位为准。 */
 static void phy_clk_cycle(void)
 {
-    phy_clk_set(1u);
-    phy_delay();
     phy_clk_set(0u);
+    phy_delay();
+    phy_clk_set(1u);
     phy_delay();
     s_clk_count++;
 }
@@ -159,9 +181,11 @@ void SWD_PhyInit(void)
     }
     s_dio_out = 0u;
 #endif
-    phy_clk_set(0u);                     /* SWCLK 空闲低 */
+    /* 照搬 DAPProg 的空闲态：**SWCLK 闲置高电平、SWDIO 闲置高电平**
+     * （DAPProg 每个事务结束时都是 PIN_SWDIO_OUT(1U)、SWCLK 停在 SET）。 */
     phy_dio_dir(1u);                     /* SWDIO 由主机驱动 */
-    phy_dio_write(SWD_IDLE_LEVEL);       /* 空闲电平（ADIv5：低） */
+    phy_dio_write(1u);                   /* 空闲电平：高 */
+    phy_clk_set(1u);                     /* SWCLK 空闲高 */
     SWD_PhyNrst(0u);                     /* 不拉复位 */
 }
 
@@ -197,18 +221,29 @@ uint8_t SWD_ParityOf(uint32_t v)
 
 void SWD_WriteBit(uint8_t b)
 {
+    /* 照搬 DAPProg 的 SW_WRITE_BIT（SW_DP.c:46-51）：
+     *   PIN_SWDIO_OUT(bit); PIN_SWCLK_CLR(); delay; PIN_SWCLK_SET(); delay;
+     * 数据在时钟为高时更新 → 再来一个下降沿 → 延时 → 上升沿由目标采样。 */
     phy_dio_dir(1u);            /* 输出 */
-    phy_dio_write(b ? 1u : 0u); /* 在下降沿(时钟低)期间更新 */
-    phy_clk_cycle();            /* 上升沿：目标采样 */
+    phy_dio_write(b ? 1u : 0u); /* 数据 */
+    phy_clk_set(0u);            /* 下降沿 */
+    phy_delay();
+    phy_clk_set(1u);            /* 上升沿：目标采样 */
+    phy_delay();
+    s_clk_count++;
 }
 
 uint8_t SWD_ReadBit(void)
 {
+    /* 照搬 DAPProg 的 SW_READ_BIT（SW_DP.c:53-58）：
+     *   PIN_SWCLK_CLR(); delay; bit = PIN_SWDIO_IN(); PIN_SWCLK_SET(); delay;
+     * 在**时钟低电平期间**采样（目标在上升沿驱动，低电平期间数据已稳定）。 */
     uint8_t b;
-    phy_clk_set(1u);            /* 上升沿 */
+
+    phy_clk_set(0u);            /* 下降沿：目标把数据送出来 */
     phy_delay();
-    b = phy_dio_read();         /* 主机在上升沿采样 */
-    phy_clk_set(0u);
+    b = phy_dio_read();         /* 低电平期间采样 */
+    phy_clk_set(1u);            /* 上升沿 */
     phy_delay();
     s_clk_count++;
     return b;
@@ -245,12 +280,11 @@ void SWD_Turnaround(void)
  */
 void SWD_IdleClock(void)
 {
-    uint8_t i;
+    /* 空闲周期：**SWDIO 驱动为低 + 打一拍时钟**。
+     * DP 靠 Start 位的 0→1 跳变识别包边界，所以每个包之前都必须先把它拉低。 */
     phy_dio_dir(1u);
-    phy_dio_write(SWD_IDLE_LEVEL);
-    for (i = 0u; i < SWD_TAIL_IDLE_CYCLES; i++) {
-        phy_clk_cycle();
-    }
+    phy_dio_write(0u);
+    phy_clk_cycle();
 }
 
 void SWD_LineReset(void)
@@ -263,16 +297,25 @@ void SWD_LineReset(void)
     }
 }
 
-/* 事务尾部的空闲周期：turnaround(可选) + N 个空闲时钟（主机驱动空闲电平） */
+/* 事务尾部：turnaround(可选) + N 个空闲时钟，最后把 SWDIO 驱动为**高**（空闲态）。
+ * 照 DAPProg 的做法：SWD 的 idle_cycles = 0，事务结束直接 `PIN_SWDIO_OUT(1U)`；
+ * 我们原来多补了 1 个时钟且把线留在低电平，实测会导致下一笔事务拿不到 ACK
+ * （2026-11-02：IDCODE 能读到，但紧接着的 CTRL/STAT 写返回 NO_ACK）。 */
 static void swd_idle_tail(uint8_t turnaround)
 {
     uint8_t i;
     for (i = 0u; i < turnaround; i++) {
         SWD_Turnaround();
     }
+#if (SWD_TAIL_IDLE_CYCLES > 0u)
     for (i = 0u; i < SWD_TAIL_IDLE_CYCLES; i++) {
-        SWD_WriteBit(SWD_IDLE_LEVEL);
+        SWD_WriteBit((uint8_t)SWD_IDLE_LEVEL);
     }
+#else
+    (void)i;
+#endif
+    phy_dio_dir(1u);                 /* 事务结束：总线交还主机 */
+    phy_dio_write(1u);               /* 空闲电平 = 高（DAPProg 一致） */
 }
 
 /* 协议错误（没读到有效 ACK）时的退避：
@@ -307,6 +350,14 @@ int SWD_Transfer(uint8_t apndp, uint8_t rnw, uint8_t addr, uint32_t *data)
     req |= (uint8_t)(a2 << 3);
     req |= (uint8_t)(a3 << 4);
     req |= (uint8_t)(par << 5);
+
+    s_last_req = req;                                    /* 排障：记住最后一笔请求头 */
+
+    /* ★ 2026-11-03 关键修正：**每个包之前**先把 SWDIO 驱动为低并打一拍空闲。
+     * ADIv5 §B4.1.1：DP 靠 Start 位的 **0→1 跳变**识别包边界。如果上一笔写操作
+     * 在线上留下的最后一个电平是 1（校验位=1），这一笔的 Start 位（也是 1）
+     * 就没有跳变 → DP 认不出包 → **完全不回 ACK**（实测 ACK 读到 0b111）。 */
+    SWD_IdleClock();
 
     SWD_WriteBits(req, 8u);
 
@@ -367,9 +418,11 @@ int SWD_Transfer(uint8_t apndp, uint8_t rnw, uint8_t addr, uint32_t *data)
 
         /* ADIv5 §B4.1.1：WDATA 之后主机继续驱动，**没有额外的 turnaround**，
          * 只需补空闲周期。第一版在这里多打了一个 turnaround（白白多 1 拍）。 */
+#if (SWD_TAIL_IDLE_CYCLES > 0u)
         for (i = 0u; i < SWD_TAIL_IDLE_CYCLES; i++) {
-            SWD_WriteBit(SWD_IDLE_LEVEL);
+            SWD_WriteBit((uint8_t)SWD_IDLE_LEVEL);
         }
+#endif
     }
 
     return SWD_OK;
@@ -383,4 +436,9 @@ uint32_t SWD_PhyClockCount(void)
 uint8_t SWD_PhyLastAck(void)
 {
     return s_last_ack;
+}
+
+uint8_t SWD_PhyLastReq(void)
+{
+    return s_last_req;
 }

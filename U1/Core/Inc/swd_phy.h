@@ -68,4 +68,17 @@ uint32_t SWD_PhyClockCount(void);
 /* 最近一次读到的 3 位 ACK 原始值（诊断"没应答"到底是线断了还是被拉死） */
 uint8_t SWD_PhyLastAck(void);
 
+/* 最近一次发送的 **请求头字节**（诊断"是哪一笔事务失败"：
+ *   0xA5=DP读IDCODE  0x85=AP读  0x0D=AP写TAR  0x41=AP写DRW  0x09=DP写 ...） */
+uint8_t SWD_PhyLastReq(void);
+
+/**
+  * @brief  设置位翻转的延时循环次数（**速度扫描用**，运行期可调）
+  * @param  loops 0 = 最快；越大越慢。默认值 = swd_config.h 的 SWD_DELAY_LOOPS
+  * @note   位翻转 SWD 在长飞线/无终端时可能因为太快而握手失败；
+  *         现场"速度扫描"就能找出能连上的那一档。
+  */
+void     SWD_PhySetDelay(uint16_t loops);
+uint16_t SWD_PhyGetDelay(void);
+
 #endif /* SWD_PHY_H */

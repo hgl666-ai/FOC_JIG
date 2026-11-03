@@ -25,9 +25,21 @@
 
 #include <stdint.h>
 #include "uart_port.h"
+#include "jig_mode.h"
 
 #define UART_CFG_PORT_DUT   (UART_PORT_0)   /* USART1: 被测板串口(读数据供判定)  */
 #define UART_CFG_PORT_LINK  (UART_PORT_1)   /* USART3: 到 U2 的内部链路     */
+
+/* 特殊测试（jig_mode.h §2.1 JIG_PC_LINK=UART）时，USART1 不再接被测板，
+ * 改成接 PC 的 USB-TTL。**同一路硬件、同一个端口号**，只是角色变了 ——
+ * 下面这个别名让 uart_cfg.c 的绑定和中断分发只有一个名字可写，不会写错。 */
+#define UART_CFG_PORT_PC    (UART_PORT_0)
+
+#if (JIG_PC_LINK == JIG_PC_LINK_UART)
+#define UART_CFG_PORT_UART1 (UART_CFG_PORT_PC)    /* USART1 → PC        */
+#else
+#define UART_CFG_PORT_UART1 (UART_CFG_PORT_DUT)   /* USART1 → 被测板     */
+#endif
 
 /** 绑定句柄 + 打开两路的接收中断。必须在 MX_USARTx_UART_Init 之后调用 */
 void UartCfg_Init(void);

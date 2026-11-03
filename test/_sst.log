@@ -1,0 +1,12 @@
+U1\Core\Src\swd_phy.c: In function 'SWD_IdleClock':
+U1\Core\Src\swd_phy.c:285:20: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+  285 |     for (i = 0u; i < SWD_TAIL_IDLE_CYCLES; i++) {
+      |                    ^
+U1\Core\Src\swd_phy.c: In function 'swd_idle_tail':
+U1\Core\Src\swd_phy.c:310:20: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+  310 |     for (i = 0u; i < SWD_TAIL_IDLE_CYCLES; i++) {
+      |                    ^
+U1\Core\Src\swd_phy.c: In function 'SWD_Transfer':
+U1\Core\Src\swd_phy.c:409:24: warning: comparison is always false due to limited range of data type [-Wtype-limits]
+  409 |         for (i = 0u; i < SWD_TAIL_IDLE_CYCLES; i++) {
+      |                        ^

@@ -37,7 +37,7 @@ echo.
 echo ============================================================
 echo  2/12  Full-chain test (PC frame to target flash, all simulated)
 echo ============================================================
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%ROOT%\test\swdsim\sim_target.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\pc_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_selftest.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%ROOT%\test\swdsim\sim_target.c"
 if errorlevel 1 goto :app_build_fail
 "%ROOT%\test\app_test.exe"
 if errorlevel 1 goto :app_fail
@@ -50,7 +50,7 @@ rem  are compiled out and the DUT passthrough cases (T17) run instead.
 :appdut
 echo.
 echo     --- app_test in DUT-link mode ---
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" "-DJIG_DUT_LINK=1" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_dut_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%SRC%\cur_chk.c" "%SRC%\vol_chk.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%SRC%\dut_proto.c" "%ROOT%\test\swdsim\sim_target.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" "-DJIG_DUT_LINK=1" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_dut_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%SRC%\cur_chk.c" "%SRC%\vol_chk.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\pc_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_selftest.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%SRC%\dut_proto.c" "%ROOT%\test\swdsim\sim_target.c"
 if errorlevel 1 goto :appdut_build_fail
 "%ROOT%\test\app_dut_test.exe"
 if errorlevel 1 goto :appdut_fail
@@ -212,7 +212,54 @@ rem  enc_chk: encoder three-way judgement (jig intent vs U2 vs DUT)
 if errorlevel 1 goto :curchk_build_fail
 "%ROOT%\test\enc_chk_test.exe"
 if errorlevel 1 goto :curchk_fail
+rem  pc_link: PC port transport (USB CDC branch + USART1 branch, see jig_mode.h 2.1)
+"%GCC%" -std=c99 -Wall -Wextra -O1 %INC% -o "%ROOT%\test\pc_link_test.exe" "%ROOT%\test\pc_link_test.c" "%SRC%\pc_link.c" "%ROOT%\U1\Core\Src\protocol_frame.c"
+if errorlevel 1 goto :pclink_build_fail
+"%ROOT%\test\pc_link_test.exe"
+if errorlevel 1 goto :pclink_fail
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DJIG_PC_LINK=1" %INC% -o "%ROOT%\test\pc_link_uart_test.exe" "%ROOT%\test\pc_link_test.c" "%SRC%\pc_link.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_cfg.c" "%ROOT%\U1\Core\Src\app_frame.c" "%ROOT%\U1\Core\Src\protocol_frame.c"
+if errorlevel 1 goto :pclink_build_fail
+"%ROOT%\test\pc_link_uart_test.exe"
+if errorlevel 1 goto :pclink_fail
+rem  flash_err: SPI dead-bus must fail fast instead of hanging (gd25q128)
+"%GCC%" -std=c99 -Wall -Wextra -O1 %INC% -o "%ROOT%\test\flash_err_test.exe" "%ROOT%\test\flash_err_test.c" "%SRC%\gd25q128.c"
+if errorlevel 1 goto :flasherr_build_fail
+"%ROOT%\test\flash_err_test.exe"
+if errorlevel 1 goto :flasherr_fail
+echo [PASS] gd25q128 dead-bus fast-fail test
+rem  swd_selftest: 0x001E SWD burn self-test on the line-level target model
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\swd_selftest_test.exe" "%ROOT%\test\swd_selftest_test.c" "%SRC%\swd_selftest.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%ROOT%\test\swdsim\sim_target.c"
+if errorlevel 1 goto :sst_build_fail
+"%ROOT%\test\swd_selftest_test.exe"
+if errorlevel 1 goto :sst_fail
+echo [PASS] SWD selftest 0x001E (target model: erase+write+verify+UID)
+echo [PASS] pc_link tests (USB CDC branch + USART1 branch)
 echo [PASS] judgement tests (cur_chk + vol_chk + enc_chk + sn_report)
+goto :py
+:sst_build_fail
+echo [FAIL] swd_selftest_test compile error
+set FAILED=1
+goto :py
+:sst_fail
+echo [FAIL] swd_selftest_test
+set FAILED=1
+goto :py
+:flasherr_build_fail
+echo [FAIL] flash_err_test compile error
+set FAILED=1
+goto :py
+:flasherr_fail
+echo [FAIL] flash_err_test
+set FAILED=1
+goto :py
+:pclink_build_fail
+echo [FAIL] pc_link_test compile error
+set FAILED=1
+goto :py
+:pclink_fail
+echo [FAIL] pc_link_test
+set FAILED=1
+goto :py
 goto :py
 :snrep_build_fail
 echo [FAIL] sn_report_test compile error

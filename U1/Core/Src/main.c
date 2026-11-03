@@ -31,6 +31,7 @@
 #include "bsp_uart.h"
 #include "app.h"
 #include "measure.h"
+#include "jig_mode.h"       /* JIG_PC_LINK：USB CDC 还是 USART1 当 PC 口 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -101,7 +102,12 @@ int main(void)
   MX_TIM4_Init();
   MX_USART1_UART_Init();
   MX_USART3_UART_Init();
+  /* 特殊测试（jig_mode.h §2.1 JIG_PC_LINK=UART）时不初始化 USB：
+   * PC 口走 USART1，USB 整套（PCD + USBD + 描述符 + 两个 512B 缓冲）不进固件，
+   * 省 ~9.4 KB 代码 / ~3.8 KB RAM —— 32 KB 的 C6T6 才装得下。 */
+#if (JIG_PC_LINK == JIG_PC_LINK_USB)
   MX_USB_DEVICE_Init();
+#endif
   /* USER CODE BEGIN 2 */
   /* 板上 SPI Flash (GD25Q128) — 显式把 PB12 从 AF_PP 改回推挽输出作软件 CS */
   GD25Q_Init();

@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "usart.h"          /* huart1 / huart3 (串口中断入口需要) */
+#include "jig_mode.h"       /* JIG_PC_LINK：USB 中断入口是否编进来 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,7 +59,9 @@
 /* External variables --------------------------------------------------------*/
 
 /* USER CODE BEGIN EV */
+#if (JIG_PC_LINK == JIG_PC_LINK_USB)
 extern PCD_HandleTypeDef hpcd_USB_FS;
+#endif
 /* USER CODE END EV */
 
 /******************************************************************************/
@@ -201,6 +204,11 @@ void SysTick_Handler(void)
 
 /* USER CODE BEGIN 1 */
 
+/* USB 的两个中断入口只在 USB CDC 模式下编进来。
+ * 特殊测试（jig_mode.h §2.1 JIG_PC_LINK=UART）时这里必须一起拿掉 —— 否则
+ * HAL_PCD_IRQHandler 被引用，HAL PCD + LL_USB 那 ~5.5 KB 仍然会被链进来，
+ * 32 KB 的 C6T6 就装不下了。拿掉以后向量表里这两格回到默认的弱定义。 */
+#if (JIG_PC_LINK == JIG_PC_LINK_USB)
 /**
   * @brief This function handles USB high priority or CAN TX interrupts.
   */
@@ -216,6 +224,7 @@ void USB_LP_CAN1_RX0_IRQHandler(void)
 {
   HAL_PCD_IRQHandler(&hpcd_USB_FS);
 }
+#endif /* JIG_PC_LINK == JIG_PC_LINK_USB */
 
 /**
   * @brief  USART1 全局中断 — 端口0 (PA9/PA10, 被测 FOC 板串口)
