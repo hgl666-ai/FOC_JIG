@@ -2325,10 +2325,37 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
          * DATA[0] = 2 → "SWD 速度扫描"（一次试 8 档位翻转速度）
          * DATA[0] = 3 → "SWD 波形捕捉"（抓 ACK 窗口 32 拍电平，替代示波器）
          * DATA[0] = 4 → "连续连接尝试"（5 秒内不停重连，期间按被测板复位 → 验证复位下连接）
+         * DATA[0] = 5 → "DP/AP 探针"（打印 CTRL/STAT、AP IDR、DP SELECT）
+         * DATA[0] = 6 → "USB 事件计数"（判断 MCU 的 USB 外设有没有看到主机）
          * 缺省/0     → 完整 SWD 烧录自检 */
         if ((len >= 1u) && (data != 0) &&
-            (data[0] >= 1u) && (data[0] <= 5u)) {
+            (data[0] >= 1u) && (data[0] <= 6u)) {
             uint8_t pr[MGR_SWD_SELFTEST_RESP_LEN];
+
+            if (data[0] == 6u) {
+                /* USB 事件计数：由 stm32f1xx_it.c 的 USB 中断累计（非 USB 构建返回 0） */
+                extern uint32_t USB_EvtIrqCount(void);
+                extern uint32_t USB_EvtIstrOr(void);
+                uint32_t irq  = USB_EvtIrqCount();
+                uint32_t istr = USB_EvtIstrOr();
+                uint8_t  k;
+
+                for (k = 0u; k < (uint8_t)MGR_SWD_SELFTEST_RESP_LEN; k++) {
+                    pr[k] = 0u;
+                }
+                pr[0] = APP_STATUS_OK;
+                pr[1] = (uint8_t)(irq >> 24);
+                pr[2] = (uint8_t)(irq >> 16);
+                pr[3] = (uint8_t)(irq >> 8);
+                pr[4] = (uint8_t)irq;
+                pr[5] = (uint8_t)(istr >> 24);
+                pr[6] = (uint8_t)(istr >> 16);
+                pr[7] = (uint8_t)(istr >> 8);
+                pr[8] = (uint8_t)istr;
+                pr[9] = 0xB6u;          /* 本版标记 */
+                APP_SendAck(cmd, pr, (uint16_t)MGR_SWD_SELFTEST_RESP_LEN);
+                break;
+            }
 
             if (data[0] == 1u) {
                 SST_PinActivityTest(pr);
@@ -2690,6 +2717,47 @@ void APP_Init(void)
 
 void APP_Run(void)
 {
+    /* ── 0a) USB 关键寄存器打印到调试口（PA9），每 2 秒一行（2026-11-03 加）──
+     * 为什么从这里打：USB 不枚举时**没有 COM 口**，命令发不进来；
+     * 而 USB 版本来就把调试打印开在 PA9 上，所以把寄存器从那里吐出来最直接。
+     * 格式：[USB] irq istr cntr btable daddr ep0r  （各 4 字节 hex）
+     * 判读：
+     *   daddr 的 bit7(EF)=0        → USB 功能没使能，SIE 不响应任何包
+     *   ep0r 的 STAT_RX != 11( VALID ) → EP0 没准备好接 SETUP，必然全 NAK
+     *   cntr 的 bit15(CTRM)=0      → 传输完成中断被关掉
+     *   istr 出现 CTR(0x8000)      → 至少完成过一次传输 */
+#if (JIG_PC_LINK == JIG_PC_LINK_USB) && (BSP_DBG_ENABLE != 0)
+    {
+        extern uint32_t USB_EvtIrqCount(void);
+        extern uint32_t USB_EvtIstrOr(void);
+        static uint32_t s_usb_dbg_tick = 0u;
+        uint32_t now = HAL_GetTick();
+
+        if ((now - s_usb_dbg_tick) >= 2000u) {
+            uint32_t w[6];
+            uint8_t  k;
+
+            s_usb_dbg_tick = now;
+            w[0] = USB_EvtIrqCount();
+            w[1] = USB_EvtIstrOr();
+            w[2] = (uint32_t)USB->CNTR;
+            w[3] = (uint32_t)USB->BTABLE;
+            w[4] = (uint32_t)USB->DADDR;
+            w[5] = (uint32_t)USB->EP0R;
+
+            BSP_DBG_Send("[USB] ");
+            for (k = 0u; k < 6u; k++) {
+                BSP_DBG_SendHexByte((uint8_t)(w[k] >> 24));
+                BSP_DBG_SendHexByte((uint8_t)(w[k] >> 16));
+                BSP_DBG_SendHexByte((uint8_t)(w[k] >> 8));
+                BSP_DBG_SendHexByte((uint8_t)w[k]);
+                BSP_DBG_Send(" ");
+            }
+            BSP_DBG_Send("\r\n");
+        }
+    }
+#endif
+
     /* 0) PC 口收到的字节搬进帧解析器（USB 分支是空操作，见 pc_link.c） */
     PcLink_Poll();
 

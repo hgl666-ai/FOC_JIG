@@ -209,11 +209,32 @@ void SysTick_Handler(void)
  * HAL_PCD_IRQHandler 被引用，HAL PCD + LL_USB 那 ~5.5 KB 仍然会被链进来，
  * 32 KB 的 C6T6 就装不下了。拿掉以后向量表里这两格回到默认的弱定义。 */
 #if (JIG_PC_LINK == JIG_PC_LINK_USB)
+/* ── USB 事件计数（诊断用，2026-11-03 加）─────────────────────────────
+ * 目的：判断"MCU 的 USB 外设到底有没有看到主机"。
+ * 在进 HAL_PCD_IRQHandler **之前**把 ISTR 的置位位累积下来（HAL 进去会清标志）。
+ *   ISTR 关键位：bit8 ESOF / bit9 SOF / bit10 RESET / bit11 SUSP /
+ *                bit12 PMAOVR / bit13 ERR / bit14 WKUP / bit15 CTR
+ * 判读：
+ *   irq 计数 = 0            → 外设根本没产生中断（数据线没接到 MCU / 外设没启动）
+ *   有中断但没有 RESET(bit10) → 只看到噪声，主机的复位没被识别
+ *   有 RESET 但没有 CTR(bit15) → 主机复位了我们，但没完成任何一次传输
+ *                                （典型：速度不匹配，主机按低速发令）
+ *                                或 SETUP 阶段响应不上
+ *   有 CTR                  → 传输实际发生了，问题在协议栈/描述符
+ * ─────────────────────────────────────────────────────────────────── */
+static volatile uint32_t s_usb_irq_cnt = 0u;
+static volatile uint32_t s_usb_istr_or = 0u;
+
+uint32_t USB_EvtIrqCount(void) { return s_usb_irq_cnt; }
+uint32_t USB_EvtIstrOr(void)   { return s_usb_istr_or; }
+
 /**
   * @brief This function handles USB high priority or CAN TX interrupts.
   */
 void USB_HP_CAN1_TX_IRQHandler(void)
 {
+  s_usb_irq_cnt++;
+  s_usb_istr_or |= ((uint32_t)USB->ISTR & 0xFFFFu);
   HAL_PCD_IRQHandler(&hpcd_USB_FS);
 }
 
@@ -222,8 +243,14 @@ void USB_HP_CAN1_TX_IRQHandler(void)
   */
 void USB_LP_CAN1_RX0_IRQHandler(void)
 {
+  s_usb_irq_cnt++;
+  s_usb_istr_or |= ((uint32_t)USB->ISTR & 0xFFFFu);
   HAL_PCD_IRQHandler(&hpcd_USB_FS);
 }
+#else
+/* 非 USB 构建：给上层提供空实现，避免链接错误 */
+uint32_t USB_EvtIrqCount(void) { return 0u; }
+uint32_t USB_EvtIstrOr(void)   { return 0u; }
 #endif /* JIG_PC_LINK == JIG_PC_LINK_USB */
 
 /**

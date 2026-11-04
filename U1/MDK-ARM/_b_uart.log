@@ -1,7 +1,8 @@
 *** Using Compiler 'V5.06 update 7 (build 960)', folder: 'D:\Develop\Keil_MDK\ARM\ARMCC\Bin'
 Build target 'U1_UART'
+compiling app.c...
 linking...
-Program Size: Code=31920 RO-data=716 RW-data=288 ZI-data=8696  
+Program Size: Code=32032 RO-data=716 RW-data=288 ZI-data=8696  
 FromELF: creating hex file...
 "U1_UART\U1_UART.axf" - 0 Error(s), 0 Warning(s).
-Build Time Elapsed:  00:00:01
+Build Time Elapsed:  00:00:02
