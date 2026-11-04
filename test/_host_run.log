@@ -37,9 +37,9 @@
 [T7] 上传 10s 无新数据 → ERR_TIMEOUT 并回 IDLE
 [T8] 0x0070 前置检查
 [T9] 端到端: PC帧 → 上传 → SPI Flash → 0x0112 SWD → 被烧板 Flash
-    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=5 编程字=102 SWD 事务=764
-    烧 402 B 用了 36037 个 SWCLK 周期 (91795 周期/KB)
-    推算 300KB: 27.5 s @1MHz   13.8 s @2MHz   6.9 s @4MHz
+    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=5 编程字=102 SWD 事务=902
+    烧 402 B 用了 42474 个 SWCLK 周期 (108192 周期/KB)
+    推算 300KB: 32.5 s @1MHz   16.2 s @2MHz   8.1 s @4MHz
     (只算 SWD 链路时间; 真实擦除还要等 Flash: 128KB 扇区约 1.3s/个)
 [T10] 烧录中 BUSY / 目标不在时干净失败
 [T13] SPI Flash 不在线/型号不对 → 第一条命令就以 ERR_FLASH 暴露
@@ -74,9 +74,9 @@
 [T7] 上传 10s 无新数据 → ERR_TIMEOUT 并回 IDLE
 [T8] 0x0070 前置检查
 [T9] 端到端: PC帧 → 上传 → SPI Flash → 0x0112 SWD → 被烧板 Flash
-    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=5 编程字=102 SWD 事务=764
-    烧 402 B 用了 36037 个 SWCLK 周期 (91795 周期/KB)
-    推算 300KB: 27.5 s @1MHz   13.8 s @2MHz   6.9 s @4MHz
+    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=5 编程字=102 SWD 事务=902
+    烧 402 B 用了 42474 个 SWCLK 周期 (108192 周期/KB)
+    推算 300KB: 32.5 s @1MHz   16.2 s @2MHz   8.1 s @4MHz
     (只算 SWD 链路时间; 真实擦除还要等 Flash: 128KB 扇区约 1.3s/个)
 [T10] 烧录中 BUSY / 目标不在时干净失败
 [T13] SPI Flash 不在线/型号不对 → 第一条命令就以 ERR_FLASH 暴露
@@ -852,7 +852,7 @@
  SWD selftest (0x001E) on line-level target model
 ==================================================
 --------------------------------------------------
- 擦除 1 次  编程 1024 次  SWD 事务 8254  冲突 0
+ 擦除 1 次  编程 1024 次  SWD 事务 9294  冲突 0
  pass = 20, fail = 0
  RESULT: ALL PASS
 [PASS] SWD selftest 0x001E (target model: erase+write+verify+UID)

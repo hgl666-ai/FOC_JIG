@@ -40,10 +40,24 @@
 #include "sn_report.h"      /* 0x0024 板子 SN 主动上报（烧录成功后） */
 #include "swd_selftest.h"   /* 0x001E SWD 烧录自检（B1：不依赖 SPI Flash） */
 #include "swd_memap.h"      /* SWD_MemReadBlock：读被测板 96-bit UID */
+#include "swd_phy.h"        /* SWD_OK 状态枚举 / SWD_PhyInit / SWD_PhySetDelay */
+#include "swd_dp.h"         /* SWD_Connect / SWD_PowerUp（0x001E mode=7/8 用） */
 #include "enc_gen.h"
 #include "jig_mode.h"
 #include "pc_link.h"        /* PC 通讯口: USB CDC 或 USART1（jig_mode.h §2.1） */
 #include <string.h>
+
+/*==============================================================================
+ * 主机测试桩（只在本机单元测试里编）
+ *----------------------------------------------------------------------------
+ * `0x001E` mode=6 会调 USB_EvtIrqCount/StrOr，真实固件里由 stm32f1xx_it.c 提供
+ * （非 USB 构建给空实现）。但主机测试**不编译** stm32f1xx_it.c，所以要在这里补桩，
+ * 否则 app_test 链接失败。
+ *============================================================================*/
+#if defined(JIG_HOST_TEST)
+uint32_t USB_EvtIrqCount(void) { return 0u; }
+uint32_t USB_EvtIstrOr(void)   { return 0u; }
+#endif
 
 /*==============================================================================
  * 全局状态
@@ -2326,11 +2340,70 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
          * DATA[0] = 3 → "SWD 波形捕捉"（抓 ACK 窗口 32 拍电平，替代示波器）
          * DATA[0] = 4 → "连续连接尝试"（5 秒内不停重连，期间按被测板复位 → 验证复位下连接）
          * DATA[0] = 5 → "DP/AP 探针"（打印 CTRL/STAT、AP IDR、DP SELECT）
-         * DATA[0] = 6 → "USB 事件计数"（判断 MCU 的 USB 外设有没有看到主机）
+         * DATA[0] = 6 → "USB 事件计数"
+         * DATA[0] = 7 → "设置 SWD 位翻转延时"（DATA[1..2] = 延时值，0=最快）
+         * DATA[0] = 8 → "读目标任意地址"（DATA[1..4] = 地址，返回 4 字节值）
          * 缺省/0     → 完整 SWD 烧录自检 */
         if ((len >= 1u) && (data != 0) &&
-            (data[0] >= 1u) && (data[0] <= 6u)) {
+            (data[0] >= 1u) && (data[0] <= 8u)) {
             uint8_t pr[MGR_SWD_SELFTEST_RESP_LEN];
+
+            if (data[0] == 7u) {
+                /* 运行期设置位翻转延时（每半位插入的空循环数，0=最快）。
+                 * 用途：一次烧录就能试多档速度，不必反复重烧治具。
+                 * 注意：设置在 RAM 里，治具重启会恢复成 swd_config.h 的默认值。 */
+                extern void     SWD_PhySetDelay(uint16_t loops);
+                extern uint16_t SWD_PhyGetDelay(void);
+                uint16_t d = (uint16_t)SWD_PhyGetDelay();
+                uint8_t  k;
+
+                if (len >= 3u) {
+                    d = (uint16_t)(((uint16_t)data[1] << 8) | data[2]);
+                    SWD_PhySetDelay(d);
+                    SWD_PhyInit();          /* 换速度后重配引脚（幂等） */
+                }
+                for (k = 0u; k < (uint8_t)MGR_SWD_SELFTEST_RESP_LEN; k++) {
+                    pr[k] = 0u;
+                }
+                pr[0] = APP_STATUS_OK;
+                pr[1] = (uint8_t)(d >> 8);
+                pr[2] = (uint8_t)d;
+                pr[3] = 0xB6u;
+                APP_SendAck(cmd, pr, (uint16_t)MGR_SWD_SELFTEST_RESP_LEN);
+                break;
+            }
+
+            if (data[0] == 8u) {
+                /* 读目标任意 32 位地址：连接→上电→MEM-AP→SWD_MemRead32。
+                 * 典型用法：读 0x08010000（App 的 SP）应与 app*.bin 头 4 字节一致。 */
+                uint32_t addr = 0u;
+                uint32_t val  = 0u;
+                uint8_t  st   = APP_STATUS_ERR_PARAM;
+                uint8_t  k;
+
+                for (k = 0u; k < (uint8_t)MGR_SWD_SELFTEST_RESP_LEN; k++) {
+                    pr[k] = 0u;
+                }
+                if (len >= 5u) {
+                    uint32_t id = 0u;
+
+                    addr = ((uint32_t)data[1] << 24) | ((uint32_t)data[2] << 16) |
+                           ((uint32_t)data[3] << 8)  |  (uint32_t)data[4];
+                    if (SWD_Connect(&id) != SWD_OK)        { st = APP_STATUS_ERR_TIMEOUT; }
+                    else if (SWD_PowerUp() != SWD_OK)      { st = APP_STATUS_ERR_TIMEOUT; }
+                    else if (SWD_MemInit() != SWD_OK)      { st = APP_STATUS_ERR_TIMEOUT; }
+                    else if (SWD_MemRead32(addr, &val) != SWD_OK) { st = APP_STATUS_ERR_TIMEOUT; }
+                    else                                   { st = APP_STATUS_OK; }
+                }
+                pr[0] = st;
+                pr[1] = (uint8_t)(val >> 24);
+                pr[2] = (uint8_t)(val >> 16);
+                pr[3] = (uint8_t)(val >> 8);
+                pr[4] = (uint8_t)val;
+                pr[5] = 0xB6u;
+                APP_SendAck(cmd, pr, (uint16_t)MGR_SWD_SELFTEST_RESP_LEN);
+                break;
+            }
 
             if (data[0] == 6u) {
                 /* USB 事件计数：由 stm32f1xx_it.c 的 USB 中断累计（非 USB 构建返回 0） */

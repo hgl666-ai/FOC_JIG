@@ -394,7 +394,17 @@ rem  Removing the .axf first makes "it exists afterwards" real evidence that THI
 rem  actually linked, so the check below cannot be fooled by a stale artifact.
 set "AXF=%ROOT%\%1\MDK-ARM\%1\%1.axf"
 if exist "%AXF%" del "%AXF%"
-"%UV4%" -b "%2" -j0 -o "%3"
+rem  -t %1 is essential: without it UV4 builds whatever target happens to be ACTIVE in
+rem  the project file (the GUI remembers the last one used), so once a second target
+rem  exists (e.g. U1_UART) this would silently build the wrong target and the .axf
+rem  check below would fail on a perfectly good project.
+rem  Use -r (rebuild all), NOT -b (incremental). With -b, a no-op build (no source
+rem  changed since the last compile) makes UV4 skip armlink, so the .axf we just
+rem  deleted never comes back -- UV4 still prints "0 Error(s)" and this check then
+rem  fails on a build that is actually fine. -r always relinks, so "the .axf exists
+rem  afterwards" stays a real signal that THIS run linked. (SKIP_KEIL=1 is the fast
+rem  host-only path and does not run UV4 at all.)
+"%UV4%" -r "%2" -t %1 -j0 -o "%3"
 echo     (UV4 is a GUI app; waiting for the build to finish...)
 set KEIL_WAIT=0
 :keil_wait
