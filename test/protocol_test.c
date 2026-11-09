@@ -239,6 +239,34 @@ static void test_stream(void)
         raw = recv_frame(&len);
         CHECK(raw == NULL, "4.6 无多余帧");
     }
+
+    /* 4.7 半截帧把 LEN 读成大数 → 解析器会一直等下去（现场实测的坑）。
+     *     这里钉住"上层能看到攒了多少字节"，以及"复位后能重新对齐"——
+     *     app.c 的 APP_FrameStallCheck 就是靠这两个接口恢复的。
+     *     场景复现：PC 发 10 字节的 0x0017，线上丢了最后 3 字节，
+     *     下次又发一帧，于是 frame_buf[6..7] 拼成 LEN=0x00A5=165。 */
+    {
+        uint8_t half[7] = {0xA5, 0x5B, 0x00, 0x17, 0x00, 0x01, 0x00};
+        uint8_t nxt[10] = {0xA5, 0x5B, 0x00, 0x17, 0x00, 0x02, 0x00, 0x00, 0x4A, 0x45};
+
+        APP_Frame_Init();
+        feed(half, 7);
+        APP_Frame_Poll();
+        CHECK(APP_Frame_Pending() == 0u, "4.7 半截帧不算完整帧");
+        CHECK(APP_Frame_Buffered() == 7u, "4.7 能报出攒了 7 字节");
+
+        feed(nxt, 10);                       /* 拼出 LEN=0x00A5 的大帧 */
+        APP_Frame_Poll();
+        CHECK(APP_Frame_Pending() == 0u, "4.7 LEN 被读错时不产生假帧");
+        CHECK(APP_Frame_Buffered() > 8u, "4.7 卡在等 165 字节的状态（正是超时要救的）");
+
+        APP_Frame_Init();                    /* ← APP_FrameStallCheck 做的事 */
+        CHECK(APP_Frame_Buffered() == 0u, "4.7 超时复位后解析器归零");
+        feed(nxt, 10);                       /* 干净的帧必须能正常收下 */
+        raw = recv_frame(&len);
+        CHECK(raw && len == 10u && memcmp(raw, nxt, 10u) == 0,
+              "4.7 复位后完整帧能正常解析");
+    }
 }
 
 int main(void)

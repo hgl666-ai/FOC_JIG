@@ -160,6 +160,11 @@ uint8_t APP_Frame_Pending(void)
     return frame_ready;
 }
 
+uint16_t APP_Frame_Buffered(void)
+{
+    return frame_pos;
+}
+
 uint8_t *APP_Frame_Consume(uint16_t *len)
 {
     if (len) *len = frame_pos;

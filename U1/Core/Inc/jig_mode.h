@@ -103,6 +103,31 @@
 #define JIG_DUT_LINK         0
 #endif
 
+/* --- 3.4.1 台架形态：U2 缺席时把 USART3 让给 DUT --------------------------
+ * U1 能当串口用的只有两路：USART1（PA9/PA10）、USART3（PB10/PB11）。
+ * USART2 的 PA2/PA3 是 9 路测量里的 A/B 相，挪不动。
+ * 所以"PC 口 + DUT 口 + U2 口"三者在 U1 上**装不下**，只能二选一：
+ *
+ *   出厂形态   PC=USB     DUT=USART1   U2=USART3   → JIG_U2_LINK=1（默认）
+ *   台架形态   PC=USART1  DUT=USART3   U2=无       → JIG_U2_LINK=0（自动）
+ *
+ * 台架形态的现场做法：H3/H4 跳线拔掉（U2 从内部链路脱离、也不装固件），
+ * 那两颗针就是 U1 的 PB10/PB11 —— 把被测板的 TX/RX 接到这里。
+ *
+ * 代价（**只影响"治具自检"，不影响被测板那五项功能**）：
+ *   - 0x000E / 0x000F 的交叉校验块恒无对侧数据（NO_PEER 置 1，不判失败）；
+ *   - 0x0013（读 U2 边沿计数）直接回超时；
+ *   - ④ 编码器判定退化成"预期边沿数 vs DUT 自己的计数"（仍然有效）。
+ */
+#ifndef JIG_U2_LINK
+#define JIG_U2_LINK   (((JIG_PC_LINK == JIG_PC_LINK_UART) && (JIG_DUT_LINK != 0)) ? 0 : 1)
+#endif
+
+/* PC 口和 DUT 口都在串口上时，U1 没有第三路可用 —— 机械保证，不靠人记 */
+#if (JIG_U2_LINK != 0) && (JIG_PC_LINK == JIG_PC_LINK_UART) && (JIG_DUT_LINK != 0)
+#error "PC 口(USART1)和 DUT 口都在串口上时，U1 没有第三路给 U2：请设 JIG_U2_LINK=0（见 jig_mode.h 3.4.1）"
+#endif
+
 /* --- 3.5 调试打印（走 U1 的 USART1 / PA9）--------------------------------
  * U2 没有调试串口 → 恒为 0（否则 measure.c 会去引用不存在的 bsp_uart）。
  * **JIG_DUT_LINK=1 时强制关闭**（见 §3.4）。 */
@@ -121,10 +146,11 @@
 #error "JIG_DUT_LINK=1 时不能开调试打印：两者都占用 U1 的 USART1（见 jig_mode.h 3.4/3.5）"
 #endif
 
-/* PC 口改走串口时，USART1 又被 PC 占了 → 上面两个都必须为 0 */
-#if (JIG_PC_LINK == JIG_PC_LINK_UART) && (JIG_DUT_LINK != 0)
-#error "JIG_PC_LINK=UART 与 JIG_DUT_LINK=1 都要占 U1 的 USART1，只能留一个（见 jig_mode.h 2.1/3.4）"
-#endif
+/* PC 口改走串口时 USART1 归 PC。
+ * ⚠ 2026-11-04 更新：**"PC=UART 与 DUT 链路"不再互斥**。
+ *   旧的互斥假设是"DUT 一定在 USART1"，而 §3.4.1 的台架形态已经把它挪到了
+ *   USART3（U2 让位）—— 真正的互斥条件变成了"U2 也要 USART3"，那条在上面
+ *   §3.4.1 已经用 JIG_U2_LINK 的 #error 判过了。这里只保留"打印 vs PC"这一条。 */
 #if (JIG_PC_LINK == JIG_PC_LINK_UART) && (BSP_DBG_ENABLE != 0)
 #error "JIG_PC_LINK=UART 时 USART1 归 PC，不能再开调试打印（见 jig_mode.h 2.1/3.5）"
 #endif

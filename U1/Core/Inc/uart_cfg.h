@@ -27,8 +27,19 @@
 #include "uart_port.h"
 #include "jig_mode.h"
 
-#define UART_CFG_PORT_DUT   (UART_PORT_0)   /* USART1: 被测板串口(读数据供判定)  */
 #define UART_CFG_PORT_LINK  (UART_PORT_1)   /* USART3: 到 U2 的内部链路     */
+
+#if (JIG_U2_LINK == 0) && (JIG_PC_LINK == JIG_PC_LINK_UART)
+/* 台架形态（jig_mode.h §3.4.1）：USART3 上的 U2 已经让位给被测板。
+ * ⚠ 这里 UART_CFG_PORT_DUT 与 UART_CFG_PORT_LINK 是**同一个端口号**，
+ *   因为 U2 不在时它就是被测板那一口 —— 但绝不能再同时初始化两个角色。
+ * ⚠ 条件里必须同时有 `JIG_PC_LINK == UART`：只有在"PC 占了 USART1"的前提下，
+ *   USART3 才真的是被测板口。只看 JIG_U2_LINK 会把"PC 走 USB + 没有 U2"这种
+ *   组合也算进来，那时被测板其实还在 USART1（宿主单测就是这个组合）。 */
+#define UART_CFG_PORT_DUT   (UART_PORT_1)
+#else
+#define UART_CFG_PORT_DUT   (UART_PORT_0)   /* USART1: 被测板串口(读数据供判定)  */
+#endif
 
 /* 特殊测试（jig_mode.h §2.1 JIG_PC_LINK=UART）时，USART1 不再接被测板，
  * 改成接 PC 的 USB-TTL。**同一路硬件、同一个端口号**，只是角色变了 ——

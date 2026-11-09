@@ -47,6 +47,16 @@
 #include "pc_link.h"        /* PC 通讯口: USB CDC 或 USART1（jig_mode.h §2.1） */
 #include <string.h>
 
+/* 台架版的"自报身份"直接复用 PC 链路的发送环（uart_tx_kick 里有临界区保护），
+ * 绝不在这里调阻塞的 HAL_UART_Transmit —— 那会抢走 RX 重挂要用的 HAL Lock，
+ * 把正在收的字节永久丢掉（2026-11-05 实测踩到）。*/
+#if (JIG_DUT_LINK != 0) && (JIG_PC_LINK == JIG_PC_LINK_UART)
+#define APP_BENCH_ALIVE   1
+#include "usart.h"          /* extern huart1：心跳要读 huart1.ErrorCode */
+#else
+#define APP_BENCH_ALIVE   0
+#endif
+
 /*==============================================================================
  * 主机测试桩（只在本机单元测试里编）
  *----------------------------------------------------------------------------
@@ -58,6 +68,23 @@
 uint32_t USB_EvtIrqCount(void) { return 0u; }
 uint32_t USB_EvtIstrOr(void)   { return 0u; }
 #endif
+
+/*==============================================================================
+ * 应答长度的编译期自检（2026-11-09 精简布局时加）
+ *----------------------------------------------------------------------------
+ * 改布局最容易出的事故：**常量改了、打包代码没改**（或反过来）。
+ * 那种错不会编译失败，只会让上位机把数字念歪 —— 所以在这里把它们绑死。
+ * 放在 app.c 而不是 flash_map.h：这里能同时看到 MEAS_CH_COUNT / ENC_CHK_PH_COUNT /
+ * CUR_CHK_CH_COUNT 三个计数宏（它们分别来自 measure.h / enc_chk.h / cur_chk.h）。
+ *============================================================================*/
+FOC_STATIC_ASSERT(MGR_VOL_TEST_RESP_LEN == (2u + (MEAS_CH_COUNT * MGR_VOL_CH_ITEM_LEN)),
+                  resp_len_must_match_layout_vol);
+FOC_STATIC_ASSERT(MGR_PHASE_JUDGE_RESP_LEN == (1u + (3u * MGR_PHASE_ITEM_LEN)),
+                  resp_len_must_match_layout_phase);
+FOC_STATIC_ASSERT(MGR_ENC_JUDGE_RESP_LEN == (3u + (ENC_CHK_PH_COUNT * MGR_ENC_JUDGE_ITEM_LEN)),
+                  resp_len_must_match_layout_enc);
+FOC_STATIC_ASSERT(MGR_CUR_TEST_RESP_LEN == (2u + (CUR_CHK_CH_COUNT * MGR_CUR_ITEM_LEN)),
+                  resp_len_must_match_layout_cur);
 
 /*==============================================================================
  * 全局状态
@@ -130,7 +157,15 @@ static uint32_t s_encp_t0 = 0u;         /* 等待链路空出来的起点 */
 static uint8_t  s_encp_resp[LINK_MAX_PAYLOAD];
 static uint8_t  s_encp_ack[1u + LINK_MAX_PAYLOAD];
 
-/*===== 到 U2 的内部链路 (USART3, 见 docs/10_UART四路驱动设计.md) =====*/
+/*===== 到 U2 的内部链路 (USART3, 见 docs/10_UART四路驱动设计.md) =====
+ * ⚠ 台架形态（jig_mode.h §3.4.1，JIG_U2_LINK=0）下 U2 不在、USART3 归被测板，
+ *   这一整段**不编** —— 否则每 500ms 一次的保活探测会把 U2 的帧灌到被测板的
+ *   串口线上（被测板收到垃圾帧，治具自己的应答却看起来一切正常）。
+ *
+ *   下面那组 APP_U2xxx 包装在两种形态下**签名完全一样**：没有 U2 时它就是
+ *   "发不出去 / 等不到 / 不忙"，调用方原有的失败分支（NO_PEER、超时、BUSY）
+ *   自然生效，不必在十几处测量代码里塞 #if。 */
+#if (JIG_U2_LINK != 0)
 #define APP_U2_PROBE_PERIOD_MS  500u    /* 空闲时每 500ms 探一次 U2 */
 #define APP_U2_PROBE_TIMEOUT_MS 50u     /* 50ms 没回算丢 (115200 下往返 < 2ms) */
 #define APP_U2_STATUS_EVERY     5u      /* 每 5 次探测里用一次 STATUS (≈2.5s) */
@@ -146,6 +181,47 @@ static uint8_t       s_u2_ver_ok;           /* 最近一次 STATUS: 链路代码
 static uint8_t       s_u2_ver_checked;      /* 是否收到过 STATUS */
 static link_status_t s_u2_status;
 static uint8_t       s_link_rx[LINK_MAX_PAYLOAD];
+
+static uint8_t APP_U2Send(uint16_t cmd, const uint8_t *d, uint16_t n)
+{
+    return Link_RequestStart(&s_u2_link, cmd, d, n);
+}
+static uint8_t APP_U2Poll(uint32_t tmo, uint8_t *buf, uint16_t *len)
+{
+    return Link_RequestPoll(&s_u2_link, tmo, buf, len);
+}
+static void APP_U2Flush(void)
+{
+    (void)Link_RequestPoll(&s_u2_link, 0u, 0, 0);   /* 只巡一遍，收掉陈旧请求 */
+}
+static uint8_t APP_U2Busy(void)
+{
+    return Link_Busy(&s_u2_link);
+}
+static const link_stats_t *APP_U2Stats(void)
+{
+    return Link_Stats(&s_u2_link);
+}
+#else
+/* 台架形态：U2 不在。返回值语义与真链路对齐，让上层分支原样复用 */
+static uint8_t APP_U2Send(uint16_t cmd, const uint8_t *d, uint16_t n)
+{
+    (void)cmd; (void)d; (void)n;
+    return 0u;                                       /* 发不出去 */
+}
+static uint8_t APP_U2Poll(uint32_t tmo, uint8_t *buf, uint16_t *len)
+{
+    (void)tmo; (void)buf;
+    if (len != 0) { *len = 0u; }
+    return 2u;                                       /* 2 = 超时 */
+}
+static void APP_U2Flush(void) { }
+static uint8_t APP_U2Busy(void) { return 0u; }
+static const link_stats_t *APP_U2Stats(void) { return 0; }
+
+/* 这个变量在"没有 U2"时也要存在：APP_U2CapsHas 会读它（恒为 0 → 一律不支持）*/
+static link_status_t s_u2_status;
+#endif
 
 /*===== 0x000E 测量 (见 docs/07 §数据包与测试流程) =====*/
 #define APP_MEAS_PEER_TIMEOUT_MS  60u   /* 等 U2 快照的上限 (115200 下 55B 往返 < 15ms) */
@@ -179,7 +255,10 @@ static meas_snapshot_t s_snap;                           /* 本片快照 */
 static meas_snapshot_t s_peer;                           /* U2 快照 */
 static uint8_t         s_meas_req[MEAS_PACK_SNAP_LEN];   /* 发给 U2 的 55B 请求 */
 static uint8_t         s_peer_raw[LINK_MAX_PAYLOAD];     /* U2 应答原始负载 (>=55B) */
-static uint8_t         s_meas_resp[PULSE_PACK_RESP_LEN]; /* 0x000E(77B) / 0x000F(91B) 共用应答缓冲(取较大者) */
+/* 0x000E / 0x000F 共用的应答缓冲，按两者较大的开 */
+#define APP_RESP_BUF_MAX  ((MEAS_PACK_RESP_LEN > PULSE_PACK_RESP_LEN) \
+                           ? MEAS_PACK_RESP_LEN : PULSE_PACK_RESP_LEN)
+static uint8_t         s_meas_resp[APP_RESP_BUF_MAX];
 static pulse_snapshot_t s_pulse;                         /* 本片(输出端)脉冲结果 */
 static pulse_snapshot_t s_pulse_peer;                    /* U2(输入端)脉冲结果 */
 static uint8_t          s_pulse_peer_ok;                 /* 是否拿到 U2 的脉冲结果 */
@@ -192,10 +271,14 @@ static uint8_t         s_last_cc_peer;                   /* 最近一次是否�
 static uint16_t s_arm_session;          /* 每次测量 +1, 防重传把窗口重开 */
 static uint8_t  s_arm_tried;            /* 本次测量是否发过 ARM */
 static uint8_t  s_arm_ok;               /* 对侧是否确认"同一时间窗" */
+/* 下面四个只在"有 U2"时才有人用（断链恢复是 U2 链路的机制），
+ * 台架形态（JIG_U2_LINK=0）没有 U2 → 挪进守卫块，免得 ARMCC 报"声明未引用"。 */
+#if (JIG_U2_LINK != 0)
 static uint8_t  s_link_fail;            /* 连续请求超时次数 */
 static uint32_t s_reset_t0;             /* 上次链路复位的时刻 */
 static uint32_t s_reset_backoff_ms;     /* 复位失败后的退避窗口 */
 static uint8_t  s_ev_fetch;             /* 有一次 EVENT_GET 补拉在进行 */
+#endif
 
 /*------------------------------------------------------------------------------
  * 几个小工具 (都在主循环上下文)
@@ -219,6 +302,7 @@ static void APP_MeasStartLocal(uint16_t win)
 }
 
 /* U2 报上来的事件: 先打调试口; 将来要上报 PC 就在这里加 */
+#if (JIG_U2_LINK != 0)
 static void APP_LogU2Event(uint8_t code, uint8_t sev, uint16_t arg0)
 {
 #if (MEAS_PRINT_ENABLE != 0)
@@ -236,6 +320,7 @@ static void APP_LogU2Event(uint8_t code, uint8_t sev, uint16_t arg0)
     (void)arg0;
 #endif
 }
+#endif /* JIG_U2_LINK */
 
 /* mode=1 的统一入口: **先 ARM 让两端同窗**, 再开本片窗口 (docs/13 §6.2) */
 static void APP_MeasStartWithArm(uint16_t cmd, uint16_t win)
@@ -254,7 +339,7 @@ static void APP_MeasStartWithArm(uint16_t cmd, uint16_t win)
     /* 对端不支持 ARM(老固件) / 链路正忙 → 退回"各自最近一次"的老流程 */
     if ((APP_U2CapsHas(LINK_CAP_ARM) == 0u) ||
         (Link_ArmPackReq(req, (uint16_t)sizeof(req), s_arm_session, win, 0u) != LINK_ARM_REQ_LEN) ||
-        (Link_RequestStart(&s_u2_link, LINK_CMD_ARM, req, LINK_ARM_REQ_LEN) == 0u)) {
+        (APP_U2Send(LINK_CMD_ARM, req, LINK_ARM_REQ_LEN) == 0u)) {
         APP_MeasStartLocal(win);
         app_state = APP_STATE_TESTING;
         return;
@@ -265,6 +350,191 @@ static void APP_MeasStartWithArm(uint16_t cmd, uint16_t win)
     s_meas_stage = APP_MEAS_ST_WAIT_ARM_ACK;
     app_state    = APP_STATE_TESTING;
 }
+
+/*==============================================================================
+ * PC 帧"半截帧"超时复位
+ *----------------------------------------------------------------------------
+ * 为什么需要（2026-11-05 实测踩到）：
+ *   线上丢了几个字节 → 解析器把 LEN 读成一个大数（实测 0x00A5 = 165）
+ *   → 它安静地等 165+10 个永远不会来的字节 → **以后每一帧都被吃掉**。
+ *   现象是"PC 明明发出去了、板子也确实收到了字节，但永远没有应答"，
+ *   而且看不出任何错误。这里用"攒的字节数长时间不涨"识别并重新对齐。
+ *
+ * 100 ms 的依据：单帧最长 256B，115200 下 22 ms 发完；留 4 倍余量。
+ *============================================================================*/
+#define APP_FRAME_STALL_MS   100u
+
+static uint16_t s_stall_pos;
+static uint32_t s_stall_tick;
+static uint16_t s_stall_cnt;                /* 半截帧复位次数（诊断用）*/
+
+static void APP_FrameStallCheck(void)
+{
+    uint16_t pos = APP_Frame_Buffered();
+    uint32_t now = HAL_GetTick();
+
+    if (pos == 0u) {                        /* 空闲：没有半截帧 */
+        s_stall_pos  = 0u;
+        s_stall_tick = now;
+        return;
+    }
+    if (pos != s_stall_pos) {               /* 还在往里长 → 正常收帧中 */
+        s_stall_pos  = pos;
+        s_stall_tick = now;
+        return;
+    }
+    if ((uint32_t)(now - s_stall_tick) > APP_FRAME_STALL_MS) {
+        APP_Frame_Init();                   /* 半截帧超时：丢掉，从 A5 5B 重新对齐 */
+        s_stall_pos  = 0u;
+        s_stall_tick = now;
+        if (s_stall_cnt < 0xFFFFu) {
+            s_stall_cnt++;                  /* 心跳里报出来：>0 说明确实丢过字节 */
+        }
+    }
+}
+
+/*==============================================================================
+ * 台架版"自报身份"（JIG_DUT_LINK=1 且 PC 口在 USART1）
+ *----------------------------------------------------------------------------
+ * 上电先打一行横幅；之后**只要还没收到过任何一帧合法 PC 帧**，每 3 秒打一行心跳，
+ * 带"PC 口一共收到多少字节 / 解析成功几帧"。收到第一帧后永久闭嘴。
+ *
+ * 为什么必须有它（2026-11-05 加的）：这版没有调试打印（USART1 归 PC 了），
+ * 板子不回话时**完全分不清**下面三种情况，而这三种的修法完全不同：
+ *   ① 应用根本没在跑（BOOT0 还高、烧录没进去、启动就卡死）
+ *   ② 应用在跑，但 PC 发的字节没进 MCU（接错口 / 没交叉 / 没共地）
+ *   ③ 字节进来了，但没被解析成帧（固件 bug）
+ * 心跳里的 rx_bytes 正好把 ② 和 ③ 分开：
+ *   PC 发了命令而 **rx_bytes 不涨** → 字节没到 MCU（②，查线）
+ *   **rx_bytes 涨、frames 还是 0**    → 到了但没解析成帧（③，是固件）
+ * 三种之外还有一种"连心跳都收不到" = ①，或 USART1 的 TX 根本没通。
+ *============================================================================*/
+#if (APP_BENCH_ALIVE != 0)
+static uint32_t s_tx_drop;              /* 因发送环忙被丢掉的帧数（诊断用）*/
+#endif
+
+#if (APP_BENCH_ALIVE != 0)
+
+static uint32_t s_bench_frames;         /* 解析成功的 PC 帧数 */
+static uint32_t s_bench_tick;           /* 上次打心跳的时刻（0 = 横幅还没发）*/
+static uint32_t s_bench_rb;             /* 上次看到的 rx_bytes（看它有没有在动）*/
+static uint32_t s_bench_quiet;          /* 链路最后一次"有事"的时刻 */
+static uint32_t s_loop_max_us;          /* 主循环单圈最大耗时（µs，DWT 量的）*/
+
+static uint16_t bench_u32(char *dst, uint32_t v)
+{
+    char    tmp[10];
+    uint8_t n = 0u;
+    uint8_t i;
+
+    if (v == 0u) {
+        dst[0] = '0';
+        return 1u;
+    }
+    while ((v != 0u) && (n < (uint8_t)sizeof(tmp))) {
+        tmp[n] = (char)('0' + (char)(v % 10u));
+        n++;
+        v /= 10u;
+    }
+    for (i = 0u; i < n; i++) {
+        dst[i] = tmp[(uint8_t)(n - 1u - i)];
+    }
+    return (uint16_t)n;
+}
+
+static void APP_BenchSay(void)
+{
+    static const char s_boot[] =
+        "\r\n[JIG] U1_DUT alive  PC=USART1(PA9/PA10)  DUT=USART3(PB10/PB11)\r\n";
+    static const char s_wait[] = "[JIG] t=";
+    static const char s_rb[]   = "s  rx_bytes=";
+    static const char s_fr[]   = "  frames=";
+    static const char s_sq[]   = "  seq=";
+    static const char s_st[]   = "  stalls=";
+    static const char s_bf[]   = "  buf=";
+    static const char s_td[]   = "  txdrop=";
+    static const char s_re[]   = "  rearm=";
+    static const char s_er[]   = "  rxerr=";
+    static const char s_he[]   = "  herr=0x";
+    static const char s_lm[]   = "  loopmax=";
+    char     buf[128];
+    uint16_t n = 0u;
+    uint8_t  i;
+    uint32_t now = HAL_GetTick();
+    const uart_stats_t *ps = UartPort_Stats(UART_CFG_PORT_PC);
+    uint32_t rb = (ps != 0) ? ps->rx_bytes : 0u;
+
+    /* ⚠ **只在链路彻底安静 3 秒时说话**（2026-11-05 再修一次）。
+     *   踩过的坑：心跳和应答都往同一个发送环里塞。虽然 APP_WaitTxDone() 会等，
+     *   但"诊断文本"和"协议帧"抢同一个环始终是隐患 —— 实测表现就是
+     *   "第一次 status 超时、重试那次才通"。现在只要链路上还有任何动静
+     *   （rx 计数变了 / 解析器里有半截帧 / 有帧待处理 / 发送环非空），
+     *   心跳一律闭嘴并把静默起点往后推。 */
+    if (rb != s_bench_rb) {
+        s_bench_rb    = rb;
+        s_bench_quiet = now;
+    }
+    if ((APP_Frame_Buffered() != 0u) || (APP_Frame_Pending() != 0u) ||
+        (PcLink_TxIdle() == 0u)) {
+        s_bench_quiet = now;                     /* 链路上还有事，别插嘴 */
+        return;
+    }
+    if ((uint32_t)(now - s_bench_quiet) < 3000u) {
+        return;
+    }
+    if (s_bench_tick == 0u) {
+        /* 第一拍：横幅，只发一次。
+         * ⚠ **绝不能用阻塞的 HAL_UART_Transmit**：它和"RX 重挂"共用 HAL 的
+         *   `huart->Lock`，阻塞期间（一行文字约 3ms）到达的字节会让 ISR 里的
+         *   `HAL_UART_Receive_IT` 直接返回 HAL_BUSY → 那几字节**永久丢掉**。
+         *   实测（2026-11-05）：PC 发 10 字节的 0x0017，板子只收到前 7 字节，
+         *   帧永远凑不齐（心跳读数是 rx_bytes=7 frames=0）。
+         *   正确做法：走和普通应答同一个发送环（uart_tx_kick 里那对
+         *   `__disable_irq/__enable_irq` 保证了 HAL 调用与 ISR 不会互相插队）。 */
+        (void)UartPort_Write(UART_CFG_PORT_PC, (const uint8_t *)s_boot,
+                             (uint16_t)(sizeof(s_boot) - 1u));
+        s_bench_tick = (now == 0u) ? 1u : now;
+        return;
+    }
+    if ((uint32_t)(now - s_bench_tick) < 3000u) {
+        return;
+    }
+    s_bench_tick = now;
+
+    for (i = 0u; i < (uint8_t)(sizeof(s_wait) - 1u); i++) { buf[n++] = s_wait[i]; }
+    n = (uint16_t)(n + bench_u32(&buf[n], now / 1000u));
+    for (i = 0u; i < (uint8_t)(sizeof(s_rb) - 1u); i++) { buf[n++] = s_rb[i]; }
+    n = (uint16_t)(n + bench_u32(&buf[n], (ps != 0) ? ps->rx_bytes : 0u));
+    for (i = 0u; i < (uint8_t)(sizeof(s_fr) - 1u); i++) { buf[n++] = s_fr[i]; }
+    n = (uint16_t)(n + bench_u32(&buf[n], s_bench_frames));
+    for (i = 0u; i < (uint8_t)(sizeof(s_sq) - 1u); i++) { buf[n++] = s_sq[i]; }
+    n = (uint16_t)(n + bench_u32(&buf[n], (uint32_t)pc_seq));
+    for (i = 0u; i < (uint8_t)(sizeof(s_st) - 1u); i++) { buf[n++] = s_st[i]; }
+    n = (uint16_t)(n + bench_u32(&buf[n], (uint32_t)s_stall_cnt));
+    for (i = 0u; i < (uint8_t)(sizeof(s_bf) - 1u); i++) { buf[n++] = s_bf[i]; }
+    n = (uint16_t)(n + bench_u32(&buf[n], (uint32_t)APP_Frame_Buffered()));
+    for (i = 0u; i < (uint8_t)(sizeof(s_td) - 1u); i++) { buf[n++] = s_td[i]; }
+    n = (uint16_t)(n + bench_u32(&buf[n], s_tx_drop));
+    for (i = 0u; i < (uint8_t)(sizeof(s_re) - 1u); i++) { buf[n++] = s_re[i]; }
+    n = (uint16_t)(n + bench_u32(&buf[n], (ps != 0) ? ps->rx_rearm : 0u));
+    for (i = 0u; i < (uint8_t)(sizeof(s_er) - 1u); i++) { buf[n++] = s_er[i]; }
+    n = (uint16_t)(n + bench_u32(&buf[n], (ps != 0) ? ps->rx_err : 0u));
+    for (i = 0u; i < (uint8_t)(sizeof(s_he) - 1u); i++) { buf[n++] = s_he[i]; }
+    {
+        static const char hex[] = "0123456789ABCDEF";
+        extern volatile uint32_t g_uart1_err_or;
+        uint32_t ec = g_uart1_err_or & 0xFFu;   /* 只增不清的错误码位图 */
+
+        buf[n++] = hex[(ec >> 4) & 0x0Fu];
+        buf[n++] = hex[ec & 0x0Fu];
+    }
+    for (i = 0u; i < (uint8_t)(sizeof(s_lm) - 1u); i++) { buf[n++] = s_lm[i]; }
+    n = (uint16_t)(n + bench_u32(&buf[n], s_loop_max_us));
+    buf[n++] = '\r';
+    buf[n++] = '\n';
+    (void)UartPort_Write(UART_CFG_PORT_PC, (const uint8_t *)buf, n);
+}
+#endif
 
 /*==============================================================================
  * 帧发送
@@ -290,6 +560,9 @@ static void APP_SendFrame(uint16_t cmd, uint16_t seq, const uint8_t *data, uint1
      *    的帧。等不到（链路卡住）就放弃这一帧：宁可让 PC 超时重试，也不发坏帧。 */
     APP_WaitTxDone();
     if (PcLink_TxIdle() == 0u) {
+#if (APP_BENCH_ALIVE != 0)
+        s_tx_drop++;            /* 心跳里报出来：>0 = 应答被丢弃过 */
+#endif
         return;
     }
 
@@ -377,28 +650,44 @@ static uint16_t APP_MeasBuildResp(uint8_t cmd_status, uint8_t cc_flags,
  *   [1..45]  本片(三相输出端)脉冲结果 45B
  *   [46..90] 对侧 U2(三相驱动输入端)脉冲结果 45B（拿不到则按"无数据"打包）
  *============================================================================*/
+/* 对侧( U2 )只回一个结论字节：0 = 没有对侧数据 · 1 = 一致 · 2 = 不一致 */
+static uint8_t APP_PulsePeerByte(void)
+{
+    uint8_t i;
+
+    if (s_pulse_peer_ok == 0u) {
+        return 0u;
+    }
+    for (i = 0u; i < (uint8_t)PULSE_PH_COUNT; i++) {
+        if (s_pulse_diff[i] != 0u) {
+            return 2u;
+        }
+    }
+    return 1u;
+}
+
+/* 0x000F / 0x0019 的应答：状态(1) + 对侧(1) + 三相×(周期ns 4 + 占空比 2 + 旗标 1) */
 static uint16_t APP_PulseBuildResp(uint8_t cmd_status)
 {
     uint16_t n = 0u;
-    uint16_t left;
+    uint8_t  i;
 
     s_meas_resp[n++] = cmd_status;
+    s_meas_resp[n++] = APP_PulsePeerByte();
 
-    left = (uint16_t)(PULSE_PACK_RESP_LEN - n);
-    if (PulsePack_Pack(&s_meas_resp[n], left, &s_pulse) != PULSE_PACK_LEN) {
-        return 0u;
+    for (i = 0u; i < (uint8_t)PULSE_PH_COUNT; i++) {
+        uint32_t per  = s_pulse.ph[i].period_ns;
+        uint16_t duty = s_pulse.ph[i].duty_permille;
+
+        s_meas_resp[n++] = (uint8_t)(per >> 24);
+        s_meas_resp[n++] = (uint8_t)(per >> 16);
+        s_meas_resp[n++] = (uint8_t)(per >> 8);
+        s_meas_resp[n++] = (uint8_t)(per);
+        s_meas_resp[n++] = (uint8_t)(duty >> 8);
+        s_meas_resp[n++] = (uint8_t)(duty);
+        s_meas_resp[n++] = (uint8_t)(s_pulse.ph[i].flags & 0xFFu);
     }
-    n = (uint16_t)(n + PULSE_PACK_LEN);
-
-    /* 对侧结果：拿不到就传 0（按"无数据"打包），配合 per-phase flags 区分 */
-    left = (uint16_t)(PULSE_PACK_RESP_LEN - n);
-    if (PulsePack_Pack(&s_meas_resp[n], left,
-                       (s_pulse_peer_ok != 0u) ? &s_pulse_peer : 0) != PULSE_PACK_LEN) {
-        return 0u;
-    }
-    n = (uint16_t)(n + PULSE_PACK_LEN);
-
-    return (n == PULSE_PACK_RESP_LEN) ? n : 0u;
+    return (n == (uint16_t)PULSE_PACK_RESP_LEN) ? n : 0u;
 }
 
 /* 0x000F 的判定（默认 PULSE_JUDGE_ENABLE=0 → 只记录不判） */
@@ -482,7 +771,7 @@ static void APP_MeasStep(void)
         uint8_t  resp[LINK_MAX_PAYLOAD];
         uint16_t rlen = 0u;
 
-        st = Link_RequestPoll(&s_u2_link, APP_MEAS_ARM_TIMEOUT_MS, resp, &rlen);
+        st = APP_U2Poll(APP_MEAS_ARM_TIMEOUT_MS, resp, &rlen);
         if (st == 0u) {
             return;                              /* 还在等 ARM 应答 */
         }
@@ -517,8 +806,8 @@ static void APP_MeasStep(void)
             return;
         }
         /* 把本片快照发给 U2, 换回它的快照 (一条链路命令完成交换+可比对) */
-        if (Link_RequestStart(&s_u2_link, LINK_CMD_MEAS_XCHK,
-                              s_meas_req, MEAS_PACK_SNAP_LEN) == 0u) {
+        if (APP_U2Send(LINK_CMD_MEAS_XCHK,
+                       s_meas_req, MEAS_PACK_SNAP_LEN) == 0u) {
             APP_MeasFinish(APP_MeasVerdict(MEAS_CC_F_NO_PEER, 0u),
                            MEAS_CC_F_NO_PEER, 0u, 0u);
             return;
@@ -527,8 +816,8 @@ static void APP_MeasStep(void)
         return;
 
     case APP_MEAS_ST_WAIT_PEER:
-        st = Link_RequestPoll(&s_u2_link, APP_MEAS_PEER_TIMEOUT_MS,
-                              s_peer_raw, &peer_len);
+        st = APP_U2Poll(APP_MEAS_PEER_TIMEOUT_MS,
+                        s_peer_raw, &peer_len);
         if (st == 0u) {
             return;                              /* 还在等 U2 */
         }
@@ -567,8 +856,8 @@ static void APP_MeasStep(void)
                 APP_MeasFinish(APP_PulseVerdict(), 0u, 0u, 0u);
                 return;
             }
-            if (Link_RequestStart(&s_u2_link, LINK_CMD_PULSE_XCHK,
-                                  preq, PULSE_PACK_LEN) == 0u) {
+            if (APP_U2Send(LINK_CMD_PULSE_XCHK,
+                           preq, PULSE_PACK_LEN) == 0u) {
                 APP_MeasFinish(APP_PulseVerdict(), 0u, 0u, 0u);
                 return;
             }
@@ -577,8 +866,8 @@ static void APP_MeasStep(void)
         return;
 
     case APP_MEAS_ST_WAIT_PULSE_PEER:
-        st = Link_RequestPoll(&s_u2_link, APP_MEAS_PEER_TIMEOUT_MS,
-                              s_peer_raw, &peer_len);
+        st = APP_U2Poll(APP_MEAS_PEER_TIMEOUT_MS,
+                        s_peer_raw, &peer_len);
         if (st == 0u) {
             return;                              /* 还在等 U2 的脉冲结果 */
         }
@@ -764,6 +1053,36 @@ static uint8_t APP_ProgramPreCheck(void)
  * DUT 链路（被烧 FOC 板）— 0x0011 透传
  *============================================================================*/
 #if (JIG_DUT_LINK != 0)
+/*===== DUT 口原始字节嗅探（0x001F / 0x0020 用）=====
+ * 为什么需要：DUT 链路层（Link_Poll）在空闲时会把口上的字节读走当帧解析，
+ * **不是合法帧的直接丢掉**。可现在对面的固件还没有 0x02xx 协议 —— 它吐出来的
+ * 可能是任意 ASCII（例如 AS: 命令的回报），必须先原样留下来给人看。
+ * 所以空闲时改成"只嗅探、不解析"：字节进 s_dut_sniff，由 0x0020 取走。
+ * （链路层只在"我们确实在等一帧应答"时才读口，那时 Link_Busy 为 1，走原路。） */
+static uint8_t  s_dut_sniff[MGR_DUT_SNIFF_SIZE];
+static uint16_t s_dut_sniff_len;
+static uint16_t s_dut_sniff_drop;
+
+/* 0x001F 的收发窗口状态 */
+static uint16_t s_dutsnd_seq;
+static uint16_t s_dutsnd_sent;
+static uint16_t s_dutsnd_tmo;
+static uint32_t s_dutsnd_t0;
+
+static void APP_DutSniff(void)
+{
+    uint8_t b;
+
+    while (UartPort_Read(UART_CFG_PORT_DUT, &b, 1u) == 1u) {
+        if (s_dut_sniff_len < (uint16_t)MGR_DUT_SNIFF_SIZE) {
+            s_dut_sniff[s_dut_sniff_len] = b;
+            s_dut_sniff_len++;
+        } else if (s_dut_sniff_drop < 0xFFFFu) {
+            s_dut_sniff_drop++;
+        }
+    }
+}
+
 /**
   * @brief  0x0011 DUT 透传：请求 DATA = dut_cmd(2) + dut_data(N)
   *
@@ -810,9 +1129,14 @@ static void APP_DutTask(void)
     uint16_t rn = 0u;
     uint8_t  st;
 
+    if (app_state == APP_STATE_DUT_RAW) {
+        return;                             /* 原始收发期间不许链路层碰这个口 */
+    }
     if (app_state != APP_STATE_DUT) {
         if (Link_Busy(&s_dut_link) == 0u) {
-            Link_Poll(&s_dut_link);
+            /* 空闲：**只嗅探、不当帧解析** —— 对面现在还没实现 0x02xx，
+             * 它吐的字节（可能是 ASCII）要能被人看见，不能被链路层吃掉。 */
+            APP_DutSniff();
         }
         return;
     }
@@ -834,6 +1158,117 @@ static void APP_DutTask(void)
     } else {
         /* 0 = 还在等 */
     }
+}
+
+/**
+  * @brief  0x001F 给被测板发一段**原始字节**，并抓这段时间它回了什么
+  * @param  data/len 请求 DATA = 等回应时长 ms(2, 大端, 0=默认 200) + 原始字节(N)
+  * @note   走**裸串口**，不套 A5 5B 帧 —— 专门用来调对面还没实现 0x02xx 的固件
+  *         （典型：它的 ASCII 命令 `AS:S800` 转、`AS:S0` 停）。
+  *         应答 = 状态(1) + 实际发出字节数(2) + 收到字节数(2) + 收到的字节(≤64)。
+  *         **"发出去了但对方一个字节都没回"也是 00** —— 那本身就是结论：
+  *         线通了（能发），对面不回而已。
+  *         非阻塞：发完等 tmo 毫秒，到点由 APP_DutRawTask 回 ACK。
+  */
+static void APP_DutSendCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
+{
+    uint16_t tmo;
+    uint16_t plen;
+    uint16_t n;
+    uint8_t  e;
+
+    if ((data == 0) || (len <= (uint16_t)MGR_DUT_SEND_HDR_LEN)) {
+        e = APP_STATUS_ERR_PARAM;           /* 至少要有 1 个字节要发 */
+        APP_SendAck(cmd, &e, 1u);
+        return;
+    }
+    plen = (uint16_t)(len - (uint16_t)MGR_DUT_SEND_HDR_LEN);
+    if (plen > (uint16_t)MGR_DUT_SEND_MAX) {
+        e = APP_STATUS_ERR_PARAM;
+        APP_SendAck(cmd, &e, 1u);
+        return;
+    }
+    tmo = (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+    if (tmo == 0u) {
+        tmo = MGR_DUT_SEND_DEF_TMO_MS;
+    } else if (tmo > (uint16_t)MGR_DUT_SEND_MAX_TMO_MS) {
+        tmo = MGR_DUT_SEND_MAX_TMO_MS;      /* 夹住上限，别被 PC 传的大数拖死 */
+    }
+
+    /* 先把旧字节清掉：否则回来的字节里混着上一次的，分不清是哪一次的回字 */
+    s_dut_sniff_len  = 0u;
+    s_dut_sniff_drop = 0u;
+    APP_DutSniff();                         /* 读空硬件环里的陈字节 */
+
+    n = UartPort_Write(UART_CFG_PORT_DUT, &data[MGR_DUT_SEND_HDR_LEN], plen);
+    if (n != plen) {
+        e = APP_STATUS_BUSY;                /* 发送环满 = 上一条还没发完 */
+        APP_SendAck(cmd, &e, 1u);
+        return;
+    }
+    s_dutsnd_seq  = pc_seq;
+    s_dutsnd_sent = n;
+    s_dutsnd_tmo  = tmo;
+    s_dutsnd_t0   = HAL_GetTick();
+    app_state     = APP_STATE_DUT_RAW;      /* 终态由 APP_DutRawTask 回 ACK */
+}
+
+/** 0x001F 的终态：等够 tmo 就把"发出多少 / 收到多少 / 收到了什么"回给 PC */
+static void APP_DutRawTask(void)
+{
+    uint8_t  out[5u + MGR_DUT_SNIFF_SIZE];
+    uint16_t rxlen;
+
+    if (app_state != APP_STATE_DUT_RAW) {
+        return;
+    }
+    APP_DutSniff();                         /* 每轮都收，别等 256B 环满才读 */
+    if ((uint32_t)(HAL_GetTick() - s_dutsnd_t0) < (uint32_t)s_dutsnd_tmo) {
+        return;                             /* 窗口还没到 */
+    }
+
+    rxlen = (s_dut_sniff_len > (uint16_t)MGR_DUT_SNIFF_SIZE)
+            ? (uint16_t)MGR_DUT_SNIFF_SIZE : s_dut_sniff_len;
+    out[0] = APP_STATUS_OK;
+    out[1] = (uint8_t)(s_dutsnd_sent >> 8);
+    out[2] = (uint8_t)s_dutsnd_sent;
+    out[3] = (uint8_t)(rxlen >> 8);
+    out[4] = (uint8_t)rxlen;
+    if (rxlen > 0u) {
+        memcpy(&out[5], s_dut_sniff, rxlen);
+    }
+    s_dut_sniff_len = 0u;                   /* 已经报给 PC 了，别重复报 */
+    app_state = APP_STATE_IDLE;
+    APP_SendFrame(MGR_CMD_DUT_SEND, s_dutsnd_seq, out, (uint16_t)(5u + rxlen));
+}
+
+/**
+  * @brief  0x0020 只读：把 DUT 口攒下的原始字节取走（**读后清空**）
+  * @note   不改变状态机、不发任何东西给对面。用途：对面主动上报、或者把
+  *         0x001F 之后又吐出来的字节取回来。LEN 必须为 0。
+  */
+static void APP_DutRecvCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
+{
+    uint8_t  out[3u + MGR_DUT_SNIFF_SIZE];
+    uint16_t n;
+
+    (void)data;
+    if (len != 0u) {
+        uint8_t e = APP_STATUS_ERR_PARAM;
+        APP_SendAck(cmd, &e, 1u);
+        return;
+    }
+    APP_DutSniff();                         /* 先把这个窗口里到的都收进来 */
+    n = (s_dut_sniff_len > (uint16_t)MGR_DUT_SNIFF_SIZE)
+        ? (uint16_t)MGR_DUT_SNIFF_SIZE : s_dut_sniff_len;
+    out[0] = APP_STATUS_OK;
+    out[1] = (uint8_t)(n >> 8);
+    out[2] = (uint8_t)n;
+    if (n > 0u) {
+        memcpy(&out[3], s_dut_sniff, n);
+    }
+    s_dut_sniff_len = 0u;                   /* 读后清空 */
+    APP_SendAck(cmd, out, (uint16_t)(3u + n));
 }
 #endif /* JIG_DUT_LINK */
 
@@ -937,6 +1372,13 @@ static void APP_EncPeerCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
         APP_SendAck(cmd, &e, 1u);
         return;
     }
+    /* ⚠ 台架形态（JIG_U2_LINK=0）没有 U2，这里**当场回超时**：
+     *   不这么写的话会走下面"等链路空出来"的分支，白等 MGR_ENC_PEER_TIMEOUT_MS
+     *   才报错 —— ④ 的流程里这一步要跑两次，白白多花一倍时间。 */
+#if (JIG_U2_LINK == 0)
+    e = APP_STATUS_ERR_TIMEOUT;
+    APP_SendAck(cmd, &e, 1u);
+#else
     /* ⚠ **不在这里直接发**：内部链路上随时可能有一发保活探测（PING/STATUS）在飞，
      * 那时 RequestStart 会返回 0。早先的写法就是直接回 BUSY —— 结果是
      * "PC 发命令的时机碰巧撞上保活探测就失败"，这不是调用方的错。
@@ -948,13 +1390,14 @@ static void APP_EncPeerCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
      *   状态机卡在 ENC_PEER，最后只能超时。现象是"命令看起来不工作"，
      *   其实只是链路被一发探测占住了。
      *   `timeout_ms = 0` 的语义正是"只巡一遍"，用它把陈旧请求收尾最合适。 */
-    (void)Link_RequestPoll(&s_u2_link, 0u, 0, 0);
+    APP_U2Flush();
 
     s_encp_act     = data[0];
     s_encp_seq     = pc_seq;
     s_encp_started = 0u;
     s_encp_t0      = HAL_GetTick();
     app_state      = APP_STATE_ENC_PEER;
+#endif
 }
 
 static void APP_EncPeerTask(void)
@@ -968,7 +1411,7 @@ static void APP_EncPeerTask(void)
 
     /* 第一阶段：等链路空出来，把 ENC_XCHK 发出去 */
     if (s_encp_started == 0u) {
-        if (Link_RequestStart(&s_u2_link, LINK_CMD_ENC_XCHK, &s_encp_act, 1u) != 0u) {
+        if (APP_U2Send(LINK_CMD_ENC_XCHK, &s_encp_act, 1u) != 0u) {
             s_encp_started = 1u;
         } else if ((uint32_t)(HAL_GetTick() - s_encp_t0) > MGR_ENC_PEER_TIMEOUT_MS) {
             uint8_t e = APP_STATUS_BUSY;        /* 链路一直占着（对端可能卡住） */
@@ -979,7 +1422,7 @@ static void APP_EncPeerTask(void)
     }
 
     /* 第二阶段：等 U2 的应答 */
-    st = Link_RequestPoll(&s_u2_link, MGR_ENC_PEER_TIMEOUT_MS, s_encp_resp, &rn);
+    st = APP_U2Poll(MGR_ENC_PEER_TIMEOUT_MS, s_encp_resp, &rn);
     if (st == 1u) {
         s_encp_ack[0] = APP_STATUS_OK;
         if (rn > 0u) {
@@ -1014,6 +1457,7 @@ static uint8_t       s_cur_started;     /* 当前阶段的 DUT 请求已发出 *
 static uint32_t      s_cur_t0;          /* 阶段计时（超时兜底） */
 static uint32_t      s_cur_wait_t0;     /* WAIT 阶段的起点 */
 static uint16_t      s_cur_dur_ms;
+static uint8_t       s_cur_mode;        /* DUT_CUR_MODE_STATIC / _PWM（0x0014 可选第 9 字节）*/
 static uint8_t       s_cur_amask[DUT_GETADC_REQ_LEN];   /* 向 DUT 要哪两路（大端 u16，bit7/bit8）*/
 static uint8_t       s_cur_req[MGR_CUR_TEST_REQ_LEN];
 static uint8_t       s_cur_cur[DUT_CURRENT_REQ_LEN];    /* DUT_CURRENT 的请求（单独一个缓冲，
@@ -1062,15 +1506,27 @@ static void APP_CurTestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     uint8_t e;
 
     if (len == 0u) {
-        /* 默认：上桥 A、下桥 B、100%、200ms、两路电流都读 */
+        /* 默认：上桥 A、下桥 B、静态通流、1000‰、200ms、两路电流都读 */
         s_cur_req[0] = DUT_PHASE_A;
         s_cur_req[1] = DUT_PHASE_B;
         s_cur_req[2] = 0x03u; s_cur_req[3] = 0xE8u;      /* 1000‰ */
         s_cur_req[4] = 0x00u; s_cur_req[5] = 0xC8u;      /* 200 ms */
         s_cur_req[6] = 0x03u;                            /* 两路 */
         s_cur_req[7] = 0x00u;
-    } else if (len == MGR_CUR_TEST_REQ_LEN) {
+        s_cur_mode   = (uint8_t)DUT_CUR_MODE_STATIC;
+    } else if ((len == MGR_CUR_TEST_REQ_LEN) ||
+               (len == (uint16_t)(MGR_CUR_TEST_REQ_LEN + 1u))) {
+        /* ⚠ 第 9 字节（可省略）= DUT 的通流模式：
+         *   0 = 静态全通（DUT 按 1000‰ 处理，**duty 这个字段会被忽略**）
+         *   1 = 低频 PWM（duty 才生效）
+         * 为什么加它：静态全通是给"夹具提供电流回路"的产线工况用的；台架上被测板
+         * 接着**三相电机**时，静态全通用 24V 直接压在两个绕组上 = 几十安培，
+         * 会烧功率管或电机。要安全地试，必须用 mode=1 + 小占空比。
+         * LEN=8 的老帧仍然按 mode=0 解释（向后兼容）。 */
         memcpy(s_cur_req, data, MGR_CUR_TEST_REQ_LEN);
+        s_cur_mode = (len == (uint16_t)(MGR_CUR_TEST_REQ_LEN + 1u))
+                     ? data[MGR_CUR_TEST_REQ_LEN]
+                     : (uint8_t)DUT_CUR_MODE_STATIC;
     } else {
         e = APP_STATUS_ERR_PARAM;
         APP_SendAck(cmd, &e, 1u);
@@ -1081,13 +1537,14 @@ static void APP_CurTestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     s_cur_dur_ms = (uint16_t)(((uint16_t)s_cur_req[4] << 8) | s_cur_req[5]);
     {
         dut_current_t c;
-        c.mode          = DUT_CUR_MODE_STATIC;
+        c.mode          = s_cur_mode;
         c.hi_mask       = s_cur_req[0];
         c.lo_mask       = s_cur_req[1];
         c.duty_permille = (uint16_t)(((uint16_t)s_cur_req[2] << 8) | s_cur_req[3]);
         c.duration_ms   = s_cur_dur_ms;
 
         if ((DutCheck_Current(&c) == 0u) ||
+            (s_cur_mode > (uint8_t)DUT_CUR_MODE_PWM) ||
             ((s_cur_req[6] & ~(uint8_t)0x03u) != 0u) ||
             ((s_cur_req[6] & 0x03u) == 0u) ||
             (s_cur_req[7] != 0u)) {
@@ -1216,10 +1673,14 @@ static void APP_CurTestTask(void)
         uint8_t  st;
 
         if (s_cur_started == 0u) {
-            /* 请求 DATA 与 0x0206 的布局一致（去掉 rsvd 之后 7B… 见 DutPack_Current） */
+            /* ⚠ **发出去的必须是 DutPack_Current 打好的 s_cur_cur**。
+             *   老代码在这里发的是 s_cur_req（PC 的 8 字节请求布局：hi/lo/duty/dur/ch/rsvd），
+             *   而 DUT 那 8 字节是 mode/hi/lo/duty/dur/rsvd —— 两个布局的第 0 字节不同。
+             *   结果 DUT 收到 mode=hi_mask(0x01)、lo_mask=duty 高字节，一律回 0B ERR_PARAM，
+             *   现象是"⑥ 永远 dut_st=0B、两路电流全 0"，而且看帧长是对的、只错内容。 */
             {
                 dut_current_t c;
-                c.mode          = DUT_CUR_MODE_STATIC;
+                c.mode          = s_cur_mode;
                 c.hi_mask       = s_cur_req[0];
                 c.lo_mask       = s_cur_req[1];
                 c.duty_permille = (uint16_t)(((uint16_t)s_cur_req[2] << 8) | s_cur_req[3]);
@@ -1230,7 +1691,7 @@ static void APP_CurTestTask(void)
                 }
             }
             if (Link_RequestStart(&s_dut_link, DUT_CMD_CURRENT,
-                                  s_cur_req, DUT_CURRENT_REQ_LEN) != 0u) {
+                                  s_cur_cur, DUT_CURRENT_REQ_LEN) != 0u) {
                 s_cur_started = 1u;
                 s_cur_t0      = HAL_GetTick();
             } else if ((uint32_t)(HAL_GetTick() - s_cur_t0) > MGR_CUR_TIMEOUT_MS) {
@@ -1289,21 +1750,21 @@ static void APP_CurTestTask(void)
             }
         }
 
+        /* 应答：状态(1) + 被测板状态(1) + 两路×5（治具变化量、被测板变化量、旗标）
+         * 不再发：路数/预留、通流前后的绝对值 —— 判的就是"变化量"，
+         *         而同一路的绝对值在 ① 电压检测里已经报过（ch7/ch8）。*/
         out[0] = any_bad ? APP_STATUS_ERR_TEST : APP_STATUS_OK;
         out[1] = s_cur_dut_st;
-        out[2] = (uint8_t)CUR_CHK_CH_COUNT;
-        out[3] = 0u;
         for (i = 0u; i < (uint8_t)CUR_CHK_CH_COUNT; i++) {
-            uint8_t *p = &out[4u + (i * 9u)];     /* 每路 9B */
-            p[0] = (uint8_t)(s_cur_out[i].flags & 0xFFu);
-            p[1] = (uint8_t)(s_cur_in[i].jig_idle_mv >> 8);
-            p[2] = (uint8_t)(s_cur_in[i].jig_idle_mv);
-            p[3] = (uint8_t)(s_cur_in[i].jig_on_mv >> 8);
-            p[4] = (uint8_t)(s_cur_in[i].jig_on_mv);
-            p[5] = (uint8_t)(s_cur_in[i].dut_idle_mv >> 8);
-            p[6] = (uint8_t)(s_cur_in[i].dut_idle_mv);
-            p[7] = (uint8_t)(s_cur_in[i].dut_on_mv >> 8);
-            p[8] = (uint8_t)(s_cur_in[i].dut_on_mv);
+            uint8_t *p = &out[2u + (i * MGR_CUR_ITEM_LEN)];   /* 每路 5B */
+            int16_t  dj = (int16_t)((int32_t)s_cur_in[i].jig_on_mv -
+                                    (int32_t)s_cur_in[i].jig_idle_mv);
+            int16_t  dd = (int16_t)((int32_t)s_cur_in[i].dut_on_mv -
+                                    (int32_t)s_cur_in[i].dut_idle_mv);
+
+            p[0] = (uint8_t)((uint16_t)dj >> 8);  p[1] = (uint8_t)((uint16_t)dj);
+            p[2] = (uint8_t)((uint16_t)dd >> 8);  p[3] = (uint8_t)((uint16_t)dd);
+            p[4] = (uint8_t)(s_cur_out[i].flags & 0xFFu);
         }
         app_state = APP_STATE_IDLE;
         APP_SendFrame(MGR_CMD_CUR_TEST, s_cur_seq, out, MGR_CUR_TEST_RESP_LEN);
@@ -1333,7 +1794,6 @@ static uint16_t      s_vol_adc_mask;
 static uint8_t       s_vol_amask[DUT_GETADC_REQ_LEN];
 static uint8_t       s_vol_resp[LINK_MAX_PAYLOAD];
 static uint8_t       s_vol_info_st;
-static uint16_t      s_vol_ver;
 static dut_adc_t     s_vol_dut;
 static vol_chk_out_t s_vol_out[MEAS_CH_COUNT];
 
@@ -1356,7 +1816,6 @@ static void APP_VolTestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     s_vol_t0      = HAL_GetTick();
     s_vol_adc_mask = 0u;
     s_vol_info_st = APP_STATUS_ERR_TIMEOUT;
-    s_vol_ver     = 0u;
     app_state     = APP_STATE_VOL;
 }
 
@@ -1414,7 +1873,6 @@ static void APP_VolTestTask(void)
             return;
         }
         s_vol_info_st  = fi.status;
-        s_vol_ver      = fi.dut_ver;
         s_vol_adc_mask = fi.adc_mask;
         for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
             if ((fi.adc_mask & (uint16_t)(1u << i)) != 0u) {
@@ -1442,24 +1900,18 @@ static void APP_VolTestTask(void)
         MEAS_Snapshot(&snap);
         sum = VolChk_All(&snap, &s_vol_dut, s_vol_adc_mask, s_vol_out);
 
+        /* 应答：状态(1) + 被测板状态(1) + 九路×5（治具mV、被测板mV、旗标）
+         * 不再发：版本号/通道声明（INFO 里有）、差值（两数相减就有）、汇总字（看旗标就有）*/
         out[0] = ((sum & VOL_CHK_SUM_ANY_BAD) != 0u) ? APP_STATUS_ERR_TEST : APP_STATUS_OK;
         out[1] = s_vol_info_st;
-        out[2] = (uint8_t)(s_vol_ver >> 8);
-        out[3] = (uint8_t)(s_vol_ver & 0xFFu);
-        out[4] = (uint8_t)(s_vol_adc_mask >> 8);
-        out[5] = (uint8_t)(s_vol_adc_mask & 0xFFu);
-        out[6] = (uint8_t)(sum >> 8);
-        out[7] = (uint8_t)(sum & 0xFFu);
         for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
-            uint8_t *p = &out[8u + ((uint16_t)i * MGR_VOL_CH_ITEM_LEN)];
+            uint8_t *p = &out[2u + ((uint16_t)i * MGR_VOL_CH_ITEM_LEN)];
             uint16_t jm = 0u, dm = 0u;
             (void)VolChk_TakeJig(&snap, i, &jm);
             (void)VolChk_TakeDut(&s_vol_dut, i, &dm);
-            p[0] = (uint8_t)(s_vol_out[i].flags & 0xFFu);
-            p[1] = (uint8_t)(jm >> 8);  p[2] = (uint8_t)jm;
-            p[3] = (uint8_t)(dm >> 8);  p[4] = (uint8_t)dm;
-            p[5] = (uint8_t)((uint16_t)(s_vol_out[i].err_mv >> 8) & 0xFFu);
-            p[6] = (uint8_t)((uint16_t)s_vol_out[i].err_mv & 0xFFu);
+            p[0] = (uint8_t)(jm >> 8);  p[1] = (uint8_t)jm;
+            p[2] = (uint8_t)(dm >> 8);  p[3] = (uint8_t)dm;
+            p[4] = (uint8_t)(s_vol_out[i].flags & 0xFFu);
         }
         app_state = APP_STATE_IDLE;
         APP_SendFrame(MGR_CMD_VOL_TEST, s_vol_seq, out, MGR_VOL_TEST_RESP_LEN);
@@ -1517,25 +1969,19 @@ static void APP_PhaseJudgeCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     }
     sum = PhaseChk_All(ins, outs);
 
+    /* 应答：状态(1) + 三相×5（实测mV、期望mV、旗标）
+     * 不再发：汇总字/相数（看旗标就有）、容差（由母线电压算得出）、
+     *         占空比（PC 刚发过）、差值（实测 − 期望就有）*/
     out[0] = ((sum & PHASE_CHK_SUM_ANY_BAD) != 0u) ? APP_STATUS_ERR_TEST : APP_STATUS_OK;
-    out[1] = (uint8_t)(sum >> 8);
-    out[2] = (uint8_t)(sum & 0xFFu);
-    out[3] = 3u;
     for (i = 0u; i < 3u; i++) {
-        uint8_t *p = &out[4u + ((uint16_t)i * MGR_PHASE_ITEM_LEN)];
-        uint16_t ex = (outs[i].expect_mv > 0xFFFFu) ? 0xFFFFu : (uint16_t)outs[i].expect_mv;
-        uint16_t er = (uint16_t)(int16_t)((outs[i].err_mv > 32767) ? 32767
-                                         : ((outs[i].err_mv < -32768) ? -32768
-                                            : outs[i].err_mv));
-        uint16_t to = (outs[i].tol_mv > 0xFFFFu) ? 0xFFFFu : (uint16_t)outs[i].tol_mv;
+        uint8_t *p = &out[1u + ((uint16_t)i * MGR_PHASE_ITEM_LEN)];
+        uint32_t meas = ins[i].vph_mv;
+        uint16_t mv   = (meas > 0xFFFFu) ? 0xFFFFu : (uint16_t)meas;
+        uint16_t ex   = (outs[i].expect_mv > 0xFFFFu) ? 0xFFFFu : (uint16_t)outs[i].expect_mv;
 
-        p[0] = (uint8_t)(outs[i].flags >> 8);
-        p[1] = (uint8_t)(outs[i].flags & 0xFFu);
-        p[2] = (uint8_t)(ex >> 8);    p[3] = (uint8_t)ex;
-        p[4] = (uint8_t)(er >> 8);    p[5] = (uint8_t)er;
-        p[6] = (uint8_t)(to >> 8);    p[7] = (uint8_t)to;
-        p[8] = (uint8_t)(ins[i].duty_pm >> 8);
-        p[9] = (uint8_t)(ins[i].duty_pm & 0xFFu);
+        p[0] = (uint8_t)(mv >> 8);  p[1] = (uint8_t)mv;
+        p[2] = (uint8_t)(ex >> 8);  p[3] = (uint8_t)ex;
+        p[4] = (uint8_t)(outs[i].flags & 0xFFu);
     }
     APP_SendAck(cmd, out, MGR_PHASE_JUDGE_RESP_LEN);
 }
@@ -1568,7 +2014,7 @@ static void APP_JigStatusCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
 
     if (APP_U2Alive() != 0u)         flags |= MGR_JIG_ST_U2_ONLINE;
     if (APP_U2VerOk() != 0u)         flags |= MGR_JIG_ST_U2_VER_SAME;
-    if (Link_Busy(&s_u2_link) != 0u) flags |= MGR_JIG_ST_LINK_BUSY;
+    if (APP_U2Busy() != 0u)         flags |= MGR_JIG_ST_LINK_BUSY;
 #if (JIG_DUT_LINK != 0)
     flags |= MGR_JIG_ST_DUT_LINK;
 #endif
@@ -1587,7 +2033,7 @@ static void APP_JigStatusCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     out[9]  = (uint8_t)(ok >> 8);    out[10] = (uint8_t)(ok);
     out[11] = (uint8_t)(fail >> 8);  out[12] = (uint8_t)(fail);
 
-    ls = Link_Stats(&s_u2_link);
+    ls = APP_U2Stats();
     if (ls != 0) {
         out[13] = (uint8_t)((uint32_t)ls->rx_frames >> 24);
         out[14] = (uint8_t)((uint32_t)ls->rx_frames >> 16);
@@ -1679,26 +2125,33 @@ static void APP_EncJudgeCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     memset(outs, 0, sizeof(outs));
     sum = EncChk_All(in, tol, u2_lost, dut_dir, outs);
 
+    /* 应答：状态(1) + 方向(1) + 对侧结论(1) + 三相×3（被测板边沿数、旗标）
+     * 不再发：汇总字/相数/预留、U2 丢沿、每相的期望边沿（治具默认脉冲串固定：
+     *         A=1000 脉冲→2000 边沿、B=2000→4000、Z=1→2）、U2 每相的数（只留结论）*/
     out[0] = ((sum & ENC_CHK_SUM_ANY_BAD) != 0u) ? APP_STATUS_ERR_TEST : APP_STATUS_OK;
-    out[1] = (uint8_t)(sum >> 8);
-    out[2] = (uint8_t)(sum & 0xFFu);
-    out[3] = (uint8_t)ENC_CHK_PH_COUNT;
-    out[4] = (uint8_t)(u2_lost >> 8);
-    out[5] = (uint8_t)(u2_lost);
-    out[6] = (uint8_t)dut_dir;
-    out[7] = 0u;
+    out[1] = (uint8_t)dut_dir;
+    {
+        uint8_t peer = 0u;
+        if ((av & MGR_ENC_JUDGE_AV_U2) != 0u) {
+            peer = 1u;                              /* 有对侧数据，先按"一致" */
+            for (i = 0u; i < (uint8_t)ENC_CHK_PH_COUNT; i++) {
+                if ((outs[i].flags & ENC_CHK_F_U2_DIFF) != 0u) {
+                    peer = 2u;                      /* 有一相不一致 */
+                    break;
+                }
+            }
+        }
+        out[2] = peer;
+    }
     for (i = 0u; i < (uint8_t)ENC_CHK_PH_COUNT; i++) {
-        uint8_t *p = &out[8u + ((uint16_t)i * MGR_ENC_JUDGE_ITEM_LEN)];
-        uint16_t u2 = (outs[i].u2_edges  > 0xFFFFu) ? 0xFFFFu : (uint16_t)outs[i].u2_edges;
+        uint8_t *p = &out[3u + ((uint16_t)i * MGR_ENC_JUDGE_ITEM_LEN)];
         uint16_t dt = (outs[i].dut_edges > 0xFFFFu) ? 0xFFFFu : (uint16_t)outs[i].dut_edges;
 
-        /* flags 只有 1 字节（ENC_CHK_F_* 都在低 4 位，和 cur_chk/vol_chk 一致）；
-         * ⚠ 这一格写成 2 字节会把后面三相全部挤歪、最后一相还要越界 1 字节。 */
-        p[0] = (uint8_t)(outs[i].flags & 0xFFu);
-        p[1] = (uint8_t)(outs[i].exp_edges >> 8);  p[2] = (uint8_t)outs[i].exp_edges;
-        p[3] = (uint8_t)(u2 >> 8);                 p[4] = (uint8_t)u2;
-        p[5] = (uint8_t)(dt >> 8);                 p[6] = (uint8_t)dt;
+        p[0] = (uint8_t)(dt >> 8);
+        p[1] = (uint8_t)(dt);
+        p[2] = (uint8_t)(outs[i].flags & 0xFFu);
     }
+    (void)u2_lost;                                  /* 留作诊断，不上报（见 enc_chk.h）*/
     APP_SendAck(cmd, out, MGR_ENC_JUDGE_RESP_LEN);
 }
 
@@ -1976,7 +2429,7 @@ static void APP_RunAllCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     s_run_seq     = pc_seq;
     s_run_t0      = HAL_GetTick();
     /* 清掉内部链路上可能残留的保活探测（同 0x0013 的理由） */
-    (void)Link_RequestPoll(&s_u2_link, 0u, 0, 0);
+    APP_U2Flush();
     app_state = APP_STATE_RUN;
 }
 
@@ -2504,6 +2957,16 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
         APP_DutCmd(cmd, data, len);
         break;
 
+    /*── 0x001F 给被测板发**原始字节**（对面还没实现 0x02xx 时先验串口通不通）──*/
+    case MGR_CMD_DUT_SEND:
+        APP_DutSendCmd(cmd, data, len);
+        break;
+
+    /*── 0x0020 取走 DUT 口攒下的原始字节（只读，读后清空）──*/
+    case MGR_CMD_DUT_RECV:
+        APP_DutRecvCmd(cmd, data, len);
+        break;
+
     /*── 0x0014 ⑥ 相电流检测：一条命令跑完整流程 ──*/
     case MGR_CMD_CUR_TEST:
         APP_CurTestCmd(cmd, data, len);
@@ -2582,6 +3045,9 @@ static void APP_HandlePendingFrame(void)
     }
 
     pc_seq = seq;
+#if (APP_BENCH_ALIVE != 0)
+    s_bench_frames++;               /* 收到了第一帧 → 心跳永久闭嘴 */
+#endif
     APP_Dispatch(cmd, data, dlen);
 }
 
@@ -2598,6 +3064,7 @@ static void APP_HandlePendingFrame(void)
  *   主循环里不能有 >50ms 的阻塞——USB 侧(协议帧)和 SWD 烧录都靠这个循环推进。
  *   Start 只负责把请求塞进发送队列, Poll 每轮推进一次, 全程零阻塞。
  *============================================================================*/
+#if (JIG_U2_LINK != 0)
 /* 连续超时到阈值 → 复位链路 (docs/13 §3.6)。
  * 只在空闲状态下被调用；复位也失败就退避 5s，避免一直刷屏重试。 */
 static void APP_LinkRecover(void)
@@ -2731,6 +3198,26 @@ uint8_t APP_U2Status(link_status_t *out)
     return 1u;
 }
 
+#else  /* JIG_U2_LINK == 0：台架形态，U2 不在（USART3 归被测板） */
+
+static void APP_LinkTask(void)
+{
+    /* 没有 U2 就没有保活探测、没有事件补拉、没有链路恢复。
+     * 这里必须是**空实现**而不是"发不出去就算了"：只要往 s_u2_link 发过一次，
+     * 那一发就会落到 USART3 上 —— 而 USART3 现在是被测板的线。 */
+}
+
+uint8_t APP_U2Alive(void)                 { return 0u; }
+void    APP_U2ProbeStats(uint16_t *ok, uint16_t *fail)
+{
+    if (ok   != 0) *ok   = 0u;
+    if (fail != 0) *fail = 0u;
+}
+uint8_t APP_U2VerOk(void)                 { return 0u; }   /* 没有 U2 = 谈不上版本一致 */
+uint8_t APP_U2Status(link_status_t *out)  { (void)out; return 0u; }
+
+#endif /* JIG_U2_LINK */
+
 /*==============================================================================
  * 对外 API
  *============================================================================*/
@@ -2747,12 +3234,16 @@ void APP_Init(void)
 
     /* 串口: 先绑端口开接收, 再建链路对象。反过来会漏掉早到的请求 */
     UartCfg_Init();
+#if (JIG_U2_LINK != 0)
     Link_Init(&s_u2_link, UART_CFG_PORT_LINK, 1u /* 主机 */);
+#endif
 #if (JIG_DUT_LINK != 0)
-    /* DUT 链路：同一个链路层，绑到端口 0（USART1），U1 当主机 */
+    /* DUT 链路：同一个链路层。出厂形态绑端口 0（USART1），
+     * 台架形态绑端口 1（USART3，U2 让位）—— 由 uart_cfg.h 的 UART_CFG_PORT_DUT 决定。 */
     Link_Init(&s_dut_link, UART_CFG_PORT_DUT, 1u /* 主机 */);
     s_dut_seq = 0u;
 #endif
+#if (JIG_U2_LINK != 0)
     s_probe_tick      = HAL_GetTick();
     s_probe_cnt       = 0u;
     s_probe_is_status = 0u;
@@ -2761,6 +3252,7 @@ void APP_Init(void)
     s_u2_alive        = 0u;
     s_u2_ver_ok       = 0u;
     s_u2_ver_checked  = 0u;
+#endif
     memset(&s_u2_status, 0, sizeof(s_u2_status));
 
     /* 测量/测试状态 */
@@ -2785,11 +3277,24 @@ void APP_Init(void)
     s_enc_seq = 0u;
     memset(&s_enc_plan, 0, sizeof(s_enc_plan));
 
+#if (APP_BENCH_ALIVE != 0)
+    /* 开 DWT 周期计数器：量"主循环单圈最大耗时"。
+     * 115200 下一个字节约 87µs；主循环只要卡超过这个数，RX 就会被顶出 ORE。*/
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0u;
+    DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
+    s_loop_max_us = 0u;
+#endif
+
     app_state = APP_STATE_IDLE;
 }
 
 void APP_Run(void)
 {
+#if (APP_BENCH_ALIVE != 0)
+    uint32_t app_run_t0 = DWT->CYCCNT;      /* 72MHz：72 个周期 = 1µs */
+#endif
+
     /* ── 0a) USB 关键寄存器打印到调试口（PA9），每 2 秒一行（2026-11-03 加）──
      * 为什么从这里打：USB 不枚举时**没有 COM 口**，命令发不进来；
      * 而 USB 版本来就把调试打印开在 PA9 上，所以把寄存器从那里吐出来最直接。
@@ -2834,8 +3339,14 @@ void APP_Run(void)
     /* 0) PC 口收到的字节搬进帧解析器（USB 分支是空操作，见 pc_link.c） */
     PcLink_Poll();
 
+#if (APP_BENCH_ALIVE != 0)
+    /* 0b) 台架版自报身份：连上之前每 3 秒一行心跳（连上后自动闭嘴） */
+    APP_BenchSay();
+#endif
+
     /* 1) 把接收环形缓冲里的字节喂给解析器, 处理收到的完整帧 */
     APP_Frame_Poll();
+    APP_FrameStallCheck();          /* 半截帧超时 → 丢掉重新对齐（见函数注释）*/
     if (APP_Frame_Pending()) {
         APP_HandlePendingFrame();
     }
@@ -2882,6 +3393,9 @@ void APP_Run(void)
     /* 4b) 到 DUT（被烧 FOC 板）的链路：同样每轮推进一步 */
     APP_DutTask();
 
+    /* 4c) 0x001F 的收发窗口：收字节、到点回 ACK */
+    APP_DutRawTask();
+
     /* 7b) ⑥ 相电流检测流程推进 + 终态回 ACK（只回一次） */
     APP_CurTestTask();
 
@@ -2906,6 +3420,17 @@ void APP_Run(void)
 
     /* 7) 0x0013 向 U2 要编码器计数 + 终态回 ACK */
     APP_EncPeerTask();
+
+#if (APP_BENCH_ALIVE != 0)
+    {
+        uint32_t dt = DWT->CYCCNT - app_run_t0;
+        uint32_t us = dt / 72u;
+
+        if (us > s_loop_max_us) {
+            s_loop_max_us = us;             /* 记最大值，心跳里报 */
+        }
+    }
+#endif
 }
 
 /* USB CDC 收到一批字节 (中断上下文) — 只喂状态机, 不做重活 */

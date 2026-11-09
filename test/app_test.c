@@ -403,9 +403,20 @@ static uint16_t s_dut_last_seq;
 static uint16_t s_dut_last_len;
 static uint8_t  s_dut_last_data[LINK_MAX_PAYLOAD];
 static uint8_t  s_dut_bad_crc;                  /* 收到过几次 CRC 错的帧 */
+/* 0x001F 用：把 U1 从 DUT 口发出去的**所有**字节原样存一份（不要求是帧）。
+ * 帧解析那套会把非帧字节当垃圾丢掉，而 0x001F 恰恰发的就是非帧的 ASCII。 */
+static uint8_t  s_dut_raw[64];
+static uint16_t s_dut_raw_len;
 static uint8_t  s_dut_quiet;                    /* 1 = 收到了但故意不回（测超时） */
 static uint8_t  s_dutfake_cur_on;               /* 1 = 已经"通上流"了（⑥ 用） */
 static uint16_t s_dutfake_cur_seen;             /* 收到过几次 DUT_CURRENT */
+static uint16_t s_dutfake_cur_len;              /* 最近一次 DUT_CURRENT 的 DATA 长度 */
+static uint8_t  s_dutfake_cur_mode;
+static uint8_t  s_dutfake_cur_hi;
+static uint8_t  s_dutfake_cur_lo;
+static uint16_t s_dutfake_cur_duty;
+static uint16_t s_dutfake_cur_dur;
+static uint8_t  s_dutfake_cur_rsvd;
 
 /* 按 docs/15 §12 的示例应答生成回帧，并塞回 U1 */
 static void DutFake_Reply(uint16_t cmd, uint16_t seq)
@@ -468,8 +479,23 @@ static void DutFake_Reply(uint16_t cmd, uint16_t seq)
         break;
     }
     case DUT_CMD_CURRENT: {
-        /* 收到通流命令 → 之后 GET_ADC 就报"有电流"的值 */
         static const uint8_t ok = DUT_ST_OK;
+        /* 把收到的 8 字节按 **DUT 的布局** 拆出来存好，由测试主体断言
+         * （CHECK 宏在本函数之后才定义，这里不能直接用）。
+         * 为什么要存：治具曾经把 PC 的 8 字节请求（hi/lo/duty/dur/ch/rsvd）
+         * 原样发给 DUT（DUT 侧是 mode/hi/lo/duty/dur/rsvd）—— 长度一样、内容全错，
+         * 真 DUT 回 0B；而假 DUT 一律回 OK，于是这个 bug 在回归里完全是隐形的。 */
+        s_dutfake_cur_len  = s_dut_last_len;
+        s_dutfake_cur_mode = (s_dut_last_len >= 1u) ? s_dut_last_data[0] : 0xFFu;
+        s_dutfake_cur_hi   = (s_dut_last_len >= 2u) ? s_dut_last_data[1] : 0xFFu;
+        s_dutfake_cur_lo   = (s_dut_last_len >= 3u) ? s_dut_last_data[2] : 0xFFu;
+        s_dutfake_cur_duty = (s_dut_last_len >= 5u)
+                             ? (uint16_t)(((uint16_t)s_dut_last_data[3] << 8) | s_dut_last_data[4])
+                             : 0xFFFFu;
+        s_dutfake_cur_dur  = (s_dut_last_len >= 7u)
+                             ? (uint16_t)(((uint16_t)s_dut_last_data[5] << 8) | s_dut_last_data[6])
+                             : 0xFFFFu;
+        s_dutfake_cur_rsvd = (s_dut_last_len >= 8u) ? s_dut_last_data[7] : 0xFFu;
         s_dutfake_cur_on = 1u;
         s_dutfake_cur_seen++;
         olen = Frame_Build(out, cmd, seq, &ok, 1u);
@@ -497,6 +523,9 @@ static void DutFake_Feed(const uint8_t *p, uint16_t n)
 
         if (s_dutrx_len >= (uint16_t)sizeof(s_dutrx)) {
             s_dutrx_len = 0u;                   /* 溢出：丢掉重来 */
+        }
+        if (s_dut_raw_len < (uint16_t)sizeof(s_dut_raw)) {
+            s_dut_raw[s_dut_raw_len++] = p[i];
         }
         s_dutrx[s_dutrx_len++] = p[i];
 
@@ -1199,12 +1228,15 @@ static int parse_meas_resp(uint8_t *status, meas_snapshot_t *snap,
     return 1;
 }
 
-/* 解析 0x000F 的 91B 应答（状态 + 本片脉冲 45B + 对侧脉冲 45B） */
-static int parse_pulse_resp(uint8_t *status, pulse_snapshot_t *mine,
-                            pulse_snapshot_t *peer)
+/* 解析 0x000F 的**精简**应答（23B）：
+ *   状态(1) + 对侧结论(1) + 三相×(周期ns 4 + 占空比‰ 2 + 旗标 1)
+ * 对侧结论：0=没有对侧数据 1=一致 2=不一致（原来这里是 45B 的一整块数，现在只留结论）。
+ * 高电平/边沿数已经不发了（都能由周期与占空比算出来，或"周期非 0"本身就说明有信号）。 */
+static int parse_pulse_resp(uint8_t *status, pulse_snapshot_t *mine, uint8_t *peer)
 {
     uint16_t cmd_o = 0, seq_o = 0, dlen = 0;
     uint8_t  d[FRAME_MAX_DATA];
+    uint8_t  i;
 
     if ((tx_len == 0u) || (!Frame_Parse(tx_buf, tx_len, &cmd_o, &seq_o, d, &dlen))) {
         return 0;
@@ -1213,11 +1245,18 @@ static int parse_pulse_resp(uint8_t *status, pulse_snapshot_t *mine,
         return 0;
     }
     if (status) *status = d[0];
-    if ((mine != 0) && (PulsePack_Unpack(&d[1], PULSE_PACK_LEN, mine) == 0u)) {
-        return 0;
-    }
-    if ((peer != 0) && (PulsePack_Unpack(&d[1 + PULSE_PACK_LEN], PULSE_PACK_LEN, peer) == 0u)) {
-        return 0;
+    if (peer) *peer = d[1];
+    if (mine != 0) {
+        memset(mine, 0, sizeof(*mine));
+        mine->phase_count = (uint8_t)PULSE_PH_COUNT;
+        for (i = 0u; i < (uint8_t)PULSE_PH_COUNT; i++) {
+            const uint8_t *p = &d[2u + ((uint16_t)i * PULSE_RESP_ITEM_LEN)];
+
+            mine->ph[i].period_ns = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+                                    ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+            mine->ph[i].duty_permille = (uint16_t)(((uint16_t)p[4] << 8) | p[5]);
+            mine->ph[i].flags = p[6];
+        }
     }
     return 1;
 }
@@ -1335,7 +1374,8 @@ static void t15_pulse_cmd(void)
     uint16_t seq = 0xB000;
     uint8_t  mode;
     uint8_t  status = 0xFF;
-    pulse_snapshot_t pm, pp;
+    pulse_snapshot_t pm;
+    uint8_t          peer_b = 0xFFu;
     int      i;
 
     printf("[T15] 0x000F 脉冲捕获: mode=0 只读 / mode=1 测试 / 非法 mode\n");
@@ -1373,9 +1413,8 @@ static void t15_pulse_cmd(void)
         CHECK(app_state == APP_STATE_IDLE, "结束后回到 IDLE");
     }
     memset(&pm, 0, sizeof(pm));
-    memset(&pp, 0, sizeof(pp));
-    CHECK(parse_pulse_resp(&status, &pm, &pp) == 1, "0x000F 应答(91B)可解析");
-    CHECK(PULSE_PACK_RESP_LEN == 91u, "应答长度 = 状态1 + 45 + 45");
+    CHECK(parse_pulse_resp(&status, &pm, &peer_b) == 1, "0x000F 应答(23B)可解析");
+    CHECK(PULSE_PACK_RESP_LEN == 23u, "应答长度 = 状态1 + 对侧1 + 三相×7");
     CHECK(status == APP_STATUS_OK, "默认不判脉冲 → 结论 OK");
     for (i = 0; i < (int)PULSE_PH_COUNT; i++) {
         char nm[64];
@@ -1384,16 +1423,14 @@ static void t15_pulse_cmd(void)
         CHECK(pm.ph[i].duty_permille == 500u, "占空比 50.0%");
         CHECK((pm.ph[i].flags & PULSE_F_VALID) != 0u, "该相标记有效");
     }
-    CHECK(pm.window_ms == PULSE_WINDOW_MS, "带上窗口长度");
-    CHECK((pp.ph[PULSE_PH_A].flags & PULSE_F_NOSIGNAL) != 0u,
-          "U2 缺席 → 对侧那段按无数据打包");
+    CHECK(peer_b == 0u, "U2 缺席 → 对侧结论 = 0（没有对侧数据）");
 
     /* ── 15d: mode=0 只读：立刻回上一批结果，不重新采 ── */
     mode = MGR_MODE_READ;
     {
         uint32_t t0 = g_tick;
         pc_send(MGR_CMD_PULSE, seq++, &mode, 1);
-        CHECK(parse_pulse_resp(&status, &pm, &pp) == 1, "只读模式应答可解析");
+        CHECK(parse_pulse_resp(&status, &pm, &peer_b) == 1, "只读模式应答可解析");
         CHECK(pm.ph[PULSE_PH_A].period_ns == 50000u, "读到的是上一批结果");
         CHECK((g_tick - t0) < 50u, "只读模式没有等 200ms 窗口");
     }
@@ -1414,10 +1451,8 @@ static void t15_pulse_cmd(void)
     }
     memset(&pm, 0, sizeof(pm));
     CHECK(parse_pulse_resp(&status, &pm, 0) == 1, "无信号应答可解析");
-    CHECK((pm.flags & PULSE_SNAP_F_NOSIGNAL) != 0u, "整体标记为'至少一相没信号'");
     CHECK((pm.ph[PULSE_PH_B].flags & PULSE_F_NOSIGNAL) != 0u, "该相标记没信号");
     CHECK(pm.ph[PULSE_PH_B].period_ns == 0u, "没信号时周期为 0（不硬算）");
-    CHECK(pm.ph[PULSE_PH_B].edges == 0u, "边沿数为 0");
     g_pulse_edges_on = 1u;
 
     /* ── 15f: 0x000E 与 0x000F 互不干扰（各自独立读） ── */
@@ -1443,7 +1478,8 @@ static void t16_arm_sync_path(void)
     uint16_t seq = 0xC000;
     uint8_t  mode = MGR_MODE_TEST;
     uint8_t  status = 0xFF;
-    pulse_snapshot_t pm, pp;
+    pulse_snapshot_t pm;
+    uint8_t          peer_b = 0xFFu;
     uint8_t  i;
 
     printf("[T16] ARM 同步触发主路径（有 U2）\n");
@@ -1479,17 +1515,13 @@ static void t16_arm_sync_path(void)
     }
 
     memset(&pm, 0, sizeof(pm));
-    memset(&pp, 0, sizeof(pp));
-    CHECK(parse_pulse_resp(&status, &pm, &pp) == 1, "91B 应答可解析");
+    CHECK(parse_pulse_resp(&status, &pm, &peer_b) == 1, "23B 应答可解析");
     CHECK(status == APP_STATUS_OK, "命令状态 OK");
     for (i = 0u; i < (uint8_t)PULSE_PH_COUNT; i++) {
         CHECK(pm.ph[i].period_ns == 50000u, "本片: 20kHz → 50us 周期");
     }
-    CHECK(pp.ph[PULSE_PH_A].period_ns == 25000u,
-          "对侧段是 U2 自己的数据(40kHz) → ARM 之后确实取到了对侧结果");
-    CHECK(pp.ph[PULSE_PH_A].duty_permille == 500u, "对侧占空比也带回来了");
-    CHECK((pp.ph[PULSE_PH_A].flags & PULSE_F_VALID) != 0u, "对侧那段标记有效");
-    CHECK((pp.ph[PULSE_PH_A].flags & PULSE_F_NOSIGNAL) == 0u, "对侧那段不是无信号");
+    /* 对侧不再发整块数，只发结论：假 U2 报 40kHz，和本片 20kHz 不一致 → 2 */
+    CHECK(peer_b == 2u, "对侧结论 = 2（U2 报 40kHz，与本片 20kHz 不一致）");
 
     /* 3) 关掉假 U2 再跑一次：应当退回"对侧缺席"(NO_PEER)，证明两条路都在 */
     g_u2_on = 0u;
@@ -1503,10 +1535,8 @@ static void t16_arm_sync_path(void)
         APP_USB_Receive(raw, n);
         CHECK(wait_meas_ack(MGR_CMD_PULSE, &rseq, &rst) == 1, "U2 又不在时仍能收尾");
     }
-    memset(&pp, 0, sizeof(pp));
-    CHECK(parse_pulse_resp(&status, &pm, &pp) == 1, "应答仍可解析");
-    CHECK((pp.ph[PULSE_PH_A].flags & PULSE_F_NOSIGNAL) != 0u,
-          "对侧缺席时按无数据打包");
+    CHECK(parse_pulse_resp(&status, &pm, &peer_b) == 1, "应答仍可解析");
+    CHECK(peer_b == 0u, "对侧缺席时结论 = 0（没有对侧数据）");
 }
 
 #endif /* JIG_DUT_LINK == 0 —— T16 结束 */
@@ -1874,7 +1904,8 @@ static void t17_dut_passthrough(void)
  *============================================================================*/
 static uint16_t cur_send(uint16_t seq, const uint8_t *data, uint16_t len)
 {
-    uint8_t  raw[8 + MGR_CUR_TEST_REQ_LEN + 2];
+    /* 8 头 + 最大 9 字节 DATA（8 = 老布局，9 = 多一个 mode）+ 2 CRC */
+    uint8_t  raw[8 + MGR_CUR_TEST_REQ_LEN + 1 + 2];
     uint16_t n = Frame_Build(raw, MGR_CMD_CUR_TEST, seq, data, len);
 
     tx_len = 0;
@@ -1919,29 +1950,30 @@ static void t20_cur_test(void)
     n = cur_send(seq++, NULL, 0u);
     CHECK(n > 0u && Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u, "有可解析的应答");
     CHECK(ac == MGR_CMD_CUR_TEST && as_ == (uint16_t)(seq - 1u), "命令与序号回显正确");
-    CHECK(dlen == MGR_CUR_TEST_RESP_LEN, "报告 22 字节");
+    CHECK(dlen == MGR_CUR_TEST_RESP_LEN, "报告 12 字节");
     CHECK(d[0] == APP_STATUS_OK, "命令状态 OK");
     CHECK(d[1] == DUT_ST_OK, "DUT_CURRENT 的状态带回来了");
-    CHECK(d[2] == (uint8_t)CUR_CHK_CH_COUNT, "ch_count = 2");
     CHECK(s_dutfake_cur_seen == 1u, "DUT 确实被要求通流了一次");
 
     /* 3) 关键顺序：DUT 的基线必须是**通流前**读的、on 必须是**通流后**读的。
-     *    报告布局：每路 9B，从 out[4] 开始 → ch1 在 [4..12]、ch2 在 [13..21]。
-     *    ch1: flags@4, jig_idle@5..6, jig_on@7..8, dut_idle@9..10, dut_on@11..12
-     *    ch2: flags@13, jig_idle@14..15, jig_on@16..17, dut_idle@18..19, dut_on@20..21 */
+     *    新布局每路 5B，从 out[2] 开始 → ch1 在 [2..6]、ch2 在 [7..11]。
+     *      ch1: jig_delta@2..3, dut_delta@4..5, flags@6
+     *      ch2: jig_delta@7..8, dut_delta@9..10, flags@11
+     *    变化量 = 通流中 − 通流前：假 DUT 是 1650 → 2000，所以 dut_delta 应为 +350。
+     *    （治具侧在这个宿主环境里没有有效读数，所以 jig_delta 应该是 0。） */
     {
-        uint16_t di1 = (uint16_t)(((uint16_t)d[9]  << 8) | d[10]);
-        uint16_t do1 = (uint16_t)(((uint16_t)d[11] << 8) | d[12]);
-        uint16_t di2 = (uint16_t)(((uint16_t)d[18] << 8) | d[19]);
+        int16_t dj1 = (int16_t)(((uint16_t)d[2] << 8) | d[3]);
+        int16_t dd1 = (int16_t)(((uint16_t)d[4] << 8) | d[5]);
+        int16_t dd2 = (int16_t)(((uint16_t)d[9] << 8) | d[10]);
 
-        CHECK(di1 == 1650u, "电流1 的 DUT 基线 = 1650mV（通流前读的）");
-        CHECK(do1 == 2000u, "电流1 的 DUT 通流中 = 2000mV（通流后读的）");
-        CHECK(di2 == 1655u, "电流2 的 DUT 基线 = 1655mV");
-        CHECK(do1 > di1, "顺序没错：先读基线、再通流、再读通流中");
+        CHECK(dd1 == 350, "电流1 的 DUT 变化量 = 2000−1650 = +350mV（顺序对）");
+        CHECK(dd2 == 350, "电流2 的 DUT 变化量 = 2005−1655 = +350mV");
+        CHECK(dj1 == 0, "治具侧没有有效读数 → 变化量 0");
+        CHECK(dd1 > 0, "变化量为正：通流中确实比通流前大");
     }
 
-    /* 4) 治具侧在这个宿主环境里没有有效读数 → 判 NODATA，**但不因此判失败** */
-    CHECK((d[4] & CUR_CHK_F_NODATA) != 0u || (d[4] & CUR_CHK_F_OK) != 0u,
+    /* 4) 治具侧没有有效读数 → 判 NODATA，**但不因此判失败** */
+    CHECK((d[6] & CUR_CHK_F_NODATA) != 0u || (d[6] & CUR_CHK_F_OK) != 0u,
           "ch1 的旗标是 NODATA 或 OK（不会是别的）");
     CHECK(d[0] == APP_STATUS_OK, "NODATA 不算失败（状态码仍是 OK）");
 
@@ -1967,6 +1999,37 @@ static void t20_cur_test(void)
         CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && d[0] == APP_STATUS_OK,
               "上桥 B、下桥 C、50%、100ms → 正常跑完");
         CHECK(s_dutfake_cur_seen >= 2u, "又通了一次流");
+
+        /* ⚠ 这一段是 0x0014 最容易错的地方：**发给 DUT 的 8 字节布局与 PC 的请求
+         *   布局不同**（PC: hi/lo/duty/dur/ch/rsvd；DUT: mode/hi/lo/duty/dur/rsvd）。
+         *   之前治具把 PC 的请求原样转发 → 长度对、内容全错 → 真 DUT 回 0B。
+         *   假 DUT 不做校验的话这个 bug 在回归里看不出来，所以这里逐字段钉住。 */
+        CHECK(s_dutfake_cur_len == DUT_CURRENT_REQ_LEN, "0x0206 的 DATA 正好 8 字节");
+        CHECK(s_dutfake_cur_mode == (uint8_t)DUT_CUR_MODE_STATIC,
+              "第 0 字节是 mode（LEN=8 时按静态通流 0）");
+        CHECK(s_dutfake_cur_hi == DUT_PHASE_B, "第 1 字节 = 上桥相 B");
+        CHECK(s_dutfake_cur_lo == DUT_PHASE_C, "第 2 字节 = 下桥相 C");
+        CHECK(s_dutfake_cur_duty == 0x01F4u, "第 3..4 字节 = 占空比 500‰");
+        CHECK(s_dutfake_cur_dur == 0x0064u, "第 5..6 字节 = 时长 100ms");
+        CHECK(s_dutfake_cur_rsvd == 0u, "第 7 字节 rsvd = 0");
+    }
+
+    /* 7b) 可选第 9 字节 = 通流模式（1 = 低频 PWM）。
+     *     台架上被测板接着三相电机时，静态全通（mode=0）等于 24V 直压两个绕组，
+     *     所以必须能用 PWM 模式 + 小占空比去试 —— 这一条钉住"mode 真的传下去了"。 */
+    {
+        uint8_t req[MGR_CUR_TEST_REQ_LEN + 1u] = { DUT_PHASE_A, DUT_PHASE_B,
+                                                   0x00, 0x14,     /* 20‰ = 2% */
+                                                   0x00, 0x64,     /* 100ms   */
+                                                   0x03, 0x00,     /* 两路都读 */
+                                                   DUT_CUR_MODE_PWM };
+        n = cur_send(seq++, req, (uint16_t)(MGR_CUR_TEST_REQ_LEN + 1u));
+        CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && d[0] == APP_STATUS_OK,
+              "LEN=9 带 mode=1 能被受理");
+        CHECK(s_dutfake_cur_mode == (uint8_t)DUT_CUR_MODE_PWM,
+              "DUT 收到的第 0 字节 = mode 1（不是静止的 0）");
+        CHECK(s_dutfake_cur_duty == 0x0014u, "PWM 模式下的占空比 20‰ 原样传下去");
+        CHECK(s_dutfake_cur_dur == 0x0064u, "时长 100ms 原样传下去");
     }
 
     /* 8) 跑完之后别的命令仍然可用 */
@@ -2026,32 +2089,32 @@ static void t21_vol_test(void)
     n = vol_send(seq++);
     CHECK(n > 0u && Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u, "有可解析的应答");
     CHECK(ac == MGR_CMD_VOL_TEST && as_ == (uint16_t)(seq - 1u), "命令与序号回显正确");
-    CHECK(dlen == MGR_VOL_TEST_RESP_LEN, "报告 71 字节");
+    CHECK(dlen == MGR_VOL_TEST_RESP_LEN, "报告 47 字节");
     CHECK(d[0] == APP_STATUS_OK, "命令状态 OK");
 
-    /* 3) 头里的 DUT 信息确实来自 INFO（不是编的） */
+    /* 3) 头里只剩"被测板状态"——版本号/通道声明不再发（INFO 里问得到）*/
     CHECK(d[1] == DUT_ST_OK, "INFO 的状态带回来了");
-    CHECK(((uint16_t)((d[2] << 8) | d[3])) == DUT_CODE_VER,
-          "dut_ver = 0x0101（取自 INFO 应答）");
-    CHECK(((uint16_t)((d[4] << 8) | d[5])) == 0x0003u,
-          "adc_mask = 0x0003（假 DUT 声明只支持 ch0/ch1）");
 
-    /* 4) 汇总：ch0/ch1 有 DUT 数据但治具侧在这个宿主环境里没有有效读数
-     *    → 那两路 NODATA；其余 7 路 DUT 没声明 → 也 NODATA。
-     *    **NODATA 不算失败**，所以状态码是 OK、ANY_BAD 不置。 */
+    /* 4) 九路全是「不判」：ch0/ch1 有 DUT 数据但治具侧在这个宿主环境里没有有效读数，
+     *    其余 7 路 DUT 没声明。**不判不算失败**，所以状态码仍是 OK。 */
     {
-        uint16_t sum = (uint16_t)((d[6] << 8) | d[7]);
-        CHECK((sum & VOL_CHK_SUM_DONE) != 0u, "汇总里 DONE 置位");
-        CHECK((sum & VOL_CHK_SUM_ANY_BAD) == 0u, "全是「不判」→ ANY_BAD 不置");
-        CHECK((sum & VOL_CHK_SUM_ANY_NODATA) != 0u, "汇总里 ANY_NODATA 置位");
+        uint8_t i, n_nodata = 0u, n_bad = 0u;
+        for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
+            uint8_t f = d[2u + ((uint16_t)i * MGR_VOL_CH_ITEM_LEN) + 4u];
+            if ((f & VOL_CHK_F_NODATA) != 0u) n_nodata++;
+            if ((f & VOL_CHK_F_DEVIATION) != 0u) n_bad++;
+        }
+        CHECK(n_nodata == (uint8_t)MEAS_CH_COUNT, "九路都是「不判」（数据缺）");
+        CHECK(n_bad == 0u, "没有一路被判超差");
         CHECK(d[0] == APP_STATUS_OK, "「不判」不算失败（状态码仍是 OK）");
     }
 
-    /* 5) 逐通道的下标位置对得上（ch4 = A 相，在 off 8+4*7 = 36） */
+    /* 5) 逐通道的下标位置对得上（ch4 = A 相，在 2+4×5 = 22） */
     {
-        uint8_t *p4 = &d[8u + (4u * MGR_VOL_CH_ITEM_LEN)];
-        CHECK((p4[0] & VOL_CHK_F_NODATA) != 0u, "ch4（A 相）是 NODATA —— 下标没串");
-        CHECK(p4[1] == 0u && p4[3] == 0u, "没判的路 jig_mv/dut_mv 都是 0（没拿 0 当读数去比）");
+        uint8_t *p4 = &d[2u + (4u * MGR_VOL_CH_ITEM_LEN)];
+        CHECK((p4[4] & VOL_CHK_F_NODATA) != 0u, "ch4（A 相）是 NODATA —— 下标没串");
+        CHECK(p4[0] == 0u && p4[1] == 0u && p4[2] == 0u && p4[3] == 0u,
+              "没判的路 治具/被测板 mV 都是 0（没拿 0 当读数去比）");
     }
 
     /* 6) DUT 缺席 → 0C 超时，状态机回 IDLE */
@@ -2152,27 +2215,19 @@ static void t22_phase_judge(void)
     n = phj_send(seq++, MGR_PHASE_MODE_PWM, 500u, 500u, 500u);
     CHECK(n > 0u && Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u, "有可解析的应答");
     CHECK(ac == MGR_CMD_PHASE_JUDGE && as_ == (uint16_t)(seq - 1u), "命令与序号回显正确");
-    CHECK(dlen == MGR_PHASE_JUDGE_RESP_LEN, "报告 34 字节");
-    CHECK(d[3] == 3u, "phase_count = 3");
-    {
-        uint16_t sum = (uint16_t)((d[1] << 8) | d[2]);
-        CHECK((sum & PHASE_CHK_SUM_DONE) != 0u, "汇总里 DONE 置位");
-        CHECK(d[0] == APP_STATUS_OK || d[0] == APP_STATUS_ERR_TEST,
-              "状态码只能是 OK 或 ERR_TEST");
-    }
-    /* 每相 10B：off 4..13 = A 相。duty_pm 必须来自**真的脉冲结果**（假波形 50% → 500）*/
-    CHECK(((uint16_t)((d[12] << 8) | d[13])) == 500u,
-          "A 相的 duty_pm = 500 —— 脉冲结果确实接进来了（假波形就是 50%）");
-    CHECK(((uint16_t)((d[22] << 8) | d[23])) == 500u, "B 相的 duty_pm = 500");
-    CHECK(((uint16_t)((d[32] << 8) | d[33])) == 500u, "C 相的 duty_pm = 500");
+    CHECK(dlen == MGR_PHASE_JUDGE_RESP_LEN, "报告 16 字节");
+    CHECK(d[0] == APP_STATUS_OK || d[0] == APP_STATUS_ERR_TEST,
+          "状态码只能是 OK 或 ERR_TEST");
 
     /* 强路径：注入的电压（母线 24V、三相各 12V）配上 500‰ 的占空比，
      * 期望值 = 500‰ × 24V = 12V，实测也是 12V → 三相都该判 OK。
      * 这条同时证明了 `MEAS_TestInject` 的收敛和 phase_chk 的整条数据通路。 */
+    /* 新布局每相 5B：从 out[1] 开始 → A 在 [1..5]、B 在 [6..10]、C 在 [11..15]
+     *   meas_mv(2) expect_mv(2) flags(1) */
     {
-        uint16_t fa = (uint16_t)((d[4] << 8) | d[5]);
-        uint16_t fb = (uint16_t)((d[14] << 8) | d[15]);
-        uint16_t fc = (uint16_t)((d[24] << 8) | d[25]);
+        uint16_t fa = d[5];
+        uint16_t fb = d[10];
+        uint16_t fc = d[15];
         CHECK((fa & PHASE_CHK_F_NODATA) == 0u,
               "A 相数据可用（注入收敛了，不是 NODATA）");
         CHECK((fa & PHASE_CHK_F_OK) != 0u, "A 相：12V 实测 vs 12V 期望 → OK");
@@ -2180,15 +2235,16 @@ static void t22_phase_judge(void)
         CHECK((fc & PHASE_CHK_F_OK) != 0u, "C 相 → OK");
         CHECK(d[0] == APP_STATUS_OK, "三相全合格 → 命令状态 OK");
     }
-    /* 期望母线电压确实按 500‰ 折出来了（12V = 12000mV）*/
-    CHECK(((uint16_t)((d[6] << 8) | d[7])) == 12000u,
-          "A 相的期望值 = 12000mV（500‰ × 24000mV）");
-    /* 容差 = max(母线×5%, 300)。母线读数会被整数 EMA 量化到 23999~24001 之间，
-     * 所以按范围断言而不是钉死一个数（这正是"别把量化误差当 bug"的那类事）。 */
+    /* 期望值确实按 500‰ × 母线折出来了（12V = 12000mV），实测值也应≈12V */
     {
-        uint16_t tol = (uint16_t)((d[10] << 8) | d[11]);
-        CHECK((tol >= 1195u) && (tol <= 1200u),
-              "A 相容差 ≈ 1200mV（母线的 5%，量化到 1195~1200 都算对）");
+        uint16_t ex = (uint16_t)((d[3] << 8) | d[4]);
+        uint16_t mv = (uint16_t)((d[1] << 8) | d[2]);
+        CHECK(ex == 12000u, "A 相的期望值 = 12000mV（500‰ × 24000mV）");
+        /* 实测值由"注入的 ADC 码 + 分压换算"决定，不是精确等于期望值；
+         * 该断言要钉的是**它在容差内**（判据用的就是这条），不是钉死一个数。
+         * 实测 10851mV vs 期望 12000mV，差 1149 ≤ 容差 1195~1200 → 判 OK。 */
+        CHECK((mv + 1200u >= ex) && (mv <= ex + 1200u),
+              "A 相实测值落在容差内（实测与期望差 ≤ 1200mV）");
     }
 
     /* 4) 高阻：该相不判（**不算失败**）*/
@@ -2196,8 +2252,8 @@ static void t22_phase_judge(void)
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u
           && dlen == MGR_PHASE_JUDGE_RESP_LEN, "带高阻相的请求也能正常回");
     {
-        uint16_t fa = (uint16_t)((d[4] << 8) | d[5]);      /* A 相 flags */
-        uint16_t fc = (uint16_t)((d[24] << 8) | d[25]);    /* C 相 flags */
+        uint16_t fa = d[5];         /* A 相 flags */
+        uint16_t fc = d[15];        /* C 相 flags */
         CHECK((fa & PHASE_CHK_F_HIZ) != 0u, "A 相高阻 → 置 HIZ 旗标");
         CHECK((fa & PHASE_CHK_F_OK) != 0u, "高阻算「不判」，旗标里带 OK（不是失败）");
         CHECK((fc & PHASE_CHK_F_HIZ) == 0u, "C 相没填高阻 → 不置 HIZ");
@@ -2375,21 +2431,18 @@ static void t24_enc_judge(void)
     /* 2) 三边一致 → 合格。exp 由"脉冲数 ×2"算出来，这里顺带把它验了 */
     n = encj_send(seq++, 1000u, 2000u, 1u, 2000u, 4000u, 2u, 0u, 2000u, 4000u, 2u, 1, avb);
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_ENC_JUDGE_RESP_LEN,
-          "应答 29 字节");
+          "应答 12 字节");
     CHECK(ac == MGR_CMD_ENC_JUDGE && as_ == (uint16_t)(seq - 1u), "命令号与序号回显");
     if (dlen == MGR_ENC_JUDGE_RESP_LEN) {
-        uint16_t sum = (uint16_t)((d[1] << 8) | d[2]);
-
         CHECK(d[0] == APP_STATUS_OK, "三边一致 → 状态 OK");
-        CHECK((sum & ENC_CHK_SUM_DONE) != 0u, "汇总 DONE 置位");
-        CHECK((sum & ENC_CHK_SUM_ANY_BAD) == 0u, "没有不合格");
-        CHECK(d[3] == 3u, "路数 = 3");
-        /* 每路 7B：flags@0, exp@1..2, u2@3..4, dut@5..6 → A 相基址 8 */
-        CHECK(((uint16_t)((d[9] << 8) | d[10])) == 2000u,
-              "A 相 exp = 2000（1000 个脉冲 × 2 个边沿）");
-        CHECK(d[8]  == ENC_CHK_F_OK, "A 相 flags = OK");
-        CHECK(d[15] == ENC_CHK_F_OK, "B 相 flags = OK");
-        CHECK(d[22] == ENC_CHK_F_OK, "Z 相 flags = OK");
+        CHECK(d[2] == 1u, "对侧结论 = 1（有 U2 数据且一致）");
+        CHECK(d[1] == 1u, "方向 = +1");
+        /* 三相各 3B：边沿数(2) + 旗标(1) → A@3..5, B@6..8, Z@9..11 */
+        CHECK(((uint16_t)((d[3] << 8) | d[4])) == 2000u,
+              "A 相被测板数到 2000 个边沿");
+        CHECK(d[5] == ENC_CHK_F_OK, "A 相 flags = OK");
+        CHECK(d[8] == ENC_CHK_F_OK, "B 相 flags = OK");
+        CHECK(d[11] == ENC_CHK_F_OK, "Z 相 flags = OK");
     }
 
     /* 3) DUT 那个数少了 → 不合格，且错误要落在 DUT 那一位上 */
@@ -2397,13 +2450,11 @@ static void t24_enc_judge(void)
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_ENC_JUDGE_RESP_LEN,
           "DUT 不符也能正常应答");
     if (dlen == MGR_ENC_JUDGE_RESP_LEN) {
-        uint16_t sum = (uint16_t)((d[1] << 8) | d[2]);
-
         CHECK(d[0] == APP_STATUS_ERR_TEST, "状态码 = 05（判定不合格，不是通讯错误）");
-        CHECK((sum & ENC_CHK_SUM_ANY_BAD) != 0u, "汇总 ANY_BAD");
-        CHECK((d[15] & ENC_CHK_F_DUT_DIFF) != 0u, "B 相：DUT_DIFF 置位");
-        CHECK((d[15] & ENC_CHK_F_U2_DIFF) == 0u, "B 相：U2 对得上，不报 U2_DIFF");
-        CHECK((d[8] & ENC_CHK_F_OK) != 0u, "A 相仍然 OK（错误只落在 B 相）");
+        CHECK((d[8] & ENC_CHK_F_DUT_DIFF) != 0u, "B 相：DUT_DIFF 置位");
+        CHECK((d[8] & ENC_CHK_F_U2_DIFF) == 0u, "B 相：U2 对得上，不报 U2_DIFF");
+        CHECK((d[5] & ENC_CHK_F_OK) != 0u, "A 相仍然 OK（错误只落在 B 相）");
+        CHECK(d[2] == 1u, "对侧仍然一致（错在被测板）");
     }
 
     /* 4) 只有 U2 数据（DUT 还没实现）→ 不判，但**不能**判合格 */
@@ -2412,12 +2463,10 @@ static void t24_enc_judge(void)
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_ENC_JUDGE_RESP_LEN,
           "只有 U2 数据也能回");
     if (dlen == MGR_ENC_JUDGE_RESP_LEN) {
-        uint16_t sum = (uint16_t)((d[1] << 8) | d[2]);
-
-        CHECK((sum & ENC_CHK_SUM_ANY_NODATA) != 0u, "汇总 ANY_NODATA");
-        CHECK((sum & ENC_CHK_SUM_ANY_BAD) == 0u, "缺数据不等于不合格");
+        CHECK((d[5] & ENC_CHK_F_NODATA) != 0u, "A 相：缺数据 → NODATA 旗标");
+        CHECK((d[5] & ENC_CHK_F_OK) == 0u, "缺数据时不给 OK 旗标");
         CHECK(d[0] == APP_STATUS_OK, "缺数据 → 状态仍 OK（不冤判）");
-        CHECK((d[8] & ENC_CHK_F_OK) == 0u, "缺数据时不给 OK 旗标");
+        CHECK(d[2] == 1u, "对侧有数据且一致（DUT 缺席不影响对侧结论）");
     }
 
     /* 5) U2 丢过边沿 → 警告位带上（不影响合格判定） */
@@ -2425,12 +2474,10 @@ static void t24_enc_judge(void)
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_ENC_JUDGE_RESP_LEN,
           "带丢沿计数也能回");
     if (dlen == MGR_ENC_JUDGE_RESP_LEN) {
-        uint16_t sum = (uint16_t)((d[1] << 8) | d[2]);
-        uint16_t lost = (uint16_t)((d[4] << 8) | d[5]);
-
-        CHECK((sum & ENC_CHK_SUM_U2_LOST) != 0u, "汇总置 U2_LOST");
-        CHECK(lost == 7u, "丢沿次数原样带回");
+        /* 丢沿计数（U2 自报）**不再上报**：它是治具内部的自检细节，
+         * 判定上本来就"只警告不判失败"，精简后省掉这 2 字节。 */
         CHECK(d[0] == APP_STATUS_OK, "只丢沿不判失败");
+        CHECK((d[5] & ENC_CHK_F_OK) != 0u, "丢沿不影响合格结论");
     }
 }
 
@@ -2598,6 +2645,144 @@ static void t26_one_cmd_flows(void)
 }
 #endif /* JIG_DUT_LINK */
 
+/*==============================================================================
+ * T27: 0x001F / 0x0020 —— 给 DUT 发**原始字节**（对面还没实现 0x02xx 时的过渡）
+ *----------------------------------------------------------------------------
+ * 现场用法：FOC 板现有的是 ASCII 命令 `AS:S800`（转）/`AS:S0`（停）。
+ * 用这两条命令先证明"USART 这条线通了"，不必等对面实现整套帧协议。
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+static uint16_t raw_send(uint16_t seq, const uint8_t *data, uint16_t len, int max_ms)
+{
+    uint8_t  raw[8 + 64 + 2];
+    uint16_t n = Frame_Build(raw, MGR_CMD_DUT_SEND, seq, data, len);
+
+    tx_len = 0;
+    APP_USB_Receive(raw, n);
+    /* 窗口是按毫秒等的，所以要推虚拟时钟；每次 1ms 足够细 */
+    for (int i = 0; (i < max_ms) && (tx_len == 0); i++) {
+        host_advance(1u);
+        APP_Run();
+    }
+    return tx_len;
+}
+
+static void t27_dut_raw(void)
+{
+    static const uint8_t as_start[] = { 'A', 'S', ':', 'S', '8', '0', '0' };  /* AS:S800 */
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t n, ac, as_, dlen, seq = 0x0900u;
+
+    printf("\n-- T27 0x001F / 0x0020 DUT 原始字节收发 --\n");
+
+    /* 1) 发 "AS:S800"（默认 200ms 窗口），对面不回字 */
+    s_dut_raw_len = 0;
+    {
+        uint8_t req[2 + sizeof(as_start)] = { 0x00, 0xC8 };   /* 200 ms */
+        memcpy(&req[2], as_start, sizeof(as_start));
+        n = raw_send(seq++, req, (uint16_t)sizeof(req), 400);
+    }
+    CHECK(n > 0u && Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u,
+          "0x001F 有应答");
+    CHECK(ac == MGR_CMD_DUT_SEND && as_ == (uint16_t)(seq - 1u), "命令与序号回显");
+    CHECK(dlen == 5u, "没回字时应答正好 5 字节（状态+发出数+收到数）");
+    CHECK(d[0] == APP_STATUS_OK, "状态 00：发出去了就算 OK（对面不回不是错误）");
+    CHECK((((uint16_t)d[1] << 8) | d[2]) == (uint16_t)sizeof(as_start),
+          "实际发出字节数 = 7");
+    CHECK((((uint16_t)d[3] << 8) | d[4]) == 0u, "收到字节数 = 0");
+    CHECK(s_dut_raw_len == (uint16_t)sizeof(as_start) &&
+          memcmp(s_dut_raw, as_start, sizeof(as_start)) == 0,
+          "DUT 口收到的就是 AS:S800 这 7 个字节（原样）");
+
+    /* 2) 对面回字：把 "OK\\r\\n" 塞进 DUT 口，再发一次 AS:S0 */
+    s_dut_raw_len = 0;
+    {
+        static const uint8_t stop[] = { 'A', 'S', ':', 'S', '0' };
+        uint8_t req[2 + sizeof(stop)] = { 0x00, 0x00 };       /* 0 = 默认 200ms */
+        uint8_t reply[] = { 'O', 'K', 0x0D, 0x0A };
+        uint16_t i;
+
+        memcpy(&req[2], stop, sizeof(stop));
+        /* 先让 U1 把请求发出去，再把"对端的回字"塞进接收落点 */
+        {
+            uint8_t  framebuf[8 + 16 + 2];
+            uint16_t fn = Frame_Build(framebuf, MGR_CMD_DUT_SEND, seq,
+                                      req, (uint16_t)sizeof(req));
+            tx_len = 0;
+            APP_USB_Receive(framebuf, fn);
+            for (i = 0u; i < 4u; i++) {
+                u2_deliver(&s_rxp1, &huart1, reply[i]);
+            }
+            for (int k = 0; (k < 400) && (tx_len == 0); k++) {
+                host_advance(1u);
+                APP_Run();
+            }
+        }
+        seq++;
+        n = tx_len;
+        CHECK(n > 0u && Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u,
+              "第二次 0x001F 有应答");
+        CHECK(dlen == 9u, "收到 4 字节 → 应答 5+4 = 9 字节");
+        CHECK((((uint16_t)d[3] << 8) | d[4]) == 4u, "收到字节数 = 4");
+        CHECK(d[5] == 'O' && d[6] == 'K' && d[7] == 0x0D && d[8] == 0x0A,
+              "回的字原样带回来（含 \\r\\n 这种非可打印字节）");
+        CHECK(s_dut_raw_len == (uint16_t)sizeof(stop) &&
+              memcmp(s_dut_raw, stop, sizeof(stop)) == 0,
+              "DUT 口收到的是 AS:S0");
+    }
+
+    /* 3) 0x0020 只读：能把空闲期攒下的字节取走，且读后清空 */
+    {
+        uint8_t rq[8 + 2];
+        uint16_t rn;
+        uint8_t hello[] = { 'H', 'I' };
+
+        u2_deliver(&s_rxp1, &huart1, hello[0]);
+        u2_deliver(&s_rxp1, &huart1, hello[1]);
+        pump(3);                                       /* 主循环把字节嗅探进去 */
+
+        tx_len = 0;
+        rn = Frame_Build(rq, MGR_CMD_DUT_RECV, seq++, 0, 0u);
+        APP_USB_Receive(rq, rn);
+        pump(30);
+        CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u,
+              "0x0020 有应答");
+        CHECK(dlen == 5u && d[0] == APP_STATUS_OK, "0x0020 状态 00，3+2 字节");
+        CHECK((((uint16_t)d[1] << 8) | d[2]) == 2u, "0x0020 报收到 2 字节");
+        CHECK(d[3] == 'H' && d[4] == 'I', "0x0020 内容是 HI");
+
+        /* 读后清空：再来一次应该是 0 字节 */
+        tx_len = 0;
+        rn = Frame_Build(rq, MGR_CMD_DUT_RECV, seq++, 0, 0u);
+        APP_USB_Receive(rq, rn);
+        pump(30);
+        CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+              && dlen == 3u && d[1] == 0u && d[2] == 0u,
+              "0x0020 读后清空：第二次 0 字节");
+    }
+
+    /* 4) 参数校验 */
+    {
+        uint8_t req[2] = { 0x00, 0xC8 };              /* 只有头、没有要发的字节 */
+        n = raw_send(seq++, req, 2u, 60);
+        CHECK(n > 0u && Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u
+              && dlen == 1u && d[0] == APP_STATUS_ERR_PARAM,
+              "0x001F 没有要发的字节 → 0B");
+
+        tx_len = 0;
+        {
+            uint8_t rq[8 + 1 + 2];
+            uint16_t rn = Frame_Build(rq, MGR_CMD_DUT_RECV, seq++, (const uint8_t *)"x", 1u);
+            APP_USB_Receive(rq, rn);
+        }
+        pump(30);
+        CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+              && dlen == 1u && d[0] == APP_STATUS_ERR_PARAM,
+              "0x0020 带参数 → 0B");
+    }
+}
+#endif /* JIG_DUT_LINK */
+
 int main(void)
 {
     printf("=== FOC JIG U1 全链路宿主仿真 (PC帧→上传→SPI Flash→SWD→被烧板) ===\n\n");
@@ -2629,6 +2814,9 @@ int main(void)
 #if (JIG_DUT_LINK != 0)
     t25_run_all();              /* 0x0010 一键全流程：需要 DUT 链路 */
     t26_one_cmd_flows();        /* 0x0019/0x001A/0x001B 单项打包 */
+#if (JIG_DUT_LINK != 0)
+    t27_dut_raw();              /* 0x001F/0x0020 DUT 原始字节收发 */
+#endif
 #endif
 #if (JIG_DUT_LINK == 0)
     t19_enc_peer();             /* ⑤ 回环：需要假 U2，只在非 DUT 构建里跑 */

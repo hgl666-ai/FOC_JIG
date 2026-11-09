@@ -264,7 +264,7 @@ int main(void)
 
         CHECK(PULSE_PACK_LEN == 45u, "布局长度 45B");
         CHECK(PULSE_PACK_LEN <= 64u, "装得进链路单帧(64)");
-        CHECK(PULSE_PACK_RESP_LEN == 91u, "0x000F 应答总长 91B(状态+本片45+对侧45)");
+        CHECK(PULSE_PACK_RESP_LEN == 23u, "0x000F 应答总长 23B(状态1+对侧1+三相×7)");
         CHECK(PULSE_PACK_RESP_LEN <= 256u, "装得进 PC 单帧(256)");
 
         PULSE_Init();

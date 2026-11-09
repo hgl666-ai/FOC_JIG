@@ -46,6 +46,8 @@ typedef struct {
     uint32_t rx_err;        /* HAL 报的帧错/噪声/溢出次数 */
     uint32_t rx_wrap;       /* 接收环回卷次数（诊断"是不是一直在塞"） */
     uint32_t tx_err;        /* HAL 拒绝发起发送的次数（正常应恒为 0；非 0 = 驱动/外设状态不同步） */
+    uint32_t rx_rearm;      /* "重挂接收失败"被强行救回来的次数（2026-11-05 加；
+                             * 非 0 = RX 曾被静默关掉过，见 uart_rx_rearm 的注释） */
 } uart_stats_t;
 
 typedef struct {

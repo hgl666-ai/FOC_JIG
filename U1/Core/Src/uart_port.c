@@ -194,6 +194,35 @@ const uart_stats_t *UartPort_Stats(uart_id_t id)
     return &s_ports[id].st;
 }
 
+/*--------------------------------------------------------------------------
+ * 自愈式重挂接收
+ *----------------------------------------------------------------------------
+ * `HAL_UART_Receive_IT` 是我们这套"每字节一次"接收的命门：它在**每次接收完成**
+ * 时必须被重新调用，否则 RXNEIE/EIE 都是关的 —— 后面来的字节既不进中断、
+ * 也不会产生 ORE 中断，串口**静默哑掉**，只有等某个外部事件（真正的 ORE 等）
+ * 才可能恢复。现场表现就是"第一条命令只收到前 7 个字节，重试才通"。
+ *
+ * 所以这里失败时不能只是"算了"：
+ *   ① 先把 HAL 的内部状态强行拉回"可以重挂"（Lock / RxState 两类残留）；
+ *   ② 再挂一次；仍失败才记 rx_err（让哑过这件事统计上看得见）。
+ *------------------------------------------------------------------------*/
+static void uart_rx_rearm(uart_port_t *p)
+{
+    if ((p == 0) || (p->huart == 0)) {
+        return;
+    }
+    if (HAL_UART_Receive_IT(p->huart, &p->rx_ch, 1u) == HAL_OK) {
+        return;
+    }
+    /* 只在"重挂失败"这条罕见路径上碰 HAL 内部字段：不清掉的话这一路就永久哑了 */
+    p->st.rx_rearm++;
+    p->huart->RxState = HAL_UART_STATE_READY;
+    p->huart->Lock    = HAL_UNLOCKED;
+    if (HAL_UART_Receive_IT(p->huart, &p->rx_ch, 1u) != HAL_OK) {
+        p->st.rx_err++;                 /* 还是挂不上：记一次，别静默 */
+    }
+}
+
 void UartPort_OnRxComplete(uart_id_t id)
 {
     uart_port_t *p;
@@ -214,10 +243,8 @@ void UartPort_OnRxComplete(uart_id_t id)
         }
         p->rx_head = next;
     }
-    /* 重新挂上下一字节的接收 */
-    if (p->huart != 0) {
-        (void)HAL_UART_Receive_IT(p->huart, &p->rx_ch, 1u);
-    }
+    /* 重新挂上下一字节的接收（失败要自愈，见 uart_rx_rearm 的注释）*/
+    uart_rx_rearm(p);
 }
 
 void UartPort_OnTxComplete(uart_id_t id)
@@ -258,7 +285,7 @@ void UartPort_OnError(uart_id_t id)
      * 再调 HAL_UART_ErrorCallback()。如果这里不重新挂上，这一路从此再也收不到
      * 任何字节（而且不会有任何报错），是"串口突然哑了"最典型的成因。
      * 非 ORE 的软错误(帧错/噪声)下 HAL 仍在收，重挂会返回 HAL_BUSY，无害。 */
-    if ((p->started != 0u) && (p->huart != 0)) {
-        (void)HAL_UART_Receive_IT(p->huart, &p->rx_ch, 1u);
+    if (p->started != 0u) {
+        uart_rx_rearm(p);
     }
 }

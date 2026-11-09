@@ -23,7 +23,8 @@ typedef enum {
     APP_STATE_ENC_PEER,      /* 向 U2 要编码器计数中 (0x0013) */
     APP_STATE_CUR,           /* ⑥ 相电流检测流程中 (0x0014; 需要 JIG_DUT_LINK=1) */
     APP_STATE_VOL,           /* ② 电压检测流程中 (0x0015; 需要 JIG_DUT_LINK=1) */
-    APP_STATE_RUN            /* 0x0010 一键全流程编排中 (需要 JIG_DUT_LINK=1) */
+    APP_STATE_RUN            /* 0x0010 一键全流程编排中 (需要 JIG_DUT_LINK=1) */,
+    APP_STATE_DUT_RAW        /* 0x001F 给 DUT 发原始字节、等它回字的这段窗口 (appended 2026-11-06) */
 } APP_State_t;
 
 extern APP_State_t app_state;

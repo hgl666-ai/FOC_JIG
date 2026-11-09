@@ -22,19 +22,26 @@
 
 void UartCfg_Init(void)
 {
-#if (JIG_PC_LINK == JIG_PC_LINK_UART)
-    /* 特殊测试：USART1 (PA9/PA10) 让给 PC 的 USB-TTL。
-     * JIG_DUT_LINK 此时必为 0（jig_mode.h 里有 #error 保证），
-     * 所以 APP_Init 里也不会去建 DUT 链路对象。 */
+#if (JIG_PC_LINK == JIG_PC_LINK_UART) && (JIG_U2_LINK == 0)
+    /* 台架形态（jig_mode.h §3.4.1）：USART1 → PC 的 USB-TTL，USART3 → 被测板。
+     * U2 已由 H3/H4 跳线从内部链路脱离，所以 PORT_1 上只有一个角色 = DUT。
+     * ⚠ 这一支里绝不能再 InitPort(PORT_1) 两次（第二次会把 tx/rx 环清掉）。 */
+    UartPort_InitPort(UART_CFG_PORT_PC,  &huart1);
+    UartPort_InitPort(UART_CFG_PORT_DUT, &huart3);
+    UartPort_Start(UART_CFG_PORT_PC);
+    UartPort_Start(UART_CFG_PORT_DUT);
+#elif (JIG_PC_LINK == JIG_PC_LINK_UART)
+    /* 特殊测试：USART1 (PA9/PA10) 让给 PC 的 USB-TTL；还没有 DUT 链路 */
     UartPort_InitPort(UART_CFG_PORT_UART1, &huart1);
-#else
-    UartPort_InitPort(UART_CFG_PORT_DUT,  &huart1);   /* USART1 PA9/PA10 → 被测板 */
-#endif
-    UartPort_InitPort(UART_CFG_PORT_LINK, &huart3);   /* USART3 PB10/PB11 → U2     */
-
-    /* 先把 TX 队列状态清零再开接收: Start 内部只会挂上第一个 RX 中断 */
+    UartPort_InitPort(UART_CFG_PORT_LINK,  &huart3);
     UartPort_Start(UART_CFG_PORT_UART1);
     UartPort_Start(UART_CFG_PORT_LINK);
+#else
+    UartPort_InitPort(UART_CFG_PORT_DUT,  &huart1);   /* USART1 PA9/PA10 → 被测板 */
+    UartPort_InitPort(UART_CFG_PORT_LINK, &huart3);   /* USART3 PB10/PB11 → U2     */
+    UartPort_Start(UART_CFG_PORT_DUT);
+    UartPort_Start(UART_CFG_PORT_LINK);
+#endif
 }
 
 /*==============================================================================
@@ -58,11 +65,22 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
+/* 诊断用：USART1 见过的错误码按位或累加（**只增不清**）。
+ * 为什么不在心跳里直接读 huart1.ErrorCode：HAL 在 `HAL_UART_Receive_IT`
+ * 入口会把它重置成 NONE，等心跳打出来时早就被清干净了（永远是 0x00）。
+ * 位含义（F1 HAL）：0x01 PE 校验 · 0x02 NE 噪声 · 0x04 FE 帧错 · 0x08 ORE 溢出
+ *   → 0x08 = CPU/USART 没来得及取走上一字节（固件侧）
+ *   → 0x02/0x04 = 电气/线材（换线、换适配器） */
+volatile uint32_t g_uart1_err_or;
+
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     /* 先清 ORE 再让 uart_port 重挂接收：ORE 若不清，重挂后会立刻再进一次
      * 错误中断，形成"错误中断风暴"。清 ORE 的寄存器侧动作属于 HAL 细节，
      * 所以放在这个文件里，而"重挂接收"是驱动不变量，放在 uart_port.c。 */
+    if (huart == &huart1) {
+        g_uart1_err_or |= (uint32_t)huart->ErrorCode;   /* 趁 HAL 还没清，先记下来 */
+    }
     __HAL_UART_CLEAR_OREFLAG(huart);
 
     if (huart == &huart1) {

@@ -26,9 +26,12 @@
 /* 头部 6 + 3 相 × 13 = 45 */
 #define PULSE_PACK_LEN       45u
 
-/* 0x000F 脉冲捕获的应答长度 = 状态1 + 本片45 + 对侧45 = 91
- * （ADC 测量走另一条命令 0x000E，应答 77B，两条命令各自独立不糅在一起） */
-#define PULSE_PACK_RESP_LEN  91u
+/* 0x000F 脉冲捕获的**应答**长度（发给 PC 的）= 状态(1) + 对侧结论(1) + 3相×7 = 23
+ * ⚠ 别和 PULSE_PACK_LEN(45) 搞混：45 字节是 **U1↔U2 交换用的线格式**（要保全精度），
+ *   而发给 PC 的只需要"每相周期 + 占空比 + 旗标" —— 高电平、边沿数都能算出来。
+ *   对侧也只给一个结论字节：0=没有对侧数据 1=一致 2=不一致。 */
+#define PULSE_PACK_RESP_LEN  23u
+#define PULSE_RESP_ITEM_LEN  7u          /* 周期ns(4) + 占空比‰(2) + 旗标(1) */
 
 /* 装得进链路单帧（LINK_MAX_PAYLOAD=64）与 PC 单帧 DATA（256） */
 #ifndef PULSE_PACK_LINK_MAX_PAYLOAD
@@ -69,6 +72,17 @@ uint8_t  PulsePack_Compare(const pulse_snapshot_t *out_side,
 /* 两端周期允许的相对偏差（ppm）：10000 = 1% */
 #ifndef PULSE_PEER_TOL_PPM
 #define PULSE_PEER_TOL_PPM   10000u
+#endif
+
+/* ---- 布局自检（放在文件末尾：这里 PULSE_PACK_FRAME_MAX_DATA 等宏都已定义）---- */
+#if (PULSE_PACK_RESP_LEN != (2u + (3u * PULSE_RESP_ITEM_LEN)))
+#error "PULSE_PACK_RESP_LEN 必须等于 头2 + 三相x7"
+#endif
+#if (PULSE_PACK_RESP_LEN > PULSE_PACK_FRAME_MAX_DATA)
+#error "脉冲应答装不进单帧"
+#endif
+#if (PULSE_PACK_LEN > PULSE_PACK_LINK_MAX_PAYLOAD)
+#error "U1-U2 交换用的 45 字节块必须装得进链路单帧(64)"
 #endif
 
 #endif /* __PULSE_PACK_H */

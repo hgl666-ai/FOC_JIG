@@ -33,8 +33,19 @@ typedef struct { int _unused; } SPI_HandleTypeDef;
 #define USART2 ((USART_TypeDef *)0x40004400u)
 #define USART3 ((USART_TypeDef *)0x40004800u)
 
-/* uart_port 驱动需要 Instance 来区分端口，所以这里给出真实字段 */
-typedef struct { USART_TypeDef *Instance; } UART_HandleTypeDef;
+/* uart_port 驱动需要 Instance 来区分端口，所以这里给出真实字段。
+ * ⚠ Lock / RxState 也必须**真的存在**：uart_port.c 在"重挂接收失败"那条
+ *   自愈路径上会把它们强行拉回可用状态（2026-11-05 修"第一条命令只收到 7 字节"
+ *   时加的）。宿主里如果只是空壳类型，这条路径就编不过 —— 而它恰恰是最需要
+ *   被单测覆盖的一条，所以这里照真实 HAL 补上。 */
+typedef enum { HAL_UNLOCKED = 0, HAL_LOCKED = 1 } HAL_LockTypeDef;
+typedef enum { HAL_UART_STATE_RESET = 0, HAL_UART_STATE_READY, HAL_UART_STATE_BUSY } HAL_UART_StateTypeDef;
+typedef struct {
+    USART_TypeDef        *Instance;
+    volatile HAL_LockTypeDef  Lock;
+    volatile HAL_UART_StateTypeDef RxState;
+    volatile uint32_t     ErrorCode;      /* uart_cfg.c 的错误码累加要读它 */
+} UART_HandleTypeDef;
 typedef struct { int _unused; } GPIO_TypeDef;
 
 #define GPIOA ((GPIO_TypeDef *)0x40010800u)

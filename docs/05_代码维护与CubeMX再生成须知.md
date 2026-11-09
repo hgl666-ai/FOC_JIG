@@ -202,22 +202,28 @@ U1 与 U2 是同一颗 MCU（STM32F103C8T6），协议帧 / 串口驱动 / 链�
 | Define | 谁用 | 说明 |
 |---|---|---|
 | `JIG_HAS_DEBUG_UART=1` | 只有 U1 工程 | U1 有 `bsp_uart.c`；U2 没有 → 打印恒关 |
-| `JIG_PC_LINK=1` | 只有 U1 的**特殊测试** Target（`U1_C6T6_32K`） | PC 口从 USB CDC 改成 USART1（PA9/PA10，115200 8N1）。协议完全不变；与 `JIG_DUT_LINK=1`、调试打印**互斥**（`jig_mode.h` 里有 `#error`）。省 ~10.9 KB ROM / ~3.9 KB RAM，才能塞进 C6T6 的 32 KB / 10 KB |
+| `JIG_PC_LINK=1` | U1 的 `U1_UART` / `U1_DUT` / `U1_C6T6_32K` 三个 Target | PC 口从 USB CDC 改成 USART1（PA9/PA10，115200 8N1）。协议完全不变；与调试打印**互斥**（`jig_mode.h` 里有 `#error`）。省 ~10.9 KB ROM / ~3.9 KB RAM |
+| `JIG_DUT_LINK=1` | **只有 `U1_DUT`** | 打开到被测 FOC 板的链路（`USART1` 或台架形态下的 `USART3`）+ `0x0011`/`0x0014`~`0x001B`/`0x0010`。**它是 ①~⑥ 五项功能的总开关**，没编就是一律 `FF NIY` |
+| `JIG_U2_LINK` | 派生（不必手填） | `JIG_PC_LINK=UART` 且 `JIG_DUT_LINK=1` 时自动为 **0**：U2 从内部链路退出，USART3 让给被测板（`jig_mode.h §3.4.1`）。要强制保留 U2 会直接 `#error` |
 
 > 已删除的开关：`BSP_ISP_UART_ENABLE`、`ISP_VERIFY_ENABLED`、`ISP_CTRL_PINS_CONFIRMED`
 > （ISP 方案整体退役，见 `docs/02` 附录 A）。
 
 ---
 
-## 2.7 两个 Keil Target 的用途（2026-10-28 定案，2026-11-03 增补）
+## 2.7 四个 Keil Target 的用途（2026-10-28 定案，2026-11-03 / 11-04 增补）
 
 | Target | 芯片 | 用途 | 产物 |
 |---|---|---|---|
-| **`U1`** | **STM32F103C8T6**（64 KB / 20 KB） | ✅ **出厂/产线唯一形态**：PC 口走 USB CDC，一根 USB 线 | `U1/MDK-ARM/U1/U1.hex`（ROM **43892** / 65536，RAM 12880 / 20480） |
-| **`U1_UART`** | STM32F103C8T6（64 KB / 20 KB） | 🔧 **调试形态**：PC 口走 USART1（PA9/PA10），**USB 整套不编进固件**。USB 枚举有问题时用它继续验证烧录功能 | `U1/MDK-ARM/U1_UART/U1_UART.hex` |
+| **`U1`** | **STM32F103C8T6**（64 KB / 20 KB） | ✅ **最终产品形态：一台治具一份固件，烧录 + 五项功能全在这一个构建里**（2026-11-05 合并：`JIG_PC_LINK=USB` + `JIG_DUT_LINK=1` + `JIG_U2_LINK=1`）。PC 走 USB CDC，被测板口 = USART1，U2 = USART3 | `U1/MDK-ARM/U1/U1.hex`（Flash **47716** / 65536 = 73%，RAM **14344** / 20480 = 70%） |
+| **`U1_UART`** | STM32F103C8T6（64 KB / 20 KB） | 🔧 **只烧录、不测功能的临时形态**：PC 口走 USART1，**没有 DUT 链路**，USB 整套不编进固件。USB 枚举有问题时用它继续验证烧录 | `U1/MDK-ARM/U1_UART/U1_UART.hex`（ROM 32252，RAM 8984） |
+| **`U1_DUT`** | STM32F103C8T6（64 KB / 20 KB） | 🔧 **台架形态（USB 坏了时的临时方案）**：PC 口走 USART1、**被测板口走 USART3**（`JIG_U2_LINK=0`，U2 让位）。①电压 ②脉冲 ③三相 ④编码器 ⑤相电流 全靠它，**不能用来烧录**。接线与测试顺序见 `docs/21` | `U1/MDK-ARM/U1_DUT/U1_DUT.hex`（ROM 36144 / 65536，RAM 9744 / 20480） |
 | `U1_C6T6_32K` | STM32F103C6T6（32 KB / 10 KB） | ⛔ **已退役**（见下），保留仅为将来换到真有 SPI2 的 32 KB 片时可直接用 | `U1/MDK-ARM/U1_C6T6_32K/U1_C6T6_32K.hex` |
 
-三个 Target **共用同一套源文件**，差别只有 Define（`JIG_PC_LINK=1`）、输出目录、`IROM`/`IRAM` 上限。
+> **产品形态只有一个：`U1`。** `U1_UART` / `U1_DUT` 都是"USB 那对 D+/D- 还没修好"期间的旁路，
+> USB 一恢复就应该只用 `U1` —— 它同时具备烧录（SWD 写 FOC 板）与五项功能测试，不需要分两台设备。
+
+四个 Target **共用同一套源文件**，差别只有 Define（`JIG_PC_LINK=1` / `JIG_DUT_LINK=1`）、输出目录、`IROM`/`IRAM` 上限。
 所以改代码只需要改一次，各 Target 分别编译即可；**切 Target 不动代码**。
 
 > **SWD 行为在三者之间完全一致**（2026-11-03 验证）：`swd_*.c` / `cortex_m.c` / `stm32f4_flash.c`

@@ -43,7 +43,8 @@
                                            *   + 每路 9B × 2：flags(1)+jig_idle(2)+jig_on(2)
                                            *                    +dut_idle(2)+dut_on(2) */
 #define MGR_CUR_TEST_REQ_LEN    8u
-#define MGR_CUR_TEST_RESP_LEN   22u       /* 4 + 9×2 */
+#define MGR_CUR_TEST_RESP_LEN   12u       /* 2 + 5×2：状态+被测板状态 + 两路各5字节 */
+#define MGR_CUR_ITEM_LEN        5u        /* 治具变化量(2, 有符号) + 被测板变化量(2, 有符号) + 旗标(1) */
 #define MGR_CUR_TIMEOUT_MS      100u      /* 每个 DUT 往返的上限 */
 #define MGR_CUR_SETTLE_MS       20u       /* 通流之后再等一会儿（电流稳定 + DUT 快照更新） */
 /*── ② 电压检测：治具 9 路 vs 被测板自己报的 ──*/
@@ -53,8 +54,8 @@
                                            * 应答 71B = 头 8B + 每路 7B × 9
                                            *   头: status(1)+dut_st(1)+dut_ver(2)+adc_mask(2)+sum(2)
                                            *   每路: flags(1)+jig_mv(2)+dut_mv(2)+err_mv(2, 有符号) */
-#define MGR_VOL_TEST_RESP_LEN   71u       /* 8 + 7×9 */
-#define MGR_VOL_CH_ITEM_LEN     7u
+#define MGR_VOL_TEST_RESP_LEN   47u       /* 2 + 5×9：状态+被测板状态 + 九路各5字节 */
+#define MGR_VOL_CH_ITEM_LEN     5u        /* 治具mV(2) + 被测板mV(2) + 旗标(1) */
 /*── ④ 三相输出判据：对**已有的**测量/脉冲结果做判定，不需要新的采集流程 ──
  * 用法（PC 侧）：先 0x0011 透传 DUT_PWM 让被测板输出已知 PWM → 0x000F mode=1 开窗采集
  *              → 再发本命令判定。治具不需要自己串流程，PC 按顺序发即可。 */
@@ -65,8 +66,8 @@
                                            *   每相: flags(2) + expect_mv(2) + err_mv(2, 有符号)
                                            *         + tol_mv(2) + duty_pm(2) */
 #define MGR_PHASE_JUDGE_REQ_LEN  7u
-#define MGR_PHASE_JUDGE_RESP_LEN 34u      /* 4 + 10×3 */
-#define MGR_PHASE_ITEM_LEN       10u
+#define MGR_PHASE_JUDGE_RESP_LEN 16u      /* 1 + 5×3：状态 + 三相各5字节 */
+#define MGR_PHASE_ITEM_LEN       5u       /* 实测mV(2) + 期望mV(2) + 旗标(1) */
 #define MGR_PHASE_MODE_STATIC    0u
 #define MGR_PHASE_MODE_PWM       1u
 #define MGR_PHASE_DUTY_HIZ       0xFFFFu  /* 请求里 duty 填这个 = 该相不判 */
@@ -79,8 +80,8 @@
                                            *            +DUT方向(1)+保留(1) + 3 路 × 7B */
 #define MGR_ENC_JUDGE_REQ_LEN     38u     /* exp_a/b/z(6) + tol(2) + u2_a/b/z(12) + u2_lost(2)
                                            *   + dut_a/b/z(12) + dut_dir(1) + 可用标志(1) + rsvd(2) */
-#define MGR_ENC_JUDGE_RESP_LEN    29u     /* 8 + 3×7 */
-#define MGR_ENC_JUDGE_ITEM_LEN    7u      /* flags(1)+exp(2)+u2(2)+dut(2)，两端饱和到 u16 */
+#define MGR_ENC_JUDGE_RESP_LEN    12u     /* 3 + 3×3：状态+方向+对侧 + 三相各3字节 */
+#define MGR_ENC_JUDGE_ITEM_LEN    3u      /* 被测板边沿数(2) + 旗标(1) */
 #define MGR_ENC_JUDGE_AV_U2       0x01u   /* 请求里的"可用标志"：有 U2 数据 */
 #define MGR_ENC_JUDGE_AV_DUT      0x02u   /* 请求里的"可用标志"：有 DUT 数据 */
 
@@ -117,9 +118,10 @@
 #define MGR_CMD_PULSE_TEST      0x0019u   /* ③ 一条命令 */
 #define MGR_CMD_PHASE_TEST      0x001Au   /* ④ 一条命令 */
 #define MGR_CMD_ENC_TEST        0x001Bu   /* ⑤ 一条命令 */
-#define MGR_PULSE_TEST_RESP_LEN   91u     /* = PULSE_PACK_RESP_LEN */
-#define MGR_PHASE_TEST_RESP_LEN   34u     /* = MGR_PHASE_JUDGE_RESP_LEN */
-#define MGR_ENC_TEST_RESP_LEN     29u     /* = MGR_ENC_JUDGE_RESP_LEN */
+/* 三条"一条命令跑完"（0x0019/0x001A/0x001B）的应答长度 = 各自判据命令的长度 */
+#define MGR_PULSE_TEST_RESP_LEN   PULSE_PACK_RESP_LEN        /* 23B */
+#define MGR_PHASE_TEST_RESP_LEN   MGR_PHASE_JUDGE_RESP_LEN   /* 16B */
+#define MGR_ENC_TEST_RESP_LEN     MGR_ENC_JUDGE_RESP_LEN     /* 12B */
 #define MGR_FLOW_STEP_TIMEOUT_MS  4000u   /* 流程里每一步的超时上限 */
 #define MGR_FLOW_WDT_MS           4000u   /* 给 DUT 的失联看门狗（比单步超时略长） */
 
@@ -143,6 +145,23 @@
  *   连接 → 暂停 → 擦暂存扇区 → 写 4KB 图样 → SWD 回读逐字节比对 → 读 UID → 复位运行
  * ⚠ 暂存扇区在 Boot/App 分区**之外**，板上原有 FOC 固件不受影响，可随时跑。 */
 #define MGR_CMD_SWD_SELFTEST     0x001Eu
+/*── DUT 口**原始字节**收发（对面固件还没实现 0x02xx 时的过渡手段）──
+ * 为什么单独有两条：真实场景是"FOC 板固件要几周后才好，但串口线今天就要验通"。
+ * 它跑的是**裸串口**：不套 A5 5B 帧，字节原样发出去、把这段时间收到的字节原样带回来。
+ * 典型用法：发它的 ASCII 命令 `AS:S800`（转） / `AS:S0`（停），看电机有没有反应、
+ * 有没有回字。等 0x02xx 做好后，这两条命令仍然留着当排障口子。 */
+#define MGR_CMD_DUT_SEND        0x001Fu   /* 请求 DATA = 等回应时长(2, 大端, 0=默认200ms)
+                                           *            + 要发的原始字节(N, ≤62)
+                                           * 应答 DATA = 状态(1) + 实际发出字节数(2)
+                                           *            + 收到字节数(2) + 收到的字节(≤64) */
+#define MGR_CMD_DUT_RECV        0x0020u   /* 请求 LEN=0
+                                           * 应答 DATA = 状态(1) + 字节数(2) + 字节(≤64)
+                                           * **读后清空**：对端主动上报的字节在这里取 */
+#define MGR_DUT_SEND_HDR_LEN    2u        /* 请求头：等回应时长 */
+#define MGR_DUT_SEND_MAX        62u       /* 一次最多发多少原始字节 */
+#define MGR_DUT_SEND_DEF_TMO_MS 200u      /* 请求里时长填 0 时的默认值 */
+#define MGR_DUT_SEND_MAX_TMO_MS 2000u     /* 时长上限：防止 PC 传个大数把命令拖死 */
+#define MGR_DUT_SNIFF_SIZE      64u       /* 嗅探缓冲：DUT 口空闲时攒下的原始字节 */
 #define MGR_SWD_SELFTEST_RESP_LEN  16u
 #define DUT_SCRATCH_ADDR         (0x080E0000u)  /* F4 sector 11（最后一个 128KB） */
 #define DUT_SCRATCH_SECTOR       11u

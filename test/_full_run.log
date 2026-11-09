@@ -18,7 +18,7 @@
 [3] 非法帧拒绝
 [4] 字节流状态机
 
-=== 共 61 项检查, 失败 0 项 ===
+=== 共 67 项检查, 失败 0 项 ===
 [PASS] protocol_test
 
 ============================================================
@@ -57,7 +57,7 @@
 
 -- T19 0x0013 编码器回环（向 U2 要计数）--
 
-=== 共 377 项检查, 失败 0 项 ===
+=== 共 364 项检查, 失败 0 项 ===
 [PASS] app_test
 
     --- app_test in DUT-link mode ---
@@ -104,8 +104,59 @@
       0x001A ④: 共 1 帧应答
       0x001B ⑤: 共 1 帧应答
 
-=== 共 429 项检查, 失败 0 项 ===
+-- T27 0x001F / 0x0020 DUT 原始字节收发 --
+
+=== 共 445 项检查, 失败 0 项 ===
 [PASS] app_test (DUT link mode)
+
+    --- app_test in BENCH mode: DUT link on USART3, no U2 (jig_mode.h 3.4.1) ---
+=== FOC JIG U1 全链路宿主仿真 (PC帧→上传→SPI Flash→SWD→被烧板) ===
+
+[T1] SPII Flash 器件识别
+    JEDEC ID = 0xC84018 (期望 0xC84018)
+[T2] 空 Flash 查询 / 未知命令 / CRC 错误 / SEQ 回显
+[T3] 上传 → 查询 → 双槽切换
+    扇区擦除=2 页编程=8 WREN=14 RDSR=24 WEL违规=0
+[T4] 0x0009 参数异常
+[T5] 上传溢出 → 错误锁存
+[T6] 字节数与声明不符 → ERR_COUNT 且不写完整标志
+[T7] 上传 10s 无新数据 → ERR_TIMEOUT 并回 IDLE
+[T8] 0x0070 前置检查
+[T9] 端到端: PC帧 → 上传 → SPI Flash → 0x0112 SWD → 被烧板 Flash
+    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=5 编程字=102 SWD 事务=902
+    烧 402 B 用了 42474 个 SWCLK 周期 (108192 周期/KB)
+    推算 300KB: 32.5 s @1MHz   16.2 s @2MHz   8.1 s @4MHz
+    (只算 SWD 链路时间; 真实擦除还要等 Flash: 128KB 扇区约 1.3s/个)
+[T10] 烧录中 BUSY / 目标不在时干净失败
+[T13] SPI Flash 不在线/型号不对 → 第一条命令就以 ERR_FLASH 暴露
+[T14] 0x000E 测量: mode=0 只读 / mode=1 测试 / 非法 mode
+[T15] 0x000F 脉冲捕获: mode=0 只读 / mode=1 测试 / 非法 mode
+
+-- T17 0x0011 DUT 透传 --
+
+-- T20 0x0014 相电流检测（完整流程）--
+
+-- T21 0x0015 电压检测（9 路 vs DUT）--
+
+-- T18 0x0012 编码器脉冲发生 --
+
+-- T22 0x0016 三相输出判据 --
+
+-- T23 0x0017 治具自检 / 在线状态 --
+
+-- T24 0x0018 ⑤ 编码器三方对齐判定 --
+
+-- T25 0x0010 一键全流程（DUT 不在：验证编排不卡死 + 报告正确）--
+
+-- T26 一条命令跑完（0x0019/0x001A/0x001B 打包验证）--
+      0x0019 ③: 共 1 帧应答
+      0x001A ④: 共 1 帧应答
+      0x001B ⑤: 共 1 帧应答
+
+-- T27 0x001F / 0x0020 DUT 原始字节收发 --
+
+=== 共 445 项检查, 失败 0 项 ===
+[PASS] app_test (bench mode: DUT link, no U2)
 
 ============================================================
  3/12  Measurement module test (divider to voltage, thresholds)
@@ -886,6 +937,11 @@
 
 === �� 18 ��, ʧ�� 0 �� ===
 [PASS] foc_jig_tool selftest
+=== foc_jig_tool Ӧ������Լ죨����ҪӲ����===
+
+
+=== �� 43 �ʧ�� 0 �� ===
+[PASS] foc_jig_tool reply decoders
 
 ============================================================
  11/12  Duplicated copies in sync (U1 vs U2)
@@ -915,13 +971,13 @@
 
     --- Keil build U1 ---
     (UV4 is a GUI app; waiting for the build to finish...)
-Program Size: Code=43040 RO-data=736 RW-data=676 ZI-data=12212  
+Program Size: Code=47404 RO-data=716 RW-data=772 ZI-data=13636  
 "U1\U1.axf" - 0 Error(s), 0 Warning(s).
 [PASS] Keil build U1: 0 Error, 0 Warning
 
     --- Keil build U2 ---
     (UV4 is a GUI app; waiting for the build to finish...)
-Program Size: Code=16572 RO-data=600 RW-data=100 ZI-data=4572  
+Program Size: Code=16592 RO-data=600 RW-data=100 ZI-data=4580  
 "U2\U2.axf" - 0 Error(s), 0 Warning(s).
 [PASS] Keil build U2: 0 Error, 0 Warning
 

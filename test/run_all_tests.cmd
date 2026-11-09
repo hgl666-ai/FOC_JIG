@@ -55,6 +55,21 @@ if errorlevel 1 goto :appdut_build_fail
 "%ROOT%\test\app_dut_test.exe"
 if errorlevel 1 goto :appdut_fail
 echo [PASS] app_test (DUT link mode)
+echo.
+echo     --- app_test in BENCH mode: DUT link on USART3, no U2 (jig_mode.h 3.4.1) ---
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" "-DJIG_DUT_LINK=1" "-DJIG_U2_LINK=0" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_bench_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%SRC%\cur_chk.c" "%SRC%\vol_chk.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\pc_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_selftest.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%SRC%\dut_proto.c" "%ROOT%\test\swdsim\sim_target.c"
+if errorlevel 1 goto :appbench_build_fail
+"%ROOT%\test\app_bench_test.exe"
+if errorlevel 1 goto :appbench_fail
+echo [PASS] app_test (bench mode: DUT link, no U2)
+goto :meas
+:appbench_build_fail
+echo [FAIL] app_test (bench mode) compile error
+set FAILED=1
+goto :meas
+:appbench_fail
+echo [FAIL] app_test (bench mode)
+set FAILED=1
 goto :meas
 :appdut_build_fail
 echo [FAIL] app_test (DUT link mode) compile error
@@ -310,6 +325,15 @@ if not exist "%PY%" goto :no_py
 "%PY%" "%ROOT%\tools\foc_jig_tool.py" selftest
 if errorlevel 1 goto :py_fail
 echo [PASS] foc_jig_tool selftest
+rem  Decode self-test: 0x0014..0x001B / 0x0010 / 0x0011 replies are FIXED-LENGTH, so a single
+rem  wrong offset silently prints the wrong number (no error at all). No hardware needed.
+%PY% %ROOT%\test\tool_decode_test.py
+if errorlevel 1 goto :pydec_fail
+echo [PASS] foc_jig_tool reply decoders
+goto :dup
+:pydec_fail
+echo [FAIL] foc_jig_tool reply decoders
+set FAILED=1
 goto :dup
 :py_fail
 echo [FAIL] foc_jig_tool selftest
