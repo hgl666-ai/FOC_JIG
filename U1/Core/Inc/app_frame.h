@@ -34,6 +34,15 @@ uint8_t  APP_Frame_Pending(void);
   */
 uint16_t APP_Frame_Buffered(void);
 
+/**
+  * @brief  环形缓冲里已收到但还没被解析的字节数
+  * @note   与另两个的区别（判能不能当新的一行命令时必须用它）：
+  *           APP_Frame_RingCount() = 中断塞进环里、主循环还没解析的字节数
+  *           APP_Frame_Buffered()  = 解析器已经攒了多少（要跑 poll 才长）
+  *           APP_Frame_Pending()   = 有没有拼好的完整帧
+  */
+uint16_t APP_Frame_RingCount(void);
+
 /** @brief 取出整帧并复位解析器 */
 uint8_t *APP_Frame_Consume(uint16_t *len);
 

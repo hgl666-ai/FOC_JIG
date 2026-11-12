@@ -385,17 +385,43 @@ def do_burn(link: JigLink, boot_path: str, app_path: str,
     return 0
 
 
-def do_raw(link: JigLink, hexs: str):
+def _parse_hex_arg(hexs: str) -> bytes:
+    """把用户写的十六进制转成字节串。三种写法都认：
+
+        "A5 5B 00 1E"      带空格（最清楚）
+        "A5,5B,00,1E"      带逗号
+        "A55B001E"         紧凑（串口助手复制出来就是这个）
+
+    紧凑写法要求偶数个字符：半字节不可能自成字节，与其猜是少打还是多打，直接拒绝。
+    """
+    t = (hexs or "").replace(",", " ").replace("-", " ").strip()
+    if not t:
+        raise ValueError("空的十六进制串")
+    if " " not in t:
+        if (len(t) % 2) != 0:
+            raise ValueError("紧凑写法有 %d 个字符（奇数），不可能是整字节" % len(t))
+        t = " ".join(t[i:i + 2] for i in range(0, len(t), 2))
+    return bytes(int(x, 16) for x in t.split())
+
+
+def do_raw(link: JigLink, hexs: str, wait: float = 0.5):
     try:
-        raw = bytes(int(x, 16) for x in hexs.replace(",", " ").split())
-    except ValueError:
-        print("非法十六进制"); return 1
-    print("TX: %s" % hx(raw))
+        raw = _parse_hex_arg(hexs)
+    except ValueError as exc:
+        print("非法十六进制：%s" % exc)
+        print('  带空格：raw "A5 5B 00 1E 00 01 00 00 4B 99"')
+        print("  紧凑  ：raw A55B001E000100004B99")
+        return 1
+    print("TX: %s（%d 字节）" % (hx(raw), len(raw)))
     link.ser.write(raw)
     link.ser.flush()
-    time.sleep(0.5)
+    if wait > 0:
+        time.sleep(wait)
     link._read_some()
     print("RX: %s" % (hx(link.rx) if link.rx else "(无)"))
+    if not link.rx:
+        print("   （没收到回字。若是 0x001E 自检：擦扇区要 1~1.5 秒，"
+              "加 --wait 3 再试）")
     return 0
 
 
@@ -415,6 +441,7 @@ CMD_PHASE_TEST   = 0x001A      # ④ 一条命令：…→判定→关输出
 CMD_ENC_TEST     = 0x001B      # ⑤ 一条命令
 CMD_JIG_STATUS   = 0x0017
 CMD_RUN_ALL      = 0x0010
+CMD_FLOW_TEST    = 0x0022      # 六步测试流程（烧完之后一条命令）
 CMD_DUT_SEND     = 0x001F      # 给被测板发原始字节（不套帧）+ 抓回应
 CMD_DUT_RECV     = 0x0020      # 只读：取走 DUT 口攒下的原始字节
 DUT_SEND_MAX     = 62          # 一次最多发多少原始字节（与固件 MGR_DUT_SEND_MAX 一致）
@@ -855,6 +882,77 @@ def do_cur(link, hi=0x01, lo=0x02, duty=20, ms=100, mode=1):
     return 0 if st == 0x00 else 2
 
 
+# ────────────────────── 六步测试流程 0x0022 ──────────────────────
+FLOW_STEP_NAMES = ["①ADC(6路)", "②存活(AS:Bb)", "③自检(AS:CS)",
+                   "④三相(AS:PW)", "⑤编码器(AS:MC)", "⑥收尾(AS:S0)"]
+FLOW_CODE_NAMES = {0x00: "跳过", 0x01: "通过", 0x02: "失败", 0x03: "不判"}
+
+
+def _flow_detail(i, det):
+    """每步的 detail 用人话解释（i = 0..5，与固件一一对应）"""
+    if i == 0:
+        return "全部合格" if det == 0xFF else "第 %d 路不合格" % det
+    if i == 1:
+        return "收到版本号" if det == 0 else "问了 %d 次都没回" % det
+    if i == 2:
+        return {0: "A0 自检通过（电机已转）", 1: "A1 ADC 校准失败",
+                2: "A2 编码器校准失败", 3: "A3 相位缺失"}.get(det, "超时没回复")
+    if i == 3:
+        names = []
+        for k, nm in enumerate("ABC"):
+            names.append("%s%s" % (nm, "有" if det & (1 << k) else "无"))
+        return " ".join(names) + " 1kHz/50% 波形"
+    if i == 4:
+        names = []
+        for k, nm in enumerate("ABC"):
+            names.append("%s%s" % (nm, "对" if det & (1 << k) else "错"))
+        return " ".join(names)
+    return "-"
+
+
+def do_flow6(link):
+    """0x0022 六步测试流程：烧完固件后一条命令跑完"""
+    print("→ 0x0022 六步测试流程")
+    print("   ①治具读 6 路 ADC → ②问版本(AS:Bb) → ③自检(AS:CS) → ④/⑤ 按错误码分支 → ⑥停")
+    print("   ⚠ ②之后电机会转起来（自检要起转），③一收到回复立刻发 AS:S0 停")
+    r = _req(link, CMD_FLOW_TEST, b"", 20.0, "0x0022")
+    if r is None:
+        return 1
+    _, d = r
+    if len(d) < 3:
+        print("  应答只有 %d 字节（状态 %s）" % (len(d), status_name(d[0])))
+        return 1
+    need = 3 + 6 * 3
+    if len(d) != need:
+        print("  应答 %d 字节，应该是 %d 字节（固件与工具版本不一致？）" % (len(d), need))
+        return 1
+    st, steps, fail = d[0], d[1], d[2]
+    print("  判定 = %s%s" % (status_name(st),
+          "（**有步骤不合格**）" if st == 0x05 else ""))
+    print("  跑到第 %d 步；第一个失败步 = %s" % (steps, fail if fail else "无"))
+    print()
+    print("  步  项目            结果    说明")
+    bad = 0
+    for i in range(6):
+        o = 3 + i * 3
+        code = d[o]
+        det = (d[o + 1] << 8) | d[o + 2]
+        if code == 0x02:
+            bad += 1
+        # 跳过的分支不解释 detail（掩码是 0，说"A无 B无 C无"会让人误解）
+        note = "-" if code == 0x00 else _flow_detail(i, det)
+        print("  %d   %s  %s  %s"
+              % (i + 1, pad(FLOW_STEP_NAMES[i], 16),
+                 pad(FLOW_CODE_NAMES.get(code, "?0x%02X" % code), 8), note))
+    print()
+    if st == 0x00:
+        print("  ⇒ ✅ 六步全过，这块板子合格")
+    else:
+        print("  ⇒ ❌ 不合格：第 %d 步（%s）失败" % (fail, FLOW_STEP_NAMES[fail - 1] if 0 < fail <= 6 else "?"))
+        print("     失败步的 detail 见上表；④/⑤ 的掩码能直接看出是哪一相的问题。")
+    return 0 if st == 0x00 else 2
+
+
 # ────────────────────── DUT 口原始字节（0x001F / 0x0020）──────────────────────
 def _phase_bit(name):
     """"A"/"B"/"C" → 相掩码 bit0/1/2；非法直接退出，别把 0 传下去"""
@@ -955,7 +1053,7 @@ def do_dut_recv(link):
 # ─────────────────────────── 治具自检 0x0017 ───────────────────────────
 # 必须与 U1/Core/Inc/app.h 的 APP_State_t **按顺序**一致
 APP_STATES = ["INIT", "IDLE", "UPLOADING", "PROGRAMMING", "TESTING", "DUT",
-              "ENC", "ENC_PEER", "CUR", "VOL", "RUN", "DUT_RAW"]
+              "ENC", "ENC_PEER", "CUR", "VOL", "RUN", "DUT_RAW", "ASCII"]
 
 
 def do_status(link):
@@ -1273,7 +1371,7 @@ def main():
                                        # ── 定位用（治具不回话时先跑这三个）──
                                        "probe", "isp-probe", "watch", "loopback",
                                        # ── DUT 口原始字节（对面还没实现 0x02xx 时用）──
-                                       "as-start", "as-stop", "as-send", "dut-recv"])
+                                       "as-start", "as-stop", "as-send", "dut-recv", "flow6"])
     ap.add_argument("arg", nargs="?", help="upload: 固件文件; raw: 十六进制字节")
     ap.add_argument("-p", "--port", help="串口, 如 COM5")
     ap.add_argument("-b", "--baud", type=int, default=115200, help="形式波特率 (USB CDC 忽略)")
@@ -1290,6 +1388,9 @@ def main():
     ap.add_argument("--eol", default="none", choices=["none", "crlf", "lf", "cr"],
                     help="as-send/as-start/as-stop: 结尾加什么行结束符 (默认 none；"
                          "多数 ASCII 命令协议需要 crlf)")
+    ap.add_argument("--wait", type=float, default=0.5,
+                    help="raw: 发完等多久再读回（秒）。0x001E 自检抹扇区要 1~1.5s，"
+                         "所以自检请写 --wait 3；普通命令默认 0.5 够")
     ap.add_argument("--tmo", type=int, default=200,
                     help="as-send/as-start/as-stop: 等对端回字的毫秒数 (默认 200, 上限 2000)")
     ap.add_argument("--secs", type=float, default=8.0,
@@ -1346,7 +1447,7 @@ def main():
         return do_burn(link, a.boot, a.app,
                        a.boot_ver or a.version, a.app_ver or a.version)
     if a.action == "raw":
-        return do_raw(link, a.arg)
+        return do_raw(link, a.arg, a.wait)
     # ── 被测板五项功能 ──
     if a.action == "status":    return do_status(link)
     if a.action == "dut-ping":  return do_dut_ping(link)
@@ -1359,6 +1460,7 @@ def main():
         return do_cur(link, hi=_phase_bit(a.hi), lo=_phase_bit(a.lo),
                       duty=a.duty, ms=a.ms, mode=a.curmode)
     if a.action == "run-all":   return do_run_all(link)
+    if a.action == "flow6":     return do_flow6(link)
     # ── DUT 口原始字节（FOC 板现有 ASCII 命令的过渡验证）──
     if a.action == "as-start":  return do_dut_send(link, "AS:S800", a.tmo,
                                                    "AS:S800（转）", a.eol)

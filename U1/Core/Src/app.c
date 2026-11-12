@@ -18,6 +18,7 @@
   */
 #include "app.h"
 #include "app_frame.h"
+#include "jig_as.h"
 #include "protocol_frame.h"
 #include "flash_map.h"
 #include "fw_upload.h"
@@ -46,6 +47,18 @@
 #include "jig_mode.h"
 #include "pc_link.h"        /* PC 通讯口: USB CDC 或 USART1（jig_mode.h §2.1） */
 #include <string.h>
+
+/* ASCII 控制台的内部函数（PC 串口助手手敲 AS:xxx）：定义在文件末尾紧挨 APP_PcInput，
+ * 但 APP_Run 里要先调用 → 必须在这里前置声明。
+ * ⚠ 别把这块挪进下面那个"台架专用"#if —— 那个块还要求 PC 口在串口，
+ *   产品构建（PC 走 USB）里会被整块裁掉，声明跟着消失（2026-11-09 踩到）。 */
+#if (JIG_DUT_LINK != 0)
+static void    APP_FlowTestTask(void);
+static uint8_t APP_AsciiAccept(uint8_t b);
+static void    APP_AsciiDispatch(void);
+static void    APP_AsciiFlush(void);
+static void    APP_AsciiPoll(void);
+#endif
 
 /* 台架版的"自报身份"直接复用 PC 链路的发送环（uart_tx_kick 里有临界区保护），
  * 绝不在这里调阻塞的 HAL_UART_Transmit —— 那会抢走 RX 重挂要用的 HAL Lock，
@@ -415,6 +428,7 @@ static uint32_t s_tx_drop;              /* 因发送环忙被丢掉的帧数（�
 
 #if (APP_BENCH_ALIVE != 0)
 
+static uint32_t s_pc_in_bytes;          /* PC 口一共收到多少字节（含 ASCII 命令）*/
 static uint32_t s_bench_frames;         /* 解析成功的 PC 帧数 */
 static uint32_t s_bench_tick;           /* 上次打心跳的时刻（0 = 横幅还没发）*/
 static uint32_t s_bench_rb;             /* 上次看到的 rx_bytes（看它有没有在动）*/
@@ -497,6 +511,13 @@ static void APP_BenchSay(void)
         return;
     }
     if ((uint32_t)(now - s_bench_tick) < 3000u) {
+        return;
+    }
+    /* 有人开始跟它说话了（发过帧命令、或串口助手里敲过 AS: 命令）→ **永久闭嘴**。
+     * 心跳的用处只有"上电后证明它还活着"；一旦进入交互，它就是在刷屏、
+     * 还会和应答抢同一个发送环（2026-11-10 用户要求关掉）。
+     * 横幅不受影响：它在上面那个 `s_bench_tick == 0` 分支里，开机只打一次。*/
+    if (s_pc_in_bytes != 0u) {
         return;
     }
     s_bench_tick = now;
@@ -1269,6 +1290,478 @@ static void APP_DutRecvCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     }
     s_dut_sniff_len = 0u;                   /* 读后清空 */
     APP_SendAck(cmd, out, (uint16_t)(3u + n));
+}
+
+/*==============================================================================
+ * 0x0022 六步测试流程
+ *----------------------------------------------------------------------------
+ * 为什么要有它：产线上不想点八次，只想"烧完 → 按一下 → 看合格/不合格"。
+ * 它把 FOC 侧的几条 AS 命令串成一条链，每步的结果都留在报告里，方便定位。
+ *
+ * 步骤与 detail 含义：
+ *   步1 ADC    detail = 第一个不合格的**通道号**（0xFF = 六路都好）
+ *   步2 存活   detail = 0（收到了 AS:V…）
+ *   步3 自检   detail = 0=A0 1=A1 2=A2 3=A3（AS:CS 的原样返回码）
+ *   步4 三相   detail = 位掩码 bit0/1/2 = A/B/C 有 1kHz/50% 波形
+ *   步5 编码器 detail = 位掩码 bit0/1/2 = A/B/C 计数与治具发的一致
+ *   步6 收尾   detail = 0
+ *
+ * ⚠ 安全：步3 一拿到 FOC 的回复就**立刻发 AS:0 停电机**，不管回的是哪个码 ——
+ *   因为 A0 意味着"已经转起来了"。停完再等 50ms 让三相真正关断，才做后续采集。
+ *============================================================================*/
+#define FL6_S_ADC     0u
+#define FL6_S_ALIVE   1u
+#define FL6_S_SELF    2u
+#define FL6_S_PWM     3u
+#define FL6_S_ENC     4u
+#define FL6_S_DONE    5u
+
+#define FL6_SUB_SEND  0u
+#define FL6_SUB_WAIT  1u
+#define FL6_SUB_RUN   2u
+
+#define FL6_ALIVE_TRIES   15u      /* AS:Bb 轮询次数 */
+#define FL6_ALIVE_GAP_MS  400u     /* 每次间隔：对面回一条要 1.1~1.8s，太短会互相踩 */
+#define FL6_SELF_TMO_MS   12000u   /* AS:CS 等回字上限：对面校准中间会回 AS:A5，
+                                    * 我们忽略它继续等 A0~A3，所以总时长要给够 */
+#define FL6_STOP_MS       50u      /* 停电机后等三相关断 */
+#define FL6_PWM_TMO_MS    3000u    /* AS:PW + 采三相的上限 */
+#define FL6_PULSE_WIN_MS  200u     /* 脉冲采集窗口 */
+#define FL6_ENC_TMO_MS    2000u    /* 发完脉冲等 FOC 报数的上限 */
+#define FL6_ENC_PULSES    100u     /* A/B 各发 100 个 */
+#define FL6_ENC_PULSES_Z  10u      /* Z 发 10 个（1 个的话 ±2% 没意义） */
+#define FL6_ENC_FREQ_HZ   5000u
+#define FL6_ENC_RUN_MS    2000u    /* 等脉冲发完的上限（真机上 100 个 @5kHz ≈ 20ms） */
+#define FL6_ENC_ACK_MS    3000u    /* 等对面回 AS:MC0 的上限（实测约 1.5~2s） */
+#define FL6_TOTAL_TMO_MS  30000u   /* 整个流程的总看门狗 —— 卡住也一定会收尾 */
+
+static uint16_t s_fl6_seq;
+static uint8_t  s_fl6_step;
+static uint8_t  s_fl6_sub;
+static uint8_t  s_fl6_code[MGR_FLOW_STEPS];
+static uint16_t s_fl6_det[MGR_FLOW_STEPS];
+static uint32_t s_fl6_t0;
+static uint16_t s_fl6_tries;
+static uint8_t  s_fl6_cs;                  /* AS:CS 的返回码 0..3，0xFF = 超时 */
+static uint32_t s_fl6_tall;                /* 流程开始时刻（总看门狗用） */
+static uint8_t  s_fl6_forced;              /* 1 = 看门狗已经强制收尾过 */
+static uint8_t  s_fl6_force;                /* 0=正常；2/3 = 强制走步5/步4（调试用） */
+static uint8_t  s_fl6_exp_a;
+static uint8_t  s_fl6_exp_b;
+static uint8_t  s_fl6_exp_z;
+
+/** 往 DUT 口发一条 AS 命令（不套帧；先清掉上一次的回字，免得认错） */
+static uint8_t FL6_SendEx(const char *cmd, uint8_t clear_bg)
+{
+    uint16_t n = 0u;
+    uint8_t  ok;
+
+    while (cmd[n] != '\0') {
+        n++;
+    }
+    /* clear_bg=0 时**保留**已收到的字节：重试不能清，否则对面慢回（1.1~1.8s）
+     * 的回复会被下一次重试抹掉，永远认不出来（2026-11-12 实测的竞态）。*/
+    if (clear_bg != 0u) {
+        s_dut_sniff_len  = 0u;
+        s_dut_sniff_drop = 0u;
+        APP_DutSniff();                    /* 读空硬件环里的陈字节 */
+    }
+    ok = (UartPort_Write(UART_CFG_PORT_DUT, (const uint8_t *)cmd, n) == n) ? 1u : 0u;
+    s_fl6_t0  = HAL_GetTick();
+    s_fl6_sub = FL6_SUB_WAIT;
+    /* ⚠ 这里**不能**清 s_fl6_tries：存活分支靠它数"问了几次"，
+     *   每次重发都清零的话永远到不了上限（2026-11-10 审查发现，会死循环）。
+     *   计数只在进入某一步时清（见 FL6_Goto）。*/
+    return ok;
+}
+
+/** 普通命令：发之前清空接收缓冲 */
+static uint8_t FL6_Send(const char *cmd)
+{
+    return FL6_SendEx(cmd, 1u);
+}
+
+/** 记一步的结果 */
+static void FL6_Set(uint8_t step, uint8_t code, uint16_t det)
+{
+    if (step < (uint8_t)MGR_FLOW_STEPS) {
+        s_fl6_code[step] = code;
+        s_fl6_det[step]  = det;
+    }
+}
+
+/** 跳到某一步（重置子状态） */
+static void FL6_Goto(uint8_t step)
+{
+    s_fl6_step  = step;
+    s_fl6_sub   = FL6_SUB_SEND;
+    s_fl6_t0    = HAL_GetTick();
+    s_fl6_tries = 0u;                    /* 换一步就重新数 */
+}
+
+/** 本步做完 → 决定下一步走哪（分支都在这里） */
+static void FL6_Advance(void)
+{
+    switch (s_fl6_step) {
+    case FL6_S_ADC:   FL6_Goto(FL6_S_ALIVE); break;
+    case FL6_S_ALIVE:
+        /* 存活失败就别再问自检了：板子都没起来，AS:CS 必然也超时（白等 5 秒）。
+         * 直接收尾，报告里步3 留"跳过"，一眼能分清"没起来"和"自检没通过"。*/
+        FL6_Goto((s_fl6_code[FL6_S_ALIVE] == 0x02u) ? FL6_S_DONE : FL6_S_SELF);
+        break;
+    case FL6_S_SELF:
+        /* 强制分支（调试用）：让健康板也能走步4/步5。
+         * 报告里步3 的 detail 会显示被强制的码，如实反映"这次是怎么走的"。*/
+        if ((s_fl6_force == (uint8_t)MGR_FLOW_FORCE_A2) ||
+            (s_fl6_force == (uint8_t)MGR_FLOW_FORCE_A3)) {
+            s_fl6_cs = s_fl6_force;
+            FL6_Set(FL6_S_SELF, 0x01u, s_fl6_force);
+        }
+        if (s_fl6_cs == 0x03u) {            /* A3 相位缺失 → 采三相看 MCU 有没有输出 */
+            FL6_Goto(FL6_S_PWM);
+        } else if (s_fl6_cs == 0x02u) {     /* A2 编码器校准失败 → 人工比对计数 */
+            FL6_Goto(FL6_S_ENC);
+        } else {
+            FL6_Goto(FL6_S_DONE);           /* A0 全好 / A1 硬失败 / 超时 */
+        }
+        break;
+    case FL6_S_PWM:
+    case FL6_S_ENC:
+    default:          FL6_Goto(FL6_S_DONE);  break;
+    }
+}
+
+/** 步1：治具自己读 6 路 ADC 并判（不依赖 FOC，板子通不通都能读） */
+static void FL6_Adc(void)
+{
+    static const uint32_t rail_mv[4] = { 24000u, 10000u, 5000u, 3300u };
+    meas_snapshot_t snap;
+    uint16_t bad = 0xFFu;
+    uint8_t  i;
+
+    MEAS_Snapshot(&snap);
+
+    for (i = 0u; i < 4u; i++) {                          /* 4 路电源：±5%，下限 200mV */
+        uint32_t ex  = rail_mv[i];
+        uint32_t tol = (ex * 5u) / 100u;
+        uint32_t mv  = snap.ch[i].mv;
+
+        if (tol < 200u) {
+            tol = 200u;
+        }
+        if (((snap.ch[i].flags & MEAS_CHF_OK) == 0u) || (mv + tol < ex) || (mv > ex + tol)) {
+            bad = (uint16_t)i;
+            break;
+        }
+    }
+    if (bad == 0xFFu) {                                   /* 两路电流：停在约 1.65V 中点 */
+        for (i = (uint8_t)MEAS_CH_CUR1; i <= (uint8_t)MEAS_CH_CUR2; i++) {
+            uint32_t mv = snap.ch[i].mv;
+
+            if (((snap.ch[i].flags & MEAS_CHF_OK) == 0u) || (mv < 1150u) || (mv > 2150u)) {
+                bad = (uint16_t)i;
+                break;
+            }
+        }
+    }
+    FL6_Set(FL6_S_ADC, (bad == 0xFFu) ? 0x01u : 0x02u, bad);
+    FL6_Advance();
+}
+
+/** 六步流程主推进：每轮 APP_Run 调一次 */
+static void APP_FlowTestTask(void)
+{
+    uint32_t now = HAL_GetTick();
+    uint16_t n;
+    const uint8_t *rx;
+
+    if (app_state != APP_STATE_FLOW6) {
+        return;
+    }
+
+    /* 总看门狗：不管卡在哪一步，到 30 秒强制收尾。
+     * 为什么必须要有：步5 等脉冲那段原来没有超时，一旦 EncGen 卡住，
+     * 流程永远停在 FLOW6 —— 之后 PC 的每条命令都被判"忙"，
+     * 表现就是"FOC 收不到命令"（2026-11-11 用户实际遇到）。*/
+    if ((s_fl6_forced == 0u) &&
+        ((uint32_t)(now - s_fl6_tall) > (uint32_t)FL6_TOTAL_TMO_MS)) {
+        s_fl6_forced = 1u;
+        PULSE_CfgStop();
+        EncGen_Stop();
+        (void)FL6_Send(AS_CMD_STOP);
+        if (s_fl6_code[s_fl6_step] == 0x00u) {
+            FL6_Set(s_fl6_step, 0x02u, 0xFFFFu);   /* detail=FFFF = 看门狗强制结束 */
+        }
+        s_fl6_step = FL6_S_DONE;
+        s_fl6_sub  = FL6_SUB_SEND;
+        return;
+    }
+
+    switch (s_fl6_step) {
+    /*──────── 步1 ADC ────────*/
+    case FL6_S_ADC:
+        FL6_Adc();
+        break;
+
+    /*──────── 步2 存活：轮询 AS:Bb ────────*/
+    case FL6_S_ALIVE:
+        if (s_fl6_sub == FL6_SUB_SEND) {
+            /* 只在第一次清缓冲；重试时累积着等（识别是"全文找前缀"，累积无副作用） */
+            (void)FL6_SendEx(AS_CMD_VERSION, (s_fl6_tries == 0u) ? 1u : 0u);
+            break;
+        }
+        rx = s_dut_sniff;
+        n  = s_dut_sniff_len;
+        if ((APP_AsHasPrefix(rx, n, AS_PREFIX_VERSION) != 0u) ||
+            (APP_AsHasPrefix(rx, n, AS_PREFIX_VERSION2) != 0u)) {
+            /* 实测回字是 `bb:0.3.0`；两种前缀都认，版本号只记录不判 */
+            FL6_Set(FL6_S_ALIVE, 0x01u, 0u);
+            FL6_Advance();
+        } else if ((uint32_t)(now - s_fl6_t0) >= (uint32_t)FL6_ALIVE_GAP_MS) {
+            s_fl6_tries++;
+            if (s_fl6_tries >= (uint16_t)FL6_ALIVE_TRIES) {
+                FL6_Set(FL6_S_ALIVE, 0x02u, s_fl6_tries);
+                FL6_Advance();
+            } else {
+                s_fl6_sub = FL6_SUB_SEND;                /* 再问一次 */
+            }
+        }
+        break;
+
+    /*──────── 步3 自检 AS:CS → 立刻停 ────────*/
+    case FL6_S_SELF:
+        if (s_fl6_sub == FL6_SUB_SEND) {
+            (void)FL6_Send(AS_CMD_SELFTEST);
+            break;
+        }
+        if (s_fl6_sub == FL6_SUB_WAIT) {
+            uint8_t c = APP_AsFindCode(s_dut_sniff, s_dut_sniff_len);
+
+            if (c != 0xFFu) {
+                s_fl6_cs = c;
+                FL6_Set(FL6_S_SELF, 0x01u, c);
+                (void)FL6_Send(AS_CMD_STOP);             /* ⚠ 不管哪个码都先停 */
+                s_fl6_sub = FL6_SUB_RUN;                 /* 停完等 50ms 再走下一步 */
+            } else if ((uint32_t)(now - s_fl6_t0) >= (uint32_t)FL6_SELF_TMO_MS) {
+                s_fl6_cs = 0xFFu;
+                FL6_Set(FL6_S_SELF, 0x02u, 0xFFu);
+                (void)FL6_Send(AS_CMD_STOP);
+                s_fl6_sub = FL6_SUB_RUN;
+            }
+            break;
+        }
+        /* SUB_RUN：等电机停稳（三相真正关断）再走下一步 */
+        if ((uint32_t)(now - s_fl6_t0) >= (uint32_t)FL6_STOP_MS) {
+            FL6_Advance();
+        }
+        break;
+
+    /*──────── 步4 三相：AS:PW + 采 3 路 PWM ────────*/
+    case FL6_S_PWM:
+        if (s_fl6_sub == FL6_SUB_SEND) {
+            (void)FL6_Send(AS_CMD_PWM);
+            /* ⚠ 必须走 cfg 层（PULSE_CfgStart）：它负责开 NVIC、清寄存器、清边沿环。
+             *   只调算法层的 PULSE_Start 在真板子上等于"窗口开了但捕获中断没使能"
+             *   → 永远采不到波形（2026-11-10 审查发现）。*/
+            PULSE_CfgStart((uint16_t)FL6_PULSE_WIN_MS);
+            s_fl6_sub = FL6_SUB_RUN;
+            s_fl6_t0  = HAL_GetTick();
+            break;
+        }
+        if (PULSE_CfgPoll() != 0u) {
+            pulse_snapshot_t ps;
+            uint16_t mask = 0u;
+            uint8_t  i;
+
+            PULSE_Snapshot(&ps);
+            for (i = 0u; i < (uint8_t)PULSE_PH_COUNT; i++) {
+                uint32_t per  = ps.ph[i].period_ns;
+                uint16_t duty = ps.ph[i].duty_permille;
+
+                /* 三相都该是 1kHz/50%：周期 0.5~2ms、占空比 450~550‰ 就算有波形 */
+                if ((per >= 500000u) && (per <= 2000000u) &&
+                    (duty >= 450u) && (duty <= 550u)) {
+                    mask |= (uint16_t)(1u << i);
+                }
+            }
+            (void)FL6_Send(AS_CMD_PWX);          /* 退出 PW（对面回 AS:P1，不等） */
+            FL6_Set(FL6_S_PWM, (mask == 0x0007u) ? 0x01u : 0x02u, mask);
+            FL6_Advance();
+        } else if ((uint32_t)(now - s_fl6_t0) >= (uint32_t)FL6_PWM_TMO_MS) {
+            PULSE_CfgStop();                     /* 万一捕获卡住，别让定时器一直开着 */
+            (void)FL6_Send(AS_CMD_PWX);
+            FL6_Set(FL6_S_PWM, 0x02u, 0x0000u);
+            FL6_Advance();
+        }
+        break;
+
+    /*──────── 步5 编码器：AS:MC + 发脉冲 + 收 AS:AaBbCc ────────*/
+    case FL6_S_ENC:
+        if (s_fl6_sub == FL6_SUB_SEND) {
+            (void)FL6_Send(AS_CMD_ENC);
+            break;
+        }
+        if (s_fl6_sub == FL6_SUB_WAIT) {
+            /* 必须等对面回 `AS:MC0` 再打脉冲 —— 实测 FOC 进计数模式要 1.5~2 秒，
+             * 抢跑打出去的脉冲它根本收不到（2026-11-11 实测：脉冲全丢，上报全是噪声）。*/
+            if (s_dut_sniff_len == 0u) {
+                if ((uint32_t)(now - s_fl6_t0) >= (uint32_t)FL6_ENC_ACK_MS) {
+                    (void)FL6_Send(AS_CMD_STOP);
+                    FL6_Set(FL6_S_ENC, 0x02u, 0xFFFCu);   /* FFFC = 对面没进计数模式 */
+                    FL6_Advance();
+                }
+                break;                                   /* 还没回：继续等 */
+            }
+            {
+                enc_plan_t p;
+
+                p.cnt_a = (uint16_t)FL6_ENC_PULSES;
+                p.cnt_b = (uint16_t)FL6_ENC_PULSES;
+                p.cnt_z = (uint16_t)FL6_ENC_PULSES_Z;
+                p.freq_a_hz = (uint16_t)FL6_ENC_FREQ_HZ;
+                p.freq_b_hz = (uint16_t)FL6_ENC_FREQ_HZ;
+                p.freq_z_hz = (uint16_t)FL6_ENC_FREQ_HZ;
+
+                s_dut_sniff_len = 0u;                /* 清掉，别把 OK 当计数 */
+                if (EncGen_Start(&p) == 0u) {
+                    FL6_Set(FL6_S_ENC, 0x02u, 0xFFFEu);   /* 参数被拒（内部错误） */
+                    FL6_Advance();
+                } else {
+                    s_fl6_exp_a = (uint8_t)FL6_ENC_PULSES;
+                    s_fl6_exp_b = (uint8_t)FL6_ENC_PULSES;
+                    s_fl6_exp_z = (uint8_t)FL6_ENC_PULSES_Z;
+                    s_fl6_sub   = FL6_SUB_RUN;
+                    s_fl6_t0    = HAL_GetTick();   /* 给"等脉冲发完"这一段计时 */
+                }
+            }
+            break;
+        }
+        if (s_fl6_sub == FL6_SUB_RUN) {              /* 等脉冲发完 */
+            EncGen_Poll();
+            if ((EncGen_Busy() != 0u) &&
+                ((uint32_t)(now - s_fl6_t0) >= (uint32_t)FL6_ENC_RUN_MS)) {
+                /* 脉冲发生器卡住：别把整个流程拖死 */
+                EncGen_Stop();
+                (void)FL6_Send(AS_CMD_STOP);
+                FL6_Set(FL6_S_ENC, 0x02u, 0xFFFDu);   /* FFFD = 脉冲发不完 */
+                FL6_Advance();
+                break;
+            }
+            if (EncGen_Busy() == 0u) {
+                /* 脉冲发完 → 发 AS:ME 让对面结束计数并上报（它会回 AS:D,A=..,B=..,Z=..） */
+                (void)FL6_Send(AS_CMD_ME);
+                s_fl6_sub = 0x03u;                   /* 覆盖 FL6_Send 设的 WAIT */
+                s_fl6_t0  = HAL_GetTick();
+            }
+            break;
+        }
+        {
+            uint16_t a, b, c;
+
+            if (APP_AsParseEncD(s_dut_sniff, s_dut_sniff_len, &a, &b, &c) != 0u) {
+                uint16_t mask = 0u;
+
+                if ((a + 2u >= (uint16_t)s_fl6_exp_a) && (a <= (uint16_t)s_fl6_exp_a + 2u)) {
+                    mask |= 0x0001u;
+                }
+                if ((b + 2u >= (uint16_t)s_fl6_exp_b) && (b <= (uint16_t)s_fl6_exp_b + 2u)) {
+                    mask |= 0x0002u;
+                }
+                if ((c + 1u >= (uint16_t)s_fl6_exp_z) && (c <= (uint16_t)s_fl6_exp_z + 1u)) {
+                    mask |= 0x0004u;
+                }
+                if ((c == 0u) && (mask == 0x0003u)) {
+                    mask |= 0x0004u;                 /* 没有 Z 的编码器：报 C0 也算对 */
+                }
+                (void)FL6_Send(AS_CMD_STOP);
+                FL6_Set(FL6_S_ENC, (mask == 0x0007u) ? 0x01u : 0x02u, mask);
+                FL6_Advance();
+            } else if ((uint32_t)(now - s_fl6_t0) >= (uint32_t)FL6_ENC_TMO_MS) {
+                (void)FL6_Send(AS_CMD_STOP);
+                /* 0xFFF0 = **压根没收到 AS:D**（和"收到了但数不对"区分开，
+                 * 后者 detail 是比对掩码 0~7）。2026-11-12 实测发现两者都是 0，
+                 * 无法判断该查接线还是查协议。*/
+                FL6_Set(FL6_S_ENC, 0x02u, 0xFFF0u);
+                FL6_Advance();
+            }
+        }
+        break;
+
+    /*──────── 步6 收尾：再发一次 AS:0，然后回报告 ────────*/
+    case FL6_S_DONE:
+    default:
+        if (s_fl6_sub == FL6_SUB_SEND) {
+            (void)FL6_Send(AS_CMD_STOP);
+            FL6_Set(FL6_S_DONE, 0x01u, 0u);
+            break;
+        }
+        {
+            uint8_t  out[MGR_FLOW_TEST_RESP_LEN];
+            uint8_t  any_bad = 0u;
+            uint8_t  first   = 0u;
+            uint8_t  i;
+
+            for (i = 0u; i < (uint8_t)MGR_FLOW_STEPS; i++) {
+                if ((s_fl6_code[i] == 0x02u) && (first == 0u)) {
+                    first = (uint8_t)(i + 1u);
+                }
+            }
+            /* A1（ADC 校准失败）时步3 是"通过"但整体要判失败，单独补一条 */
+            if ((s_fl6_cs == 0x01u) && (first == 0u)) {
+                first = (uint8_t)(FL6_S_SELF + 1u);
+            }
+            any_bad = (first != 0u) ? 1u : 0u;
+
+            out[0] = (any_bad != 0u) ? APP_STATUS_ERR_TEST : APP_STATUS_OK;
+            out[1] = (uint8_t)(s_fl6_step + 1u);
+            out[2] = first;
+            for (i = 0u; i < (uint8_t)MGR_FLOW_STEPS; i++) {
+                uint8_t *q = &out[3u + ((uint16_t)i * MGR_FLOW_ITEM_LEN)];
+
+                q[0] = s_fl6_code[i];
+                q[1] = (uint8_t)(s_fl6_det[i] >> 8);
+                q[2] = (uint8_t)(s_fl6_det[i] & 0xFFu);
+            }
+            app_state = APP_STATE_IDLE;
+            APP_SendFrame(MGR_CMD_FLOW_TEST, s_fl6_seq, out, MGR_FLOW_TEST_RESP_LEN);
+        }
+        break;
+    }
+}
+
+/** 0x0022 受理：清结果、进流程 */
+static void APP_FlowTestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
+{
+    uint8_t i;
+
+    if (len > 1u) {                          /* 只接受 LEN=0（正常）或 1（强制分支）*/
+        uint8_t e = APP_STATUS_ERR_PARAM;
+
+        APP_SendAck(cmd, &e, 1u);
+        return;
+    }
+    s_fl6_force = (uint8_t)MGR_FLOW_FORCE_NONE;
+    if (len == 1u) {
+        if ((data[0] != (uint8_t)MGR_FLOW_FORCE_NONE) &&
+            (data[0] != (uint8_t)MGR_FLOW_FORCE_A2) &&
+            (data[0] != (uint8_t)MGR_FLOW_FORCE_A3)) {
+            uint8_t e = APP_STATUS_ERR_PARAM;
+
+            APP_SendAck(cmd, &e, 1u);
+            return;
+        }
+        s_fl6_force = data[0];
+    }
+    for (i = 0u; i < (uint8_t)MGR_FLOW_STEPS; i++) {
+        s_fl6_code[i] = 0u;                  /* 00 = 跳过（没走这条分支） */
+        s_fl6_det[i]  = 0u;
+    }
+    s_fl6_seq    = pc_seq;
+    s_fl6_cs     = 0xFFu;
+    s_fl6_tall   = HAL_GetTick();
+    s_fl6_forced = 0u;
+    FL6_Goto(FL6_S_ADC);
+    app_state = APP_STATE_FLOW6;
 }
 #endif /* JIG_DUT_LINK */
 
@@ -2957,6 +3450,26 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
         APP_DutCmd(cmd, data, len);
         break;
 
+    /*── 0x0023 编码器发生器的寄存器快照（诊断：0x0012 发不出脉冲时用）──*/
+    case MGR_CMD_ENC_DBG: {
+        uint16_t dbg[6];
+        uint8_t  out[MGR_ENC_DBG_RESP_LEN];
+        uint8_t  k;
+
+        EncGen_DbgSnapshot(dbg);
+        for (k = 0u; k < 6u; k++) {
+            out[k * 2u]      = (uint8_t)(dbg[k] >> 8);
+            out[(k * 2u) + 1u] = (uint8_t)(dbg[k] & 0xFFu);
+        }
+        APP_SendAck(cmd, out, MGR_ENC_DBG_RESP_LEN);
+        break;
+    }
+
+    /*── 0x0022 六步测试流程（烧完之后一条命令跑完）──*/
+    case MGR_CMD_FLOW_TEST:
+        APP_FlowTestCmd(cmd, data, len);
+        break;
+
     /*── 0x001F 给被测板发**原始字节**（对面还没实现 0x02xx 时先验串口通不通）──*/
     case MGR_CMD_DUT_SEND:
         APP_DutSendCmd(cmd, data, len);
@@ -3347,6 +3860,9 @@ void APP_Run(void)
     /* 1) 把接收环形缓冲里的字节喂给解析器, 处理收到的完整帧 */
     APP_Frame_Poll();
     APP_FrameStallCheck();          /* 半截帧超时 → 丢掉重新对齐（见函数注释）*/
+#if (JIG_DUT_LINK != 0)
+    APP_AsciiPoll();                /* PC 串口助手的命令行（无结束符超时 / 等回字窗口）*/
+#endif
     if (APP_Frame_Pending()) {
         APP_HandlePendingFrame();
     }
@@ -3396,6 +3912,9 @@ void APP_Run(void)
     /* 4c) 0x001F 的收发窗口：收字节、到点回 ACK */
     APP_DutRawTask();
 
+    /* 4d) 0x0022 六步测试流程 */
+    APP_FlowTestTask();
+
     /* 7b) ⑥ 相电流检测流程推进 + 终态回 ACK（只回一次） */
     APP_CurTestTask();
 
@@ -3434,9 +3953,386 @@ void APP_Run(void)
 }
 
 /* USB CDC 收到一批字节 (中断上下文) — 只喂状态机, 不做重活 */
+/*==============================================================================
+ * PC 串口助手"手敲命令行"（ASCII 控制台）
+ *----------------------------------------------------------------------------
+ * 场景：FOC 固件还没实现 0x02xx 帧协议，但调试时要能**在串口助手里直接敲**
+ *       `AS:Bb` / `AS:CS` / `AS:0` 看它回什么。
+ * 规则（docs/24 §1）：
+ *      · 字节流以 A5 5B 开头          → 走原来的帧协议（20 条命令照旧）
+ *      · 全是可打印 ASCII(0x20~0x7E)  → 当一行命令：原样转给 DUT 口，
+ *                                        把 DUT 的回字**原样**吐回 PC（无帧）
+ *      · 其它                          → 丢弃（和以前一样，等 A5 5B）
+ * 为什么 0xA5 不会和 ASCII 混：0xA5 = 165 > 0x7E，本身就不是可打印字符。
+ * 只在 IDLE 时受理：否则正在跑的命令/流程也在用 DUT 口，会互相抢。
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+static uint8_t  s_ascii_line[AS_LINE_MAX];
+static uint16_t s_ascii_len;
+static uint32_t s_ascii_tlast;          /* 最后一个字节的时刻（无结束符时靠它） */
+static uint32_t s_ascii_t0;             /* 命令发出去的时刻 */
+static uint16_t s_ascii_rxlen;          /* 上一次看到的回字长度（判断"还在长"） */
+static uint32_t s_ascii_rxt;            /* 回字最后变长的时刻 */
+static uint32_t s_ascii_cnt;            /* 成功转发的命令行数（调试用） */
+/* 1 = 之后"治具空闲时"把 DUT 口收到的字节实时转给 PC（透明桥）。
+ * 为什么需要：`AS:MC` 的结束上报 `AS:D,...` 是 2 秒后才主动发的，
+ * 控制台 300ms 的窗口早关了 —— 不桥接的话串口助手里永远看不到。 */
+static uint8_t  s_ascii_bridge;
+/* 上一个 PC 字节是不是帧头首字节 A5 —— 见 APP_AsciiAccept 里的注释：
+ * 帧头第二字节 0x5B 就是 '['，只看"缓冲是否为 0"会把它当命令行吃掉。 */
+static uint8_t  s_pc_after_a5;
+
+/** 收一个字节；返回 1 = 这个字节被控制台吃了，不要再喂给帧解析 */
+static uint8_t APP_AsciiAccept(uint8_t b)
+{
+    if (s_ascii_len > 0u) {                             /* 正在收一行 */
+        if ((b == (uint8_t)'\r') || (b == (uint8_t)'\n')) {
+            APP_AsciiDispatch();
+            return 1u;
+        }
+        if ((b >= 0x20u) && (b <= 0x7Eu)) {
+            if (s_ascii_len < (uint16_t)AS_LINE_MAX) {
+                s_ascii_line[s_ascii_len] = b;
+                s_ascii_len++;
+            } else {
+                s_ascii_len = 0u;                       /* 超长：整行作废 */
+            }
+            s_ascii_tlast = HAL_GetTick();
+            return 1u;
+        }
+        s_ascii_len = 0u;                               /* 混进非可打印字节：这行作废 */
+        return 0u;                                      /* 交回帧解析（可能是 A5） */
+    }
+
+    /* 干净起点才决定"这是不是一行命令"，三个条件缺一不可：
+     *   · Buffered()==0  解析器里没攒着半截帧
+     *   · RingCount()==0 环形缓冲里也没有刚收到、还没解析的字节
+     *     （只看 Buffered 会把正在到达的帧当成命令行 —— 帧里的 CRC 和版本字符串
+     *      是可见 ASCII，会被吃掉，2026-11-09 踩到）
+     *   · 上一个字节不是 A5：帧头首字节之后的 0x5B 就是 '['，也是可打印字符 */
+    if ((APP_Frame_Buffered() == 0u) && (APP_Frame_RingCount() == 0u) &&
+        (s_pc_after_a5 == 0u)) {
+        if ((b == (uint8_t)'\r') || (b == (uint8_t)'\n')) {
+            return 1u;                                  /* 空行：吃掉，别污染帧解析 */
+        }
+        if ((b >= 0x20u) && (b <= 0x7Eu)) {
+            s_ascii_line[0] = b;
+            s_ascii_len     = 1u;
+            s_ascii_tlast   = HAL_GetTick();
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+/** 把攒够的一行发出去，并进入"等回字"窗口 */
+static void APP_AsciiDispatch(void)
+{
+    uint8_t  buf[AS_LINE_MAX + 2u];
+    uint16_t n = s_ascii_len;
+    uint16_t blen;
+
+    s_ascii_len = 0u;                                   /* 先交出缓冲，避免重入 */
+    if (n == 0u) {
+        return;
+    }
+    if (app_state != APP_STATE_IDLE) {                   /* 正忙：别抢 DUT 口 */
+        PcLink_Send((const uint8_t *)AS_MSG_BUSY, (uint16_t)(sizeof(AS_MSG_BUSY) - 1u));
+        return;
+    }
+    memcpy(buf, s_ascii_line, n);
+    blen = n;
+#if (JIG_AS_APPEND_CRLF != 0)
+    buf[blen] = (uint8_t)'\r'; blen++;
+    buf[blen] = (uint8_t)'\n'; blen++;
+#endif
+
+    /* 先把 DUT 口攒下的陈字节读空，否则回字里混着上一次的，看不出是哪一次的回 */
+    s_dut_sniff_len  = 0u;
+    s_dut_sniff_drop = 0u;
+    APP_DutSniff();
+
+    if (UartPort_Write(UART_CFG_PORT_DUT, buf, blen) != blen) {
+        PcLink_Send((const uint8_t *)AS_MSG_BUSY, (uint16_t)(sizeof(AS_MSG_BUSY) - 1u));
+        return;
+    }
+    s_ascii_cnt++;
+    s_ascii_bridge = 1u;                   /* 从此以后异步上报也转给 PC */
+    s_ascii_t0    = HAL_GetTick();
+    s_ascii_rxlen = 0u;
+    s_ascii_rxt   = s_ascii_t0;
+    app_state     = APP_STATE_ASCII;
+}
+
+/** 窗口结束：把回字原样吐回 PC（没有回字就给一句提示，别让人干等） */
+static void APP_AsciiFlush(void)
+{
+    if (s_dut_sniff_len > 0u) {
+        PcLink_Send(s_dut_sniff, s_dut_sniff_len);
+    } else {
+        PcLink_Send((const uint8_t *)AS_MSG_NO_REPLY,
+                    (uint16_t)(sizeof(AS_MSG_NO_REPLY) - 1u));
+    }
+    s_dut_sniff_len = 0u;
+    s_ascii_rxlen   = 0u;
+    app_state       = APP_STATE_IDLE;
+}
+
+/** 主循环里推进一步：没结束符的行超时发出；等回字的窗口到点收尾 */
+static void APP_AsciiPoll(void)
+{
+    uint32_t now = HAL_GetTick();
+
+    if (s_ascii_len > 0u) {
+        if ((uint32_t)(now - s_ascii_tlast) >= (uint32_t)AS_LINE_IDLE_MS) {
+            APP_AsciiDispatch();                         /* 没按回车的命令也能发出去 */
+        }
+        return;
+    }
+    if (app_state != APP_STATE_ASCII) {
+        /* 控制台收尾之后，DUT 口上"迟到"的字节也要实时转给 PC。
+         * 典型就是 `AS:MC`/`AS:MQ` 的 `AS:D,...`：它在 MC0 之后约 2 秒才来，
+         * 那时控制台窗口早关了（2026-11-11 实测：直连能看到、经治具看不到）。*/
+        if ((app_state == APP_STATE_IDLE) && (s_ascii_bridge != 0u)) {
+            APP_DutSniff();
+            if (s_dut_sniff_len > 0u) {
+                PcLink_Send(s_dut_sniff, s_dut_sniff_len);
+                s_dut_sniff_len = 0u;
+            }
+        }
+        return;
+    }
+    APP_DutSniff();                                      /* 每轮都收，别等环满 */
+    if (s_dut_sniff_len != s_ascii_rxlen) {
+        s_ascii_rxlen = s_dut_sniff_len;
+        s_ascii_rxt   = now;
+    }
+    if (((s_ascii_rxlen > 0u) && ((uint32_t)(now - s_ascii_rxt) >= (uint32_t)AS_REPLY_GAP_MS)) ||
+        ((uint32_t)(now - s_ascii_t0) >= (uint32_t)AS_REPLY_MS)) {
+        APP_AsciiFlush();
+    }
+}
+#endif /* JIG_DUT_LINK */
+
+/*==============================================================================
+ * FOC 回字的文本解析（纯函数）
+ *----------------------------------------------------------------------------
+ * 为什么不写进状态机里：这三个函数是"认不认得出"的问题，和"什么时候该问"无关。
+ * 拆成纯函数就能拿表驱动单测直接砸几十种畸形输入（T29），不用搭时序。
+ * 容错规则见 docs/24 §7 与文件头。
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+/** 转小写：对 'A'~'Z' 有效；数字、':' 等本来就是小写形式，|0x20 不影响 */
+static uint8_t AS_Lower(uint8_t c)
+{
+    return (uint8_t)(c | 0x20u);
+}
+
+/** 读一组十进制数字；要求 1~5 位且 ≤ 65535（超了整条不认，别悄悄截断） */
+static uint8_t AS_Digits(const uint8_t *p, uint16_t avail, uint16_t *val, uint16_t *used)
+{
+    uint32_t v = 0u;
+    uint16_t i = 0u;
+
+    while ((i < avail) && (i < 5u) && (p[i] >= (uint8_t)'0') && (p[i] <= (uint8_t)'9')) {
+        v = (v * 10u) + (uint32_t)(p[i] - (uint8_t)'0');
+        i++;
+    }
+    if (i == 0u) {
+        return 0u;                                       /* 一位数字都没有 */
+    }
+    if ((i < avail) && (p[i] >= (uint8_t)'0') && (p[i] <= (uint8_t)'9')) {
+        return 0u;                                       /* 超过 5 位：溢出，整条不认 */
+    }
+    if (v > 65535u) {
+        return 0u;
+    }
+    *val  = (uint16_t)v;
+    *used = i;
+    return 1u;
+}
+
+uint8_t APP_AsParseEnc(const uint8_t *buf, uint16_t len,
+                       uint16_t *out_a, uint16_t *out_b, uint16_t *out_c)
+{
+    uint16_t i;
+
+    if ((buf == 0) || (len < 8u)) {                       /* 最短 "AS:A1B1C1" = 8 */
+        return 0u;
+    }
+    for (i = 0u; (uint16_t)(i + 4u) < len; i++) {
+        uint16_t p, a, b, c, used;
+
+        if ((AS_Lower(buf[i])        != (uint8_t)'a') ||
+            (AS_Lower(buf[i + 1u])   != (uint8_t)'s') ||
+            (buf[i + 2u]             != (uint8_t)':') ||
+            (AS_Lower(buf[i + 3u])   != (uint8_t)'a')) {
+            continue;
+        }
+        p = (uint16_t)(i + 4u);
+        if (AS_Digits(&buf[p], (uint16_t)(len - p), &a, &used) == 0u) {
+            continue;                                     /* 可能是 AS:A0 这种单组码 */
+        }
+        p = (uint16_t)(p + used);
+        if ((p >= len) || (AS_Lower(buf[p]) != (uint8_t)'b')) {
+            continue;
+        }
+        p++;
+        if (AS_Digits(&buf[p], (uint16_t)(len - p), &b, &used) == 0u) {
+            continue;
+        }
+        p = (uint16_t)(p + used);
+        if ((p >= len) || (AS_Lower(buf[p]) != (uint8_t)'c')) {
+            continue;
+        }
+        p++;
+        if (AS_Digits(&buf[p], (uint16_t)(len - p), &c, &used) == 0u) {
+            continue;
+        }
+        if (out_a != 0) { *out_a = a; }
+        if (out_b != 0) { *out_b = b; }
+        if (out_c != 0) { *out_c = c; }
+        return 1u;
+    }
+    return 0u;
+}
+
+/* 解析 "AS:D,A=25,B=83,Z=0"：先要有 AS:D 前缀，再找三个键值对（顺序无所谓） */
+uint8_t APP_AsParseEncD(const uint8_t *buf, uint16_t len,
+                        uint16_t *out_a, uint16_t *out_b, uint16_t *out_z)
+{
+    uint16_t i;
+    uint16_t n = 0u;
+    uint16_t val[3] = { 0u, 0u, 0u };
+    uint8_t  got[3] = { 0u, 0u, 0u };
+
+    if ((buf == 0) || (len < 8u)) {
+        return 0u;
+    }
+    /* 必须有 AS:D 前缀（否则可能是 AS:A0 那类状态码） */
+    if (APP_AsHasPrefix(buf, len, AS_PREFIX_ENCDATA) == 0u) {
+        return 0u;
+    }
+    for (i = 0u; (uint16_t)(i + 2u) < len; i++) {   /* 要访问 buf[i+2]，只需 i+2 < len */
+        uint8_t  key = AS_Lower(buf[i]);
+        uint8_t  k;
+        uint16_t v, used;
+
+        if ((key != (uint8_t)'a') && (key != (uint8_t)'b') && (key != (uint8_t)'z')) {
+            continue;
+        }
+        if ((buf[i + 1u] != (uint8_t)'=') || (buf[i + 2u] < (uint8_t)'0') ||
+            (buf[i + 2u] > (uint8_t)'9')) {
+            continue;                        /* 不是 key=数字 的形式 */
+        }
+        if (AS_Digits(&buf[i + 2u], (uint16_t)(len - i - 2u), &v, &used) == 0u) {
+            continue;
+        }
+        k = (uint8_t)((key == (uint8_t)'a') ? 0u : ((key == (uint8_t)'b') ? 1u : 2u));
+        val[k] = v;
+        got[k] = 1u;
+        n++;
+        i = (uint16_t)(i + 2u + used - 1u);
+    }
+    if ((got[0] == 0u) || (got[1] == 0u) || (got[2] == 0u)) {
+        return 0u;
+    }
+    if (out_a != 0) { *out_a = val[0]; }
+    if (out_b != 0) { *out_b = val[1]; }
+    if (out_z != 0) { *out_z = val[2]; }
+    return 1u;
+}
+
+uint8_t APP_AsHasPrefix(const uint8_t *buf, uint16_t len, const char *prefix)
+{
+    uint16_t n = 0u;
+    uint16_t i;
+
+    while (prefix[n] != '\0') {
+        n++;
+    }
+    if ((buf == 0) || (n == 0u) || (len < n)) {
+        return 0u;
+    }
+    for (i = 0u; (uint16_t)(i + n) <= len; i++) {
+        uint16_t k;
+        uint8_t  hit = 1u;
+
+        for (k = 0u; k < n; k++) {
+            if (AS_Lower(buf[i + k]) != AS_Lower((uint8_t)prefix[k])) {
+                hit = 0u;
+                break;
+            }
+        }
+        if (hit != 0u) {
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+uint8_t APP_AsFindCode(const uint8_t *buf, uint16_t len)
+{
+    uint16_t i;
+
+    if ((buf == 0) || (len < 5u)) {
+        return 0xFFu;
+    }
+    for (i = 0u; (uint16_t)(i + 5u) <= len; i++) {
+        uint8_t d;
+
+        if ((AS_Lower(buf[i])      != (uint8_t)'a') ||
+            (AS_Lower(buf[i + 1u]) != (uint8_t)'s') ||
+            (buf[i + 2u]           != (uint8_t)':') ||
+            (AS_Lower(buf[i + 3u]) != (uint8_t)'a')) {
+            continue;
+        }
+        d = buf[i + 4u];
+        if ((d < (uint8_t)'0') || (d > (uint8_t)'3')) {
+            continue;
+        }
+        /* 状态码后面必须是结束符 —— 否则 AS:A0B0C0 会被认成"自检通过" */
+        if ((uint16_t)(i + 6u) <= len) {
+            uint8_t t = buf[i + 5u];
+
+            if ((t != (uint8_t)'\r') && (t != (uint8_t)'\n') &&
+                (t != (uint8_t)' ')  && (t != 0u)) {
+                continue;
+            }
+        }
+        return (uint8_t)(d - (uint8_t)'0');
+    }
+    return 0xFFu;
+}
+#endif /* JIG_DUT_LINK */
+
+void APP_PcInput(uint8_t b)
+{
+#if (APP_BENCH_ALIVE != 0)
+    s_pc_in_bytes++;                         /* 只要 PC 说过话，心跳就闭嘴 */
+#endif
+#if (JIG_DUT_LINK != 0)
+    uint8_t after_a5 = s_pc_after_a5;
+
+    s_pc_after_a5 = (b == 0xA5u) ? 1u : 0u;   /* 给下一个字节用 */
+
+    /* 紧跟帧头 A5 的那个字节永远交给帧解析：它就是 0x5B='['，是可打印字符。
+     * 少了这一条，所有 A5 5B 帧都会被控制台吃成命令行（2026-11-09 改后审查发现）。*/
+    if (after_a5 != 0u) {
+        APP_Frame_Feed(b);
+        return;
+    }
+    if (APP_AsciiAccept(b) == 0u) {          /* 不是命令行 → 交给帧解析 */
+        APP_Frame_Feed(b);
+    }
+#else
+    APP_Frame_Feed(b);
+#endif
+}
+
 void APP_USB_Receive(uint8_t *data, uint32_t len)
 {
     for (uint32_t i = 0; i < len; i++) {
-        APP_Frame_Feed(data[i]);
+        APP_PcInput(data[i]);                            /* 统一入口：ASCII 优先判 */
     }
 }

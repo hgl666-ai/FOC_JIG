@@ -111,6 +111,21 @@ except Exception as exc:                                  # noqa: BLE001
     print("  [skip] git 不可用: %s" % exc)
 
 print()
+print("=== F. 三条打包命令（0x0019/1A/1B）的应答布局必须写全 ===")
+FLOW_ACK = [
+    ("docs/17 有 §21 小节",        d17, "## 21. 三条「一条命令跑完」的应答"),
+    ("docs/17 写了 0x0019 = 23B",  d17, "**23 B**"),
+    ("docs/17 写了 0x001A = 16B",  d17, "**16 B**"),
+    ("docs/17 写了 0x001B = 12B",  d17, "**12 B**"),
+    ("docs/17 写了失败时 1 字节",  d17, "一个可用报告都没拿到"),
+    ("命令大全 0x0019 逐字节",     cmd, "[2..22] 三相各 7 字节"),
+    ("命令大全 0x001A 逐字节",     cmd, "[1..15] 三相各 5 字节"),
+    ("命令大全 0x001B 逐字节",     cmd, "[3..11] 三相各 3 字节"),
+]
+for tag, txt, needle in FLOW_ACK:
+    check(needle in txt, "%s（找 %r）" % (tag, needle))
+
+print()
 print("=== E. 命令大全结构完整 ===")
 for sec in ["一、PC ↔ 治具 U1", "二、U1 ↔ U2", "附录 A", "附录 B", "附录 C",
             "附录 D", "附录 E", "附录 F", "附录 G", "附录 H"]:

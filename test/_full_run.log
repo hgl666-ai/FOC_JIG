@@ -24,6 +24,18 @@
 ============================================================
  2/12  Full-chain test (PC frame to target flash, all simulated)
 ============================================================
+D:/Project/FOC_JIG/test/app_test.c:1118:13: warning: 'pulse_fake_reset' defined but not used [-Wunused-function]
+ 1118 | static void pulse_fake_reset(void)
+      |             ^~~~~~~~~~~~~~~~
+D:/Project/FOC_JIG/test/app_test.c:1113:13: warning: 'pulse_fake_phase_mask' defined but not used [-Wunused-function]
+ 1113 | static void pulse_fake_phase_mask(uint8_t mask)
+      |             ^~~~~~~~~~~~~~~~~~~~~
+D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined but not used [-Wunused-function]
+ 1102 | static void pulse_fake_set(uint32_t freq_hz, uint16_t duty_pm)
+      |             ^~~~~~~~~~~~~~
+D:/Project/FOC_JIG/test/app_test.c:606:17: warning: 's_ascii_in' defined but not used [-Wunused-variable]
+  606 | static uint8_t  s_ascii_in[64];               /* T28：模拟 PC 敲进来的字节 */
+      |                 ^~~~~~~~~~
 === FOC JIG U1 全链路宿主仿真 (PC帧→上传→SPI Flash→SWD→被烧板) ===
 
 [T1] SPII Flash 器件识别
@@ -106,7 +118,35 @@
 
 -- T27 0x001F / 0x0020 DUT 原始字节收发 --
 
-=== 共 445 项检查, 失败 0 项 ===
+-- T28 PC 串口助手 ASCII 控制台 --
+
+-- T29 AS 文本解析器 --
+
+-- T30 0x0022 六步测试流程 --
+
+-- T31 0x0022 步4：AS:PW 三相 1kHz/50% --
+
+-- T31b 0x0022 步4：单相缺失 --
+
+-- T32 六步流程：全绿路径 --
+     [ADC] ch0=24000mV/0x01 ch1=10000mV/0x01 ch2=5000mV/0x01 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
+
+-- T33 六步流程：存活超时（板子没起来）--
+
+-- T34 六步流程：AS:A1（ADC 校准失败）--
+
+-- T35 六步流程：A3 但三相一个边沿都没有 --
+
+-- T36 六步流程：A2 但 FOC 不报数 --
+
+-- T37 六步流程：参数校验 --
+
+-- T38 0x0022 强制分支（强制走步5）--
+     [ADC] ch0=24000mV/0x01 ch1=10000mV/0x01 ch2=5000mV/0x01 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
+
+-- T39 慢回也算活着（AS:Bb 延迟回复）--
+
+=== 共 619 项检查, 失败 0 项 ===
 [PASS] app_test (DUT link mode)
 
     --- app_test in BENCH mode: DUT link on USART3, no U2 (jig_mode.h 3.4.1) ---
@@ -155,7 +195,35 @@
 
 -- T27 0x001F / 0x0020 DUT 原始字节收发 --
 
-=== 共 445 项检查, 失败 0 项 ===
+-- T28 PC 串口助手 ASCII 控制台 --
+
+-- T29 AS 文本解析器 --
+
+-- T30 0x0022 六步测试流程 --
+
+-- T31 0x0022 步4：AS:PW 三相 1kHz/50% --
+
+-- T31b 0x0022 步4：单相缺失 --
+
+-- T32 六步流程：全绿路径 --
+     [ADC] ch0=24000mV/0x01 ch1=10000mV/0x01 ch2=5000mV/0x01 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
+
+-- T33 六步流程：存活超时（板子没起来）--
+
+-- T34 六步流程：AS:A1（ADC 校准失败）--
+
+-- T35 六步流程：A3 但三相一个边沿都没有 --
+
+-- T36 六步流程：A2 但 FOC 不报数 --
+
+-- T37 六步流程：参数校验 --
+
+-- T38 0x0022 强制分支（强制走步5）--
+     [ADC] ch0=24000mV/0x01 ch1=10000mV/0x01 ch2=5000mV/0x01 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
+
+-- T39 慢回也算活着（AS:Bb 延迟回复）--
+
+=== 共 619 项检查, 失败 0 项 ===
 [PASS] app_test (bench mode: DUT link, no U2)
 
 ============================================================
@@ -940,7 +1008,7 @@
 === foc_jig_tool Ӧ������Լ죨����ҪӲ����===
 
 
-=== �� 43 �ʧ�� 0 �� ===
+=== �� 48 �ʧ�� 0 �� ===
 [PASS] foc_jig_tool reply decoders
 
 ============================================================
@@ -971,7 +1039,7 @@
 
     --- Keil build U1 ---
     (UV4 is a GUI app; waiting for the build to finish...)
-Program Size: Code=47404 RO-data=716 RW-data=772 ZI-data=13636  
+Program Size: Code=50420 RO-data=732 RW-data=820 ZI-data=13692  
 "U1\U1.axf" - 0 Error(s), 0 Warning(s).
 [PASS] Keil build U1: 0 Error, 0 Warning
 

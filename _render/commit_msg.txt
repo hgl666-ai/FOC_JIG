@@ -1,0 +1,24 @@
+初始提交：FOC 烧录治具 U1 固件（可直接烧录的完整实现）
+
+实现（U1/Core/）
+  帧层      protocol_frame.c/h  —— A5 5B + CMD2 + SEQ2 + LEN2 + DATA + CRC16-MODBUS(大端)
+  接收层    app_frame.c/h       —— 512B 环形缓冲(ISR 只压字节) + 帧状态机 + 失步重同步
+  存储层    gd25q128.c/h        —— SPI2(PB12 软件 CS) GD25Q128, 双槽(Slot0/Slot1 各 64KB)
+  上传层    fw_upload.c/h       —— 0x0009/0x000A/0x000B 三段式, 含错误锁存/10s 超时/溢出/字节数比对
+  烧录层    isp_programmer.c/h  —— AN3155 非阻塞 ISP, 擦除 0x43/0x44 自适应, 可选回读校验
+  配置      isp_config.h        —— ISP 串口/BOOT0/RESET 引脚, 唯一需要按实际硬件改的文件
+  顶层      app.c/h             —— 命令分发 / ACK / 主循环
+
+协议（xlsx「M1 测试治具PC端通讯协议」）
+  0x0009 固件起始帧 / 0x000A 数据帧 / 0x000B 结束帧
+  0x000C 查固件版本(Flash) / 0x000D 查固件版本(被烧板) / 0x0112 烧录到被烧板
+  未识别命令回 NIY(0xFF)；CRC 错误按协议只诊断不回 ACK
+
+验证（429 项断言全过, Keil 0 Error / 0 Warning, ROM 23.5kB）
+  test/protocol_test.c  协议层 61 项
+  test/isp_test.c       ISP 字节级仿真 189 项（3 种编译配置）
+  test/app_test.c       全链路仿真 161 项（PC帧→上传→SPI Flash→ISP→被烧板 Flash）
+  tools/foc_jig_tool.py 跨语言字节交叉验证 18 项
+  logicprobe            状态机形式化校验 19 项 0 error（模型已确认）
+
+文档 docs/00~05，其中 04 是上板联调手册、05 是 CubeMX 再生成须知。

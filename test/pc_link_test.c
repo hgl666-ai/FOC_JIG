@@ -73,6 +73,14 @@ uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len)
 #include "uart_port.h"
 #include "app_frame.h"
 
+/* pc_link.c 现在把收到的字节交给 APP_PcInput()（那个入口里还有 ASCII 控制台的判断），
+ * 而 APP_PcInput 的实现在 app.c 里 —— 本测试不链接 app.c，所以在这里给一个替身：
+ * 只是把字节原样转给帧解析器，等于控制台没开时的行为，正是本测试要验的传输语义。 */
+void APP_PcInput(uint8_t b)
+{
+    APP_Frame_Feed(b);
+}
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart3;
 

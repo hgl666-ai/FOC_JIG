@@ -1,0 +1,135 @@
+============================================================
+ SWD programming engine spike (pure simulation)
+ target model: STM32F405RGT6 / SW-DP idcode 0x2BA01477
+============================================================
+
+--- 1. connect (line reset + 0xE79E switch + IDCODE) ---
+  [ok]   SWD_Connect -> OK
+  [ok]   DP IDCODE (= 0x2BA01477)
+  [ok]   JTAG->SWD switch sequence recognised (= 0x00000001)
+  [ok]   line resets seen by target (= 0x00000002)
+  [ok]   no SWDIO drive contention (= 0x00000000)
+  [ok]   SWD_IsAlive (second probe, no reset) -> OK
+  [ok]   SWD_PowerUp (CDBG/CSYS power-up ACK) -> OK
+  [ok]   SWD_MemInit (SELECT AP0 + CSW) -> OK
+
+--- 2. core control (halt / identify / freeze watchdog) ---
+  [ok]   CM_Halt -> OK
+  [ok]   CM_IsHalted read -> OK
+  [ok]   core reports S_HALT=1
+  [ok]   target core is actually halted
+  [ok]   CM_ReadDevId -> OK
+  [ok]   DBGMCU DEV_ID = 0x413 (STM32F405/407)
+  [ok]   CM_FreezeWatchdogs -> OK
+  [ok]   DBGMCU_APB1_FZ: IWDG stopped in debug (= 0x00000001)
+
+--- 3. MEM-AP access + posted-read correctness ---
+  [ok]   read target UID word -> OK
+  [ok]   UID word is sane (posted read not stale)
+  [ok]   read DBGMCU_IDCODE via MEM-AP -> OK
+  [ok]   DEV_ID through generic memory path (= 0x00000413)
+  [ok]   read erased flash word -> OK
+  [ok]   flash is erased (0xFFFFFFFF) (= 0xFFFFFFFF)
+
+--- 4. burn: erase + program + verify (boot image, 512B @ 0x08000000) ---
+  [ok]   F4_EraseRange sector0 -> OK
+  [ok]   one sector erase happened (= 0x00000001)
+  [ok]   F4_ProgramImage -> OK
+  [ok]   F4_VerifyImage -> OK
+  [ok]   target flash content == image byte for byte
+  [ok]   word program count (= 0x00000080)
+
+--- 5. burn: non-word-aligned tail (254B @ 0x08020000, sector5) ---
+  [ok]   erase sector5 only -> OK
+  [ok]   F4_ProgramImage (tail) -> OK
+  [ok]   F4_VerifyImage (tail) -> OK
+  [ok]   tail bytes match
+  [ok]   byte 254 padded with 0xFF
+  [ok]   byte 255 padded with 0xFF
+  [ok]   next word untouched
+  [ok]   sector0 still holds boot image (no cross-sector damage)
+
+--- 6. read path cross-check: single word vs auto-increment block ---
+  [ok]   SWD_MemReadBlock x32 -> OK
+  [ok]   block read == 32 single reads
+  [ok]   block read[0] == SP from vector table
+  [ok]   block read[1] == reset vector
+
+--- 7. reset and run ---
+  [ok]   CM_ResetAndRun (AIRCR SYSRESETREQ) -> OK
+  [ok]   core is running after reset
+  [ok]   PC loaded from reset vector (= 0x08000101)
+  [ok]   SP loaded from vector table (= 0x20001000)
+
+--- 8. negative cases ---
+  [ok]   connect with target detached -> NO_ACK
+  [ok]   no hang on missing target
+  [ok]   reconnect after re-attach -> OK
+  [ok]   read succeeds across 4 injected WAITs -> OK
+  [ok]   target really sent 4 WAITs (= 0x00000004)
+  [ok]   read recovers after 1 injected FAULT -> OK
+  [ok]   target really sent 1 FAULT (= 0x00000001)
+  [ok]   re-program without erase is rejected (PGAERR) -> FLASH_ERR
+  [ok]   target reported a flash error flag
+  [ok]   verify detects corrupted byte -> VERIFY_MISMATCH
+  [ok]   erase times out when BSY never clears -> TIMEOUT
+
+--- 9. counters (simulation) ---
+  transactions        : 16493
+  SWCLK cycles total  : 775789
+  burn 512B: clocks   : 38493  transactions: 819
+  contention          : 0 (must be 0)
+  parity errors       : 0 (must be 0)
+  host TA in data ph. : 5717
+  locked-flash reject : 0
+  bad psize           : 0
+  unmapped accesses   : 0
+  rdbuff reads        : 5248
+  sector erases       : 2
+  word programs       : 192
+  [ok]   zero contention overall (= 0x00000000)
+  [ok]   zero line-level parity errors (= 0x00000000)
+  [ok]   never programmed with wrong PSIZE (= 0x00000000)
+  [ok]   never hit locked-flash rejection (= 0x00000000)
+
+--- 10. timing projection (from measured cycle counts) ---
+  512B burn (erase+program+verify): 38493 SWCLK cycles / 819 transactions
+  measured            : 76986 SWCLK cycles per KB
+  full 1MB  @2MHz     : 39.4 s      @4MHz : 19.7 s
+  300KB app @2MHz     : 11.5 s      @4MHz : 5.8 s
+  note: this code is the unoptimised stage-1 path
+        (TAR rewritten per access, per-word flag clear, 3-transaction SR poll).
+        stage-2 (block writes + 1-transaction poll) should cut this ~3x.
+
+--- 11. spec semantics pins (register bits + CSW.AddrInc) ---
+  [ok]   FLASH_SR.EOP   = bit0 (= 0x00000001)
+  [ok]   FLASH_SR.OPERR = bit1 (= 0x00000002)
+  [ok]   FLASH_SR.WRPERR= bit4 (= 0x00000010)
+  [ok]   FLASH_SR.PGAERR= bit5 (= 0x00000020)
+  [ok]   FLASH_SR.PGPERR= bit6 (= 0x00000040)
+  [ok]   FLASH_SR.PGSERR= bit7 (= 0x00000080)
+  [ok]   FLASH_SR.BSY   = bit16 (= 0x00010000)
+  [ok]   FLASH_CR.PG    = bit0 (= 0x00000001)
+  [ok]   FLASH_CR.SER   = bit1 (= 0x00000002)
+  [ok]   FLASH_CR.MER   = bit2 (= 0x00000004)
+  [ok]   FLASH_CR.SNB   = bits6:3 (= 0x00000078)
+  [ok]   FLASH_CR.PSIZE=x32 (bits9:8) (= 0x00000200)
+  [ok]   FLASH_CR.STRT  = bit16 <<< 第一版写成 bit15 (= 0x00010000)
+  [ok]   FLASH_CR.LOCK  = bit31 (= 0x80000000)
+  [ok]   FLASH_KEYR KEY1 (= 0x45670123)
+  [ok]   FLASH_KEYR KEY2 (= 0xCDEF89AB)
+  [ok]   DP ABORT 清 sticky = 0x1E (bits1..4) (= 0x0000001E)
+  [ok]   CTRL/STAT CDBGPWRUPREQ = bit28 (= 0x10000000)
+  [ok]   CTRL/STAT CSYSPWRUPACK = bit31 (= 0x80000000)
+  [ok]   CSW = 0x23000052 (AddrInc=0b01 自增) (= 0x23000052)
+  [ok]   DHCSR.C_HALT = bit1 (= 0x00000002)
+  [ok]   DHCSR DBGKEY = 0xA05F<<16 (= 0xA05F0000)
+  [ok]   DHCSR.S_HALT = bit17 (= 0x00020000)
+  [ok]   AIRCR.SYSRESETREQ = bit2 (= 0x00000004)
+  [ok]   two adjacent boot words differ (test needs distinct data)
+  [ok]   AddrInc=0b01: consecutive DRW reads advance
+  [ok]   AddrInc=0b00: consecutive DRW reads stay at TAR
+
+============================================================
+ RESULT: 86 passed, 0 failed
+============================================================

@@ -165,6 +165,11 @@ uint16_t APP_Frame_Buffered(void)
     return frame_pos;
 }
 
+uint16_t APP_Frame_RingCount(void)
+{
+    return (uint16_t)((ring_head - ring_tail) & RING_MASK);
+}
+
 uint8_t *APP_Frame_Consume(uint16_t *len)
 {
     if (len) *len = frame_pos;

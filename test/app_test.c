@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "app.h"
+#include "jig_as.h"
 #include "enc_plan.h"      /* ⑤ 编码器脉冲发生：替身里要用 enc_plan_t / ENC_PLAN_TIM_CLK_HZ */
 #include "app_frame.h"
 #include "protocol_frame.h"
@@ -602,6 +603,7 @@ static USBD_CDC_HandleTypeDef g_cdc;
 USBD_HandleTypeDef hUsbDeviceFS;
 
 static uint8_t  tx_buf[APP_FRAME_BUF_SIZE];   /* 必须装得下整帧(0x000E 应答 87B) */
+static uint8_t  s_ascii_in[64];               /* T28：模拟 PC 敲进来的字节 */
 static uint16_t tx_len = 0;
 static uint32_t tx_count = 0;
 static uint32_t g_tx_oversize = 0;            /* 应答超过替身缓冲的次数(必须为 0) */
@@ -1089,6 +1091,37 @@ static void pump_meas(int n)
  * 20kHz/50% 的假 PWM 边沿"——等于把一个理想信号发生器接在三相上。 */
 static uint8_t g_pulse_edges_on = 1u;      /* 用例可以关掉，模拟"没信号" */
 
+/* 假波形的频率/占空比：默认 20kHz/50%（= 原来写死的行为，老用例不受影响）。
+ * 第 4 步（AS:PW）要验的是 1kHz/50%，所以做成可设的。 */
+static uint32_t g_pulse_freq_hz = 20000u;
+static uint16_t g_pulse_duty_pm = 500u;
+/* bit0/1/2 = A/B/C 要不要灌边沿。默认全灌；关掉某一位就等于"那一相没波形"，
+ * 用来验"单相缺失"（真机上对应某一相驱动级坏掉）。*/
+static uint8_t  g_pulse_phase_mask = 0x07u;
+
+static void pulse_fake_set(uint32_t freq_hz, uint16_t duty_pm)
+{
+    if ((freq_hz < 10u) || (freq_hz > 60000u)) {
+        return;                            /* 超出固件量程：不改 */
+    }
+    if (duty_pm == 0u)   { duty_pm = 500u; }
+    if (duty_pm > 1000u) { duty_pm = 1000u; }
+    g_pulse_freq_hz = freq_hz;
+    g_pulse_duty_pm = duty_pm;
+}
+
+static void pulse_fake_phase_mask(uint8_t mask)
+{
+    g_pulse_phase_mask = (uint8_t)(mask & 0x07u);
+}
+
+static void pulse_fake_reset(void)
+{
+    g_pulse_freq_hz = 20000u;
+    g_pulse_duty_pm = 500u;
+    g_pulse_phase_mask = 0x07u;
+}
+
 /* ── ⑤ 编码器脉冲发生层的宿主替身 ──
  * enc_gen.c 直接写 TIM4 寄存器与 GPIO，宿主机上编译不了，所以这里替身。
  * 替身要能验证的是 **app 层那一段**：请求解析、参数校验、非阻塞状态机、ACK 布局。
@@ -1154,6 +1187,19 @@ uint8_t  EncGen_DoneMask(void)  { return g_enc_done; }
 uint8_t  EncGen_Aborted(void)   { return g_enc_abort; }
 uint16_t EncGen_Flips(uint8_t ph) { return (ph < 3u) ? g_enc_flip[ph] : 0u; }
 uint16_t EncGen_LastPsc(void)   { return 0u; }
+
+/* 寄存器快照（真板上读 TIM4；宿主没有硬件，返回 0） */
+void EncGen_DbgSnapshot(uint16_t out[6])
+{
+    int i;
+
+    if (out == 0) {
+        return;
+    }
+    for (i = 0; i < 6; i++) {
+        out[i] = 0u;
+    }
+}
 uint32_t EncGen_LastClkHz(void) { return ENC_PLAN_TIM_CLK_HZ; }
 
 void PULSE_CfgInit(void) { }
@@ -1162,21 +1208,41 @@ void PULSE_CfgStart(uint16_t window_ms)
 {
     uint32_t k;
     uint32_t t;
+    uint32_t per;
+    uint32_t high;
+    uint32_t win;
 
     PULSE_Start(window_ms);
     if (g_pulse_edges_on == 0u) {
         return;                            /* 没信号：一个边沿都不灌 */
     }
-    /* 20kHz（周期 3600 tick = 50us）50% 占空比，灌满整个窗口 */
+    /* 捕获计时器 72 tick = 1us。按配置的频率/占空比灌满整个窗口：
+     *   默认 20kHz/50% → 周期 3600 tick、高电平 1800 tick（与原来写死的完全一致）；
+     *   设成 1kHz/50%  → 周期 72000 tick、高电平 36000 tick。 */
+    per = 72000000u / g_pulse_freq_hz;
+    if (per < 4u) {
+        per = 4u;
+    }
+    high = (per * (uint32_t)g_pulse_duty_pm) / 1000u;
+    if (high == 0u)      { high = 1u; }
+    if (high >= per)     { high = per - 1u; }
+    win = (uint32_t)window_ms * 72000u;
+
     t = 0u;
-    for (k = 0u; k < 4000u; k++) {
-        PULSE_OnEdge(PULSE_PH_A, t);
-        PULSE_OnEdge(PULSE_PH_A, t + 1800u);
-        PULSE_OnEdge(PULSE_PH_B, t);
-        PULSE_OnEdge(PULSE_PH_B, t + 1800u);
-        PULSE_OnEdge(PULSE_PH_C, t);
-        PULSE_OnEdge(PULSE_PH_C, t + 1800u);
-        t += 3600u;
+    for (k = 0u; (t < win) && (k < 60000u); k++) {
+        if ((g_pulse_phase_mask & 0x01u) != 0u) {
+            PULSE_OnEdge(PULSE_PH_A, t);
+            PULSE_OnEdge(PULSE_PH_A, t + high);
+        }
+        if ((g_pulse_phase_mask & 0x02u) != 0u) {
+            PULSE_OnEdge(PULSE_PH_B, t);
+            PULSE_OnEdge(PULSE_PH_B, t + high);
+        }
+        if ((g_pulse_phase_mask & 0x04u) != 0u) {
+            PULSE_OnEdge(PULSE_PH_C, t);
+            PULSE_OnEdge(PULSE_PH_C, t + high);
+        }
+        t += per;
     }
 }
 
@@ -2783,6 +2849,865 @@ static void t27_dut_raw(void)
 }
 #endif /* JIG_DUT_LINK */
 
+/*==============================================================================
+ * T28 PC 串口助手"手敲命令行"（ASCII 控制台）
+ *----------------------------------------------------------------------------
+ * 场景：FOC 固件还没实现 0x02xx，调试时要能直接在串口助手里打 `AS:Bb` 看回什么。
+ * 规则：以 A5 5B 开头的走帧协议；可打印 ASCII 走命令行；其它丢弃。
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+static void t28_ascii_console(void)
+{
+    uint16_t ac, as_, dlen, n;
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t seq = 0x0B00u;
+
+    printf("\n-- T28 PC 串口助手 ASCII 控制台 --\n");
+
+    /* 1) 打 "AS:Bb" + 回车 → 原样转给 DUT；DUT 回版本 → PC 原样收到 */
+    {
+        static const uint8_t cmd[] = { 'A', 'S', ':', 'B', 'b', '\r' };
+        static const uint8_t rep[] = { 'A', 'S', ':', 'V', '1', '.', '2', '.', '3', '\r', '\n' };
+        uint16_t i;
+
+        s_dut_raw_len = 0;
+        tx_len = 0;
+        memcpy(s_ascii_in, cmd, sizeof(cmd));
+        APP_USB_Receive(s_ascii_in, (uint32_t)sizeof(cmd));
+        CHECK(app_state == APP_STATE_ASCII, "打完回车就进入 ASCII 状态");
+        CHECK(s_dut_raw_len == 5u && memcmp(s_dut_raw, "AS:Bb", 5u) == 0,
+              "DUT 口收到的就是 AS:Bb（5 字节，回车不发出去）");
+
+        for (i = 0u; i < (uint16_t)sizeof(rep); i++) {
+            u2_deliver(&s_rxp1, &huart1, rep[i]);
+        }
+        host_advance(1u);  pump(1);          /* 收进嗅探缓冲 */
+        host_advance(40u); pump(1);          /* 静默 40ms > 30ms → 收尾 */
+        CHECK(app_state == APP_STATE_IDLE, "收完回 IDLE");
+        CHECK(tx_len == (uint16_t)sizeof(rep) &&
+              memcmp(tx_buf, rep, sizeof(rep)) == 0,
+              "PC 原样收到 AS:V1.2.3\\r\\n（没有额外加帧）");
+    }
+
+    /* 2) 不打回车：静默 60ms 也要发出去 */
+    {
+        s_dut_raw_len = 0;
+        tx_len = 0;
+        memcpy(s_ascii_in, "AS:0", 4u);
+        APP_USB_Receive(s_ascii_in, 4u);
+        CHECK(s_dut_raw_len == 0u, "没有结束符时先不急着发");
+        host_advance(60u); pump(1);
+        CHECK(s_dut_raw_len == 4u && memcmp(s_dut_raw, "AS:0", 4u) == 0,
+              "静默 60ms 后自动发出去（AS:0 停电机）");
+        host_advance(2100u); pump(2);        /* 等窗口到点收尾（AS_REPLY_MS=2000） */
+        CHECK(app_state == APP_STATE_IDLE, "没回字也会收尾回 IDLE");
+        /* 提示语本身以 "\r\n" 开头（串口终端里换行更整齐），所以跳过前 2 字节比 */
+        CHECK(tx_len >= 16u && memcmp(&tx_buf[2], "[JIG] no reply", 14u) == 0,
+              "没回字时给 PC 一句 [JIG] no reply，别让人干等");
+    }
+
+    /* 3) 控制台之后，帧命令照旧能用（A5 5B 优先） */
+    {
+        tx_len = 0;
+        n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_JIG_STATUS, seq++, 0, 0u);
+        APP_USB_Receive(s_ascii_in, n);
+        pump(3);
+        CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+              && ac == MGR_CMD_JIG_STATUS,
+              "紧接着的 A5 5B 帧命令仍然正常（两条路共存）");
+    }
+
+    /* 4) 正在跑别的命令时打命令行 → busy，且不碰 DUT 口 */
+    {
+        static const uint8_t cmd[] = { 'A', 'S', ':', 'C', 'S', '\r' };
+        uint8_t mode = MGR_MODE_TEST;
+        uint16_t i;
+
+        tx_len = 0;
+        n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_PULSE, seq++, &mode, 1u);
+        APP_USB_Receive(s_ascii_in, n);      /* 开 200ms 采集窗口 → 状态非 IDLE */
+        pump(1);
+        CHECK(app_state != APP_STATE_IDLE, "采集窗口进行中（非 IDLE）");
+
+        s_dut_raw_len = 0;
+        tx_len = 0;
+        memcpy(s_ascii_in, cmd, sizeof(cmd));
+        APP_USB_Receive(s_ascii_in, (uint32_t)sizeof(cmd));
+        CHECK(s_dut_raw_len == 0u, "忙的时候不往 DUT 口发东西");
+        CHECK(tx_len >= 12u && memcmp(&tx_buf[2], "[JIG] busy", 10u) == 0,
+              "忙的时候回一句 busy 给 PC");
+        for (i = 0u; i < 300u; i++) { host_advance(1u); pump(1); }   /* 等采集窗口跑完 */
+        host_advance(2100u); pump(2);                                /* 等 ASCII 窗口跑完 */
+        CHECK(app_state == APP_STATE_IDLE, "窗口跑完回 IDLE");
+    }
+
+    /* 4c) 透明桥：命令行收尾之后，"迟到"的字节也要自动转给 PC。
+     *     真实场景：AS:MC → AS:MC0（300ms 内到）；AS:D,... 约 2 秒后才主动发。*/
+    {
+        static const uint8_t mc[]  = { 'A', 'S', ':', 'M', 'C', '\r' };
+        static const uint8_t mc0[] = { 'A', 'S', ':', 'M', 'C', '0' };
+        static const uint8_t rep[] = { 'A', 'S', ':', 'D', ',', 'A', '=', '2', '5',
+                                       ',', 'B', '=', '8', '3', ',', 'Z', '=', '0' };
+        uint16_t i;
+
+        s_dut_raw_len = 0;
+        tx_len = 0;
+        memcpy(s_ascii_in, mc, sizeof(mc));
+        APP_USB_Receive(s_ascii_in, (uint32_t)sizeof(mc));
+        CHECK(s_dut_raw_len == 5u && memcmp(s_dut_raw, "AS:MC", 5u) == 0,
+              "透明桥：AS:MC 转发给 DUT");
+
+        for (i = 0u; i < (uint16_t)sizeof(mc0); i++) {
+            u2_deliver(&s_rxp1, &huart1, mc0[i]);
+        }
+        host_advance(1u);  pump(1);          /* 收进嗅探 */
+        host_advance(40u); pump(1);          /* 静默 40ms → 控制台收尾 */
+        CHECK(tx_len == (uint16_t)sizeof(mc0) && memcmp(tx_buf, mc0, sizeof(mc0)) == 0,
+              "透明桥：PC 先收到 AS:MC0");
+        CHECK(app_state == APP_STATE_IDLE, "透明桥：控制台已收尾");
+
+        /* 现在模拟"2 秒后才来的上报" */
+        tx_len = 0;
+        for (i = 0u; i < (uint16_t)sizeof(rep); i++) {
+            u2_deliver(&s_rxp1, &huart1, rep[i]);
+        }
+        pump(3);
+        CHECK(tx_len == (uint16_t)sizeof(rep) && memcmp(tx_buf, rep, sizeof(rep)) == 0,
+              "透明桥：迟到的 AS:D,... 自动转给 PC（不用再发别的命令）");
+        CHECK(app_state == APP_STATE_IDLE, "透明桥：转发后仍是 IDLE");
+    }
+
+    /* 5) 空行 / 回车 不污染帧解析 */
+    {
+        tx_len = 0;
+        memcpy(s_ascii_in, "\r\n", 2u);
+        APP_USB_Receive(s_ascii_in, 2u);
+        pump(2);
+        CHECK(tx_len == 0u && app_state == APP_STATE_IDLE, "空行被吃掉，没有任何反应");
+    }
+}
+#endif /* JIG_DUT_LINK */
+
+/*==============================================================================
+ * T29 AS 文本解析器（纯函数表驱动）
+ *----------------------------------------------------------------------------
+ * 这些函数只回答"认不认得出"，所以可以拿各种畸形输入直接砸，不需要搭时序。
+ * 覆盖：正常 / 大小写 / 前后垃圾 / 缺组 / 单组状态码 / 全零 / 上限 / 溢出 / 前导 0
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+static void t29_as_parse(void)
+{
+    uint16_t a, b, c;
+    struct { const char *s; int ok; uint16_t a, b, c; } enc[] = {
+        { "AS:A100B100C10\r\n",  1, 100, 100, 10 },
+        { "as:a100b100c10",      1, 100, 100, 10 },   /* 大小写不敏感 */
+        { "AS:A0B0C0\r\n",       1,   0,   0,  0 },   /* 全零也算合法（没 Z 时就这样） */
+        { "log xxAS:A7B9C2yy",   1,   7,   9,  2 },   /* 前后有垃圾也能挑出来 */
+        { "AS:A65535B65535C65535", 1, 65535, 65535, 65535 },
+        { "AS:A00100B0100C010",  1, 100, 100, 10 },   /* 前导 0 容错（对面不该发） */
+        { "AS:A0\r\n",           0,   0,   0,  0 },   /* 单组 = 自检状态码，不是上报 */
+        { "AS:A100B100",         0,   0,   0,  0 },   /* 缺 C 组 */
+        { "AS:A100B100C",        0,   0,   0,  0 },   /* C 组没数字 */
+        { "AS:A65536B1C1",       0,   0,   0,  0 },   /* 超 65535 → 整条不认 */
+        { "AS:A123456B1C1",      0,   0,   0,  0 },   /* 超 5 位 → 不认 */
+        { "B100C10",             0,   0,   0,  0 },   /* 没头 */
+    };
+    int i;
+
+    printf("\n-- T29 AS 文本解析器 --\n");
+    for (i = 0; i < (int)(sizeof(enc) / sizeof(enc[0])); i++) {
+        uint16_t len = (uint16_t)strlen(enc[i].s);
+        uint8_t  got;
+        char     msg[96];
+
+        a = b = c = 0xDEADu;
+        got = APP_AsParseEnc((const uint8_t *)enc[i].s, len, &a, &b, &c);
+        sprintf(msg, "ParseEnc[%d] \"%s\" → %s", i, enc[i].s, enc[i].ok ? "认" : "不认");
+        CHECK((got != 0u) == (enc[i].ok != 0), msg);
+        if (enc[i].ok && got) {
+            sprintf(msg, "ParseEnc[%d] 数值 = %u/%u/%u", i,
+                    (unsigned)a, (unsigned)b, (unsigned)c);
+            CHECK(a == enc[i].a && b == enc[i].b && c == enc[i].c, msg);
+        }
+    }
+
+    /* AS:D,A=..,B=..,Z=.. —— FOC 实际的上报格式 */
+    {
+        struct { const char *s; int ok; uint16_t a, b, z; } dd[] = {
+            { "AS:D,A=25,B=83,Z=0\r\n",  1,  25,  83,  0 },
+            { "as:d,a=100,b=100,z=10",     1, 100, 100, 10 },
+            { "AS:D,B=7,A=3,Z=9",          1,   3,   7,  9 },  /* 顺序无所谓 */
+            { "AS:D,A=25,B=83",            0,   0,   0,  0 },  /* 缺 Z */
+            { "AS:A0\r\n",               0,   0,   0,  0 },  /* 没 AS:D 前缀 */
+            { "AS:D,A=99999,B=1,Z=1",      0,   0,   0,  0 },  /* 超 65535 */
+        };
+        int k;
+
+        for (k = 0; k < (int)(sizeof(dd) / sizeof(dd[0])); k++) {
+            uint16_t la = 0, lb = 0, lz = 0;
+            uint8_t  g2 = APP_AsParseEncD((const uint8_t *)dd[k].s,
+                                          (uint16_t)strlen(dd[k].s), &la, &lb, &lz);
+            char     m2[96];
+
+            sprintf(m2, "ParseEncD[%d] \"%s\" → %s", k, dd[k].s, dd[k].ok ? "认" : "不认");
+            CHECK((g2 != 0u) == (dd[k].ok != 0), m2);
+            if (dd[k].ok && g2) {
+                sprintf(m2, "ParseEncD[%d] 数值 = %u/%u/%u", k,
+                        (unsigned)la, (unsigned)lb, (unsigned)lz);
+                CHECK(la == dd[k].a && lb == dd[k].b && lz == dd[k].z, m2);
+            }
+        }
+    }
+
+    /* 前缀匹配：版本号 */
+    CHECK(APP_AsHasPrefix((const uint8_t *)"bb:0.3.0\r\n", 10u, AS_PREFIX_VERSION) == 1u,
+          "实测回字 bb:0.3.0 → 版本前缀认得出");
+    CHECK(APP_AsHasPrefix((const uint8_t *)"AS:V1.2.3\r\n", 11u, AS_PREFIX_VERSION2) == 1u,
+          "兼容前缀 AS:V 也认");
+    CHECK(APP_AsHasPrefix((const uint8_t *)"BB:0.3.0", 8u, AS_PREFIX_VERSION) == 1u,
+          "大写 BB: 也认（大小写不敏感）");
+    CHECK(APP_AsHasPrefix((const uint8_t *)"as:v1.2.3", 9u, AS_PREFIX_VERSION2) == 1u,
+          "小写 as:v 也认（兼容前缀）");
+    CHECK(APP_AsHasPrefix((const uint8_t *)"AS:A0", 5u, AS_PREFIX_VERSION) == 0u,
+          "AS:A0 不是版本前缀");
+
+    /* 状态码：A0~A3，且必须"完整"（后面是结束符） */
+    CHECK(APP_AsFindCode((const uint8_t *)"AS:A0\r\n", 7u) == 0u, "A0 = 自检通过");
+    CHECK(APP_AsFindCode((const uint8_t *)"as:a1", 5u) == 1u, "a1 = ADC 校准失败（小写）");
+    CHECK(APP_AsFindCode((const uint8_t *)"AS:A2\n", 6u) == 2u, "A2 = 编码器校准失败");
+    CHECK(APP_AsFindCode((const uint8_t *)"AS:A3", 5u) == 3u, "A3 = 相位缺失（串尾）");
+    CHECK(APP_AsFindCode((const uint8_t *)"AS:A4\r\n", 7u) == 0xFFu, "A4 不是合法状态码");
+    CHECK(APP_AsFindCode((const uint8_t *)"AS:A0B0C0\r\n", 11u) == 0xFFu,
+          "AS:A0B0C0 是编码器上报，不能被认成状态码 A0");
+    CHECK(APP_AsFindCode((const uint8_t *)"hello", 5u) == 0xFFu, "没有状态码时返回 FF");
+}
+#endif /* JIG_DUT_LINK */
+
+/*==============================================================================
+ * T30 0x0022 六步测试流程
+ *----------------------------------------------------------------------------
+ * 两条路径：
+ *   SC1  FOC 回 AS:A0 —— 全好（ADC 没注入 → 步1 失败，其余照跑）
+ *   SC2  FOC 回 AS:A2 —— 走编码器分支：发 AS:MC、治具打 100/100/10、解析 AS:AaBbCc
+ * 报告 21B：[0]状态 [1]跑到第几步 [2]第一个失败步 + 6×(code, detail u16)
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+static void as_inject(const char *txt)
+{
+    while (*txt != '\0') {
+        u2_deliver(&s_rxp1, &huart1, (uint8_t)(*txt));
+        txt++;
+    }
+}
+
+static int as_sent(const char *cmd)
+{
+    uint16_t n = (uint16_t)strlen(cmd);
+    uint16_t i;
+
+    if ((cmd == 0) || (n == 0u) || (s_dut_raw_len < n)) {
+        return 0;
+    }
+    for (i = 0u; (uint16_t)(i + n) <= s_dut_raw_len; i++) {
+        if (memcmp(&s_dut_raw[i], cmd, n) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void t30_flow6(void)
+{
+    uint16_t n, ac, as_, dlen;
+    uint16_t seq = 0x0E00u;
+    uint8_t  d[FRAME_MAX_DATA];
+
+    printf("\n-- T30 0x0022 六步测试流程 --\n");
+
+    /* ═══ SC1：AS:A0（全好）═══ */
+    {
+        s_dut_raw_len = 0;
+        tx_len = 0;
+        n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq++, 0, 0u);
+        APP_USB_Receive((uint8_t *)s_ascii_in, n);
+        pump(2);
+        CHECK(app_state == APP_STATE_FLOW6, "受理后进入 FLOW6");
+        CHECK(as_sent("AS:Bb"), "步2 先问版本（AS:Bb）");
+
+        as_inject("AS:V1.2.3\r\n");
+        pump(2);
+        CHECK(as_sent("AS:CS"), "收到版本后发 AS:CS 自检");
+
+        as_inject("AS:A0\r\n");
+        pump(2);
+        CHECK(as_sent("AS:S0"), "拿到 AS:A0 立刻发 AS:S0 停电机");
+
+        host_advance(60u);
+        pump(3);                                       /* 停稳 → DONE → 发报告 */
+        CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u,
+              "流程跑完给出报告");
+        CHECK(ac == MGR_CMD_FLOW_TEST && dlen == MGR_FLOW_TEST_RESP_LEN,
+              "报告 21 字节");
+        CHECK(d[1] == 6u, "跑到第 6 步");
+        CHECK(d[3] == 0x02u, "步1(ADC)：宿主没注入电压 → 判失败");
+        CHECK(d[6] == 0x01u, "步2(存活)：通过");
+        CHECK(d[9] == 0x01u && d[10] == 0u && d[11] == 0u,
+              "步3(自检)：通过，detail = A0");
+        CHECK(d[12] == 0x00u, "步4(三相)：A0 时跳过（code 00）");
+        CHECK(d[15] == 0x00u, "步5(编码器)：A0 时跳过（code 00）");
+        CHECK(d[18] == 0x01u, "步6(收尾)：通过");
+        CHECK(d[2] == 1u, "第一个失败步 = 1（ADC）");
+        CHECK(d[0] == APP_STATUS_ERR_TEST, "有失败 → 状态 05");
+        CHECK(app_state == APP_STATE_IDLE, "结束后回 IDLE");
+    }
+
+    /* ═══ SC2：AS:A2 → 编码器分支 ═══ */
+    {
+        s_dut_raw_len = 0;
+        tx_len = 0;
+        n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq++, 0, 0u);
+        APP_USB_Receive((uint8_t *)s_ascii_in, n);
+        pump(2);
+        as_inject("AS:V1.2.3\r\n");
+        pump(2);
+        as_inject("AS:A2\r\n");
+        pump(2);
+        CHECK(as_sent("AS:S0"), "A2 也要先停电机");
+        host_advance(60u);
+        pump(3);
+        CHECK(as_sent("AS:MC"), "A2 分支：发 AS:MC 进数编码器模式");
+
+        as_inject("AS:MC0\r\n");
+        pump(2);                                       /* 进模式 → 开始打脉冲 */
+        CHECK(g_enc_rec_cnt[0] == 100u && g_enc_rec_cnt[1] == 100u &&
+              g_enc_rec_cnt[2] == 10u,
+              "治具打 A=100 B=100 Z=10");
+        CHECK(g_enc_rec_freq[0] == 5000u, "脉冲频率 5kHz");
+
+        CHECK(as_sent("AS:ME"), "脉冲发完发 AS:ME 让对面结束并上报");
+        as_inject("AS:D,A=100,B=100,Z=10\r\n");
+        pump(4);
+        CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+              && dlen == MGR_FLOW_TEST_RESP_LEN, "编码器分支给出报告");
+        CHECK(d[15] == 0x01u, "步5(编码器)：通过");
+        CHECK(((uint16_t)((d[16] << 8) | d[17])) == 0x0007u, "三相对数 → 掩码 7");
+        CHECK(d[12] == 0x00u, "步4(三相)：A2 时跳过");
+        CHECK(app_state == APP_STATE_IDLE, "结束后回 IDLE");
+    }
+
+    /* ═══ SC3：AS:A2 + 没有 Z（报 C0）→ 仍算三相对 ═══ */
+    {
+        s_dut_raw_len = 0;
+        tx_len = 0;
+        n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq++, 0, 0u);
+        APP_USB_Receive((uint8_t *)s_ascii_in, n);
+        pump(2);
+        as_inject("AS:V1.2.3\r\n");
+        pump(2);
+        as_inject("AS:A2\r\n");
+        pump(2);
+        host_advance(60u);
+        pump(3);
+        as_inject("AS:MC0\r\n");
+        pump(2);
+        pump(4);                                         /* 等脉冲发完 + 发出 AS:ME */
+        as_inject("AS:D,A=100,B=100,Z=0\r\n");         /* 没有 Z 的编码器 */
+        pump(4);
+        CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+              && dlen == MGR_FLOW_TEST_RESP_LEN, "无 Z 的编码器也能给出报告");
+        CHECK(d[15] == 0x01u, "步5(编码器)：C0 且 A/B 对 → 仍判通过");
+        CHECK(((uint16_t)((d[16] << 8) | d[17])) == 0x0007u, "掩码仍是 7（Z 按不判处理）");
+    }
+
+    /* ═══ SC4：计数差太多 → 判失败 ═══ */
+    {
+        s_dut_raw_len = 0;
+        tx_len = 0;
+        n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq++, 0, 0u);
+        APP_USB_Receive((uint8_t *)s_ascii_in, n);
+        pump(2);
+        as_inject("AS:V1.2.3\r\n");
+        pump(2);
+        as_inject("AS:A2\r\n");
+        pump(2);
+        host_advance(60u);
+        pump(3);
+        as_inject("AS:MC0\r\n");
+        pump(2);
+        pump(4);
+        as_inject("AS:D,A=150,B=100,Z=10\r\n");        /* A 相多了 50 个 → 超 ±2% */
+        pump(4);
+        CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+              && dlen == MGR_FLOW_TEST_RESP_LEN, "计数不符也能给报告");
+        CHECK(d[15] == 0x02u, "步5(编码器)：A 相数不对 → 判失败");
+        CHECK(((uint16_t)((d[16] << 8) | d[17])) == 0x0006u, "掩码 = bit1|bit2（A 相没对上）");
+    }
+}
+#endif /* JIG_DUT_LINK */
+
+/*==============================================================================
+ * T31 0x0022 步4：AS:PW 三相 1kHz/50%
+ *----------------------------------------------------------------------------
+ * 步4 的判据是"周期 0.5~2ms、占空比 450~550‰"。这个用例把替身设成 1kHz/50%，
+ * 验证三分支：正常通过 / 频率不对 / 占空比不对。
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+/* 跑到第 4 步并等到报告：返回 1 = 拿到 21B 报告 */
+static int flow6_run_a3(uint8_t *d, uint16_t *dlen_out)
+{
+    uint16_t n, ac, as_, dlen;
+    uint16_t seq = 0x0F00u;
+    uint32_t i;
+
+    s_dut_raw_len = 0;
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq, 0, 0u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(2);
+    as_inject("AS:V1.2.3\r\n");
+    pump(2);
+    as_inject("AS:A3\r\n");                        /* 相位缺失 → 走步4 */
+    pump(2);
+    host_advance(60u);
+    pump(3);
+    if (!as_sent("AS:PW")) {
+        return 0;
+    }
+    for (i = 0u; i < 6000u; i++) {                 /* 等采集窗口跑完（200ms）*/
+        if (tx_len > 0u) {
+            break;
+        }
+        host_advance(1u);
+        pump(1);
+    }
+    if (tx_len == 0u) {
+        return 0;
+    }
+    if (Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) == 0u) {
+        return 0;
+    }
+    *dlen_out = dlen;
+    return 1;
+}
+
+static void t31_flow6_pwm(void)
+{
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t dlen = 0;
+
+    printf("\n-- T31 0x0022 步4：AS:PW 三相 1kHz/50%% --\n");
+
+    /* ── 1) 1kHz / 50%：三路都该判"有波形" ── */
+    pulse_fake_set(1000u, 500u);
+    CHECK(flow6_run_a3(d, &dlen) != 0, "A3 分支能跑到第 4 步并给出报告");
+    CHECK(dlen == MGR_FLOW_TEST_RESP_LEN, "报告 21 字节");
+    CHECK(d[12] == 0x01u, "步4(三相)：1kHz/50% 三路都有 → 通过");
+    CHECK(((uint16_t)((d[13] << 8) | d[14])) == 0x0007u, "掩码 7（A/B/C 都有波形）");
+    CHECK(d[0] == APP_STATUS_ERR_TEST && d[2] == 1u,
+          "步1(ADC) 没注入 → 整体 05、第一个失败步仍是 1");
+    CHECK(app_state == APP_STATE_IDLE, "结束后回 IDLE");
+
+    /* ── 2) 频率不对（20kHz）：判"没波形" ── */
+    pulse_fake_set(20000u, 500u);
+    CHECK(flow6_run_a3(d, &dlen) != 0, "频率不对时也能收尾出报告");
+    CHECK(d[12] == 0x02u, "步4：20kHz 不在 0.5~2ms 窗口内 → 判失败");
+    CHECK(((uint16_t)((d[13] << 8) | d[14])) == 0x0000u, "掩码 0（三路都不算有波形）");
+
+    /* ── 3) 占空比不对（80%）── */
+    pulse_fake_set(1000u, 800u);
+    CHECK(flow6_run_a3(d, &dlen) != 0, "占空比不对时也能收尾出报告");
+    CHECK(d[12] == 0x02u, "步4：80% 占空比超出 450~550‰ → 判失败");
+    CHECK(((uint16_t)((d[13] << 8) | d[14])) == 0x0000u, "掩码 0");
+
+    /* ── 4) 边界：470‰ 仍算合格（容差内）── */
+    pulse_fake_set(1000u, 470u);
+    CHECK(flow6_run_a3(d, &dlen) != 0, "边界占空比也能收尾");
+    CHECK(d[12] == 0x01u, "步4：470‰ 在容差内 → 仍判通过");
+
+    pulse_fake_reset();                            /* 恢复默认 20kHz，别影响别的用例 */
+}
+#endif /* JIG_DUT_LINK */
+
+/*==============================================================================
+ * T32~T37 0x0022 的其余路径（把"每一步"的通过与失败都覆盖到）
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+/* 把 6 路 ADC 灌成"应该合格"的码值，并等 EMA 收敛。
+ * 换算：raw = mv × 4095 × k_num / (3300 × k_den)（与 measure.c 的 k_cfg 一致） */
+static void adc_inject_ok(void)
+{
+    MEAS_TestInject((meas_id_t)MEAS_CH_V24,  3773u);   /* 24V   (k=47/371) */
+    MEAS_TestInject((meas_id_t)MEAS_CH_V10,  1572u);   /* 10V   (k=47/371) */
+    MEAS_TestInject((meas_id_t)MEAS_CH_V5,   3723u);   /* 5V    (k=3/5)    */
+    MEAS_TestInject((meas_id_t)MEAS_CH_V33,  3723u);   /* 3.3V  (k=10/11 -> 引脚 3000mV) */
+    MEAS_TestInject((meas_id_t)MEAS_CH_CUR1, 2048u);   /* 1.65V (k=1)      */
+    MEAS_TestInject((meas_id_t)MEAS_CH_CUR2, 2048u);
+    for (int i = 0; i < 800; i++) {
+        MEAS_Poll();
+        g_tick++;
+    }
+    {
+        meas_snapshot_t dbg;
+        MEAS_Snapshot(&dbg);
+        printf("     [ADC] ");
+        for (int i = 0; i < 6; i++) {
+            static const int ch[6] = { 0, 1, 2, 3, 7, 8 };
+            printf("ch%d=%umV/0x%02X ", ch[i],
+                   (unsigned)dbg.ch[ch[i]].mv, (unsigned)dbg.ch[ch[i]].flags);
+        }
+        printf("\n");
+    }
+}
+
+/* 发一条 0x0022 并跑到"步1 完成" */
+static void f6_start(uint16_t seq)
+{
+    uint16_t n;
+
+    s_dut_raw_len = 0;
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq, 0, 0u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(2);
+}
+
+/* 等报告（最多 6000 个 tick）；返回 1 = 拿到 */
+static int f6_wait(uint8_t *d, uint16_t *dlen)
+{
+    uint16_t ac, as_;
+    uint32_t i;
+
+    for (i = 0u; i < 6000u; i++) {
+        if (tx_len > 0u) {
+            break;
+        }
+        host_advance(1u);
+        pump(1);
+    }
+    if (tx_len == 0u) {
+        return 0;
+    }
+    return (Frame_Parse(tx_buf, tx_len, &ac, &as_, d, dlen) != 0u) ? 1 : 0;
+}
+
+static void t32_flow6_all_green(void)
+{
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t dlen = 0;
+
+    printf("\n-- T32 六步流程：全绿路径 --\n");
+    adc_inject_ok();
+    pulse_fake_set(1000u, 500u);          /* 备用：A0 不会走到步4 */
+
+    f6_start(0x1100u);
+    CHECK(as_sent("AS:Bb"), "步2 发出 AS:Bb");
+    as_inject("AS:V1.2.3\r\n");
+    pump(2);
+    CHECK(as_sent("AS:CS"), "发出 AS:CS");
+    as_inject("AS:A0\r\n");
+    pump(2);
+    CHECK(as_sent("AS:S0"), "收到 A0 立刻停车");
+    host_advance(60u);
+    pump(3);
+
+    CHECK(f6_wait(d, &dlen) != 0, "给出报告");
+    CHECK(dlen == MGR_FLOW_TEST_RESP_LEN, "报告 21 字节");
+    CHECK(d[0] == APP_STATUS_OK, "**六步全过 → 状态 00**");
+    CHECK(d[1] == 6u && d[2] == 0u, "跑到第 6 步，没有失败步");
+    CHECK(d[3] == 0x01u, "步1(ADC)：注入合格码值 → 通过");
+    CHECK(((uint16_t)((d[4] << 8) | d[5])) == 0x00FFu, "步1 detail = FF（六路都好）");
+    CHECK(d[6] == 0x01u, "步2(存活)：通过");
+    CHECK(d[9] == 0x01u, "步3(自检)：通过");
+    CHECK(d[12] == 0x00u && d[15] == 0x00u, "步4/步5：A0 时跳过");
+    CHECK(d[18] == 0x01u, "步6(收尾)：通过");
+    CHECK(app_state == APP_STATE_IDLE, "回 IDLE");
+
+    pulse_fake_reset();
+}
+
+static void t33_flow6_alive_timeout(void)
+{
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t dlen = 0;
+    int      i;
+
+    printf("\n-- T33 六步流程：存活超时（板子没起来）--\n");
+    f6_start(0x1110u);
+    /* 15 次轮询、每次 200ms：一路推进但不注入任何回字 */
+    for (i = 0; i < 60; i++) {
+        if (app_state != APP_STATE_FLOW6) {
+            break;
+        }
+        host_advance(220u);
+        pump(2);
+    }
+    CHECK(f6_wait(d, &dlen) != 0, "超时后仍能收尾出报告");
+    CHECK(d[6] == 0x02u, "步2(存活)：判失败");
+    CHECK(((uint16_t)((d[7] << 8) | d[8])) == 15u, "步2 detail = 问了 15 次");
+    CHECK(d[9] == 0x00u, "步3(自检)：**跳过**（板子没起来就不再问）");
+    CHECK(d[2] == 2u, "第一个失败步 = 2");
+    CHECK(d[0] == APP_STATUS_ERR_TEST, "整体 05");
+}
+
+static void t34_flow6_a1(void)
+{
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t dlen = 0;
+
+    printf("\n-- T34 六步流程：AS:A1（ADC 校准失败）--\n");
+    f6_start(0x1120u);
+    as_inject("AS:V1.2.3\r\n");
+    pump(2);
+    as_inject("AS:A1\r\n");
+    pump(2);
+    CHECK(as_sent("AS:S0"), "A1 也要先停车");
+    host_advance(60u);
+    pump(3);
+    CHECK(f6_wait(d, &dlen) != 0, "给出报告");
+    CHECK(d[9] == 0x01u, "步3(自检)：命令本身成功（拿到回复）");
+    CHECK(((uint16_t)((d[10] << 8) | d[11])) == 1u, "步3 detail = 1（A1）");
+    CHECK(d[12] == 0x00u && d[15] == 0x00u, "步4/步5：A1 时都跳过");
+    CHECK(d[2] == 3u, "第一个失败步 = 3（A1 是硬失败）");
+    CHECK(d[0] == APP_STATUS_ERR_TEST, "整体 05");
+}
+
+static void t35_flow6_pwm_no_signal(void)
+{
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t dlen = 0;
+    uint32_t i;
+
+    printf("\n-- T35 六步流程：A3 但三相一个边沿都没有 --\n");
+    g_pulse_edges_on = 0u;                /* 替身不灌任何边沿 */
+    f6_start(0x1130u);
+    as_inject("AS:V1.2.3\r\n");
+    pump(2);
+    as_inject("AS:A3\r\n");
+    pump(2);
+    host_advance(60u);
+    pump(3);
+    CHECK(as_sent("AS:PW"), "A3 分支发出 AS:PW");
+    for (i = 0u; i < 6000u; i++) {
+        if (tx_len > 0u) {
+            break;
+        }
+        host_advance(1u);
+        pump(1);
+    }
+    CHECK(f6_wait(d, &dlen) != 0, "给出报告");
+    CHECK(d[12] == 0x02u, "步4(三相)：没有波形 → 失败");
+    CHECK(((uint16_t)((d[13] << 8) | d[14])) == 0x0000u, "掩码 0");
+    g_pulse_edges_on = 1u;
+}
+
+static void t36_flow6_enc_timeout(void)
+{
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t dlen = 0;
+    uint32_t i;
+
+    printf("\n-- T36 六步流程：A2 但 FOC 不报数 --\n");
+    f6_start(0x1140u);
+    as_inject("AS:V1.2.3\r\n");
+    pump(2);
+    as_inject("AS:A2\r\n");
+    pump(2);
+    host_advance(60u);
+    pump(3);
+    CHECK(as_sent("AS:MC"), "发出 AS:MC");
+    as_inject("AS:MC0\r\n");
+    pump(2);
+    CHECK(g_enc_start_calls > 0u, "治具开始打脉冲");
+    /* 之后什么都不注入，等 2 秒超时 */
+    for (i = 0u; i < 4000u; i++) {
+        if (tx_len > 0u) {
+            break;
+        }
+        host_advance(1u);
+        pump(1);
+    }
+    CHECK(f6_wait(d, &dlen) != 0, "超时后仍能收尾");
+    CHECK(d[15] == 0x02u, "步5(编码器)：没收到报数 → 失败");
+    CHECK(((uint16_t)((d[16] << 8) | d[17])) == 0xFFF0u,
+          "detail = 0xFFF0（没收到 AS:D，与数不对区分开）");
+}
+
+static void t37_flow6_param_err(void)
+{
+    uint16_t n, ac, as_, dlen;
+    uint8_t  d[FRAME_MAX_DATA];
+    uint8_t  one = 0x01u;
+
+    printf("\n-- T37 六步流程：参数校验 --\n");
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, 0x1150u, &one, 1u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(3);
+    CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+          && dlen == 1u && d[0] == APP_STATUS_ERR_PARAM,
+          "LEN≠0 → 0B ERR_PARAM");
+}
+
+static void t32_t37_flow6_rest(void)
+{
+    t32_flow6_all_green();
+    t33_flow6_alive_timeout();
+    t34_flow6_a1();
+    t35_flow6_pwm_no_signal();
+    t36_flow6_enc_timeout();
+    t37_flow6_param_err();
+}
+#endif /* JIG_DUT_LINK */
+
+/*==============================================================================
+ * T31b 0x0022 步4：单相缺失（掩码 3 / 5 / 6）
+ *----------------------------------------------------------------------------
+ * 真机场景：某一相驱动级坏了 → 那一相没有 PWM。
+ * 治具必须说得出"是哪一相没有"，所以 detail 的掩码要逐位准。
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+static void t31b_flow6_pwm_single_phase(void)
+{
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t dlen = 0;
+    struct { uint8_t mask; uint16_t want_det; const char *why; } cases[] = {
+        { 0x03u, 0x0003u, "C 相没波形（A/B 有）" },
+        { 0x05u, 0x0005u, "B 相没波形（A/C 有）" },
+        { 0x06u, 0x0006u, "A 相没波形（B/C 有）" },
+        { 0x01u, 0x0001u, "只有 A 相有波形" },
+        { 0x00u, 0x0000u, "三相都没波形" },
+    };
+    int i;
+
+    printf("\n-- T31b 0x0022 步4：单相缺失 --\n");
+
+    for (i = 0; i < (int)(sizeof(cases) / sizeof(cases[0])); i++) {
+        char msg[96];
+
+        pulse_fake_set(1000u, 500u);                 /* 频率/占空比正常，只是缺相 */
+        pulse_fake_phase_mask(cases[i].mask);
+        CHECK(flow6_run_a3(d, &dlen) != 0, "缺相时也能收尾出报告");
+        sprintf(msg, "%s → 步4 判失败", cases[i].why);
+        CHECK(d[12] == 0x02u, msg);
+        sprintf(msg, "%s → 掩码 = 0x%04X", cases[i].why, (unsigned)cases[i].want_det);
+        CHECK(((uint16_t)((d[13] << 8) | d[14])) == cases[i].want_det, msg);
+    }
+
+    pulse_fake_reset();                              /* 恢复：20kHz/50%/三相全灌 */
+}
+#endif /* JIG_DUT_LINK */
+
+/*==============================================================================
+ * T38 0x0022 强制分支（调试用）：健康板也能走步5
+ *----------------------------------------------------------------------------
+ * 请求 LEN=1 DATA=[02] → 不管 AS:CS 回什么，都按 A2 处理 → 一定走步5。
+ * 报告里步3 的 detail 应显示被强制的码（02），如实反映"这次是怎么走的"。
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+static void t38_flow6_force(void)
+{
+    uint16_t n, ac, as_, dlen;
+    uint8_t  d[FRAME_MAX_DATA];
+    uint8_t  force = MGR_FLOW_FORCE_A2;
+    uint32_t i;
+
+    printf("\n-- T38 0x0022 强制分支（强制走步5）--\n");
+
+    adc_inject_ok();                       /* 让步1 通过，报告更干净 */
+    s_dut_raw_len = 0;
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, 0x1180u, &force, 1u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(2);
+
+    as_inject("bb:0.3.0\r\n");             /* 步2：实测的版本回字格式 */
+    pump(2);
+    CHECK(as_sent("AS:CS"), "发出 AS:CS");
+    as_inject("AS:A0\r\n");                /* 真实是 A0，但强制分支要按 A2 走 */
+    pump(2);
+    CHECK(as_sent("AS:S0"), "A0 后先停电机");
+    host_advance(60u);
+    pump(3);
+    CHECK(as_sent("AS:MC"), "**强制后仍然走进步5**（发出 AS:MC）");
+
+    as_inject("AS:MC0\r\n");               /* 对面进计数模式 */
+    pump(2);
+    CHECK(g_enc_start_calls > 0u, "收到 AS:MC0 之后才开始打脉冲");
+    pump(2);                               /* 等脉冲发完 → 发 AS:ME */
+    CHECK(as_sent("AS:ME"), "脉冲发完发 AS:ME");
+    as_inject("AS:D,A=100,B=100,Z=10\r\n");
+    pump(4);
+
+    for (i = 0u; i < 4000u; i++) {
+        if (tx_len > 0u) {
+            break;
+        }
+        host_advance(1u);
+        pump(1);
+    }
+    CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+          && dlen == MGR_FLOW_TEST_RESP_LEN, "强制分支给出报告");
+    CHECK(d[9] == 0x01u, "步3(自检)：命令成功");
+    CHECK(((uint16_t)((d[10] << 8) | d[11])) == 2u, "步3 detail = 2（被强制成 A2）");
+    CHECK(d[15] == 0x01u, "步5(编码器)：通过");
+    CHECK(((uint16_t)((d[16] << 8) | d[17])) == 0x0007u, "步5 掩码 = 7");
+    CHECK(d[12] == 0x00u, "步4(三相)：跳过");
+    CHECK(app_state == APP_STATE_IDLE, "结束后回 IDLE");
+
+    /* 参数校验：非法强制码 → 0B */
+    {
+        uint8_t bad = 0x07u;
+
+        tx_len = 0;
+        n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, 0x1181u, &bad, 1u);
+        APP_USB_Receive((uint8_t *)s_ascii_in, n);
+        pump(3);
+        CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+              && dlen == 1u && d[0] == APP_STATUS_ERR_PARAM,
+              "非法强制码 → 0B ERR_PARAM");
+    }
+}
+#endif /* JIG_DUT_LINK */
+
+/*==============================================================================
+ * T39 慢回也算活着：`AS:Bb` 的回复在几次重试之后才到，仍要认出来
+ *----------------------------------------------------------------------------
+ * 实测 FOC 回一条命令要 1.1~1.8 秒；步2 的重试间隔只有几百毫秒。
+ * 原来每次重试都清空接收缓冲 → 慢回被抹掉 → 误判"板子没起来"。
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+static void t39_flow6_slow_alive(void)
+{
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t dlen = 0;
+    uint32_t i;
+
+    printf("\n-- T39 慢回也算活着（AS:Bb 延迟回复）--\n");
+    f6_start(0x1190u);
+
+    /* 先让它重试几轮（不注入任何回字） */
+    for (i = 0u; i < 4u; i++) {
+        host_advance(450u);
+        pump(2);
+    }
+    CHECK(app_state == APP_STATE_FLOW6, "还在步2 重试中");
+
+    /* 现在才注入回复（"慢回"） */
+    as_inject("bb:0.3.0\r\n");
+    pump(2);
+    CHECK(as_sent("AS:CS"), "慢到的版本回复也能认出来 → 继续走步3");
+
+    /* 收尾：给个 A0，让它正常结束 */
+    as_inject("AS:A0\r\n");
+    pump(2);
+    host_advance(60u);
+    pump(3);
+    CHECK(f6_wait(d, &dlen) != 0, "能给出报告");
+    CHECK(d[6] == 0x01u, "步2(存活)：通过");
+    CHECK(d[9] == 0x01u, "步3(自检)：通过");
+}
+#endif /* JIG_DUT_LINK */
+
 int main(void)
 {
     printf("=== FOC JIG U1 全链路宿主仿真 (PC帧→上传→SPI Flash→SWD→被烧板) ===\n\n");
@@ -2816,6 +3741,28 @@ int main(void)
     t26_one_cmd_flows();        /* 0x0019/0x001A/0x001B 单项打包 */
 #if (JIG_DUT_LINK != 0)
     t27_dut_raw();              /* 0x001F/0x0020 DUT 原始字节收发 */
+#endif
+#if (JIG_DUT_LINK != 0)
+    t28_ascii_console();        /* PC 串口助手 ASCII 控制台 */
+#endif
+#if (JIG_DUT_LINK != 0)
+    t29_as_parse();             /* AS 文本解析器（纯函数） */
+#endif
+#if (JIG_DUT_LINK != 0)
+    t30_flow6();                /* 0x0022 六步流程 */
+#endif
+#if (JIG_DUT_LINK != 0)
+    t31_flow6_pwm();            /* 0x0022 步4：AS:PW 1kHz/50% */
+#endif
+#if (JIG_DUT_LINK != 0)
+    t31b_flow6_pwm_single_phase();   /* 0x0022 步4：单相缺失 */
+#endif
+#if (JIG_DUT_LINK != 0)
+    t32_t37_flow6_rest();       /* 0x0022 其余路径：全绿/存活超时/A1/无信号/编码超时/参数错 */
+#endif
+#if (JIG_DUT_LINK != 0)
+    t38_flow6_force();          /* 0x0022 强制分支 */
+    t39_flow6_slow_alive();     /* 0x0022 慢回也算活着 */
 #endif
 #endif
 #if (JIG_DUT_LINK == 0)

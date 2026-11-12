@@ -71,6 +71,15 @@ uint8_t EncGen_Aborted(void);
 /** 诊断：某一路上次实际翻转了多少次（调用方与 2×脉冲数 对比） */
 uint16_t EncGen_Flips(uint8_t ph);      /* ph: 0=A 1=B 2=Z */
 
+/**
+  * @brief  取"开跑瞬间"的 TIM4 寄存器快照（诊断用，配合 0x0023）
+  * @param  out  6 个 u16：PSC / CCR3(A相) / CCR1(Z相) / DIER / CCER / CR1
+  * @note   必须在跑过一次 EncGen_Start 之后才有意义；没跑过全是 0。
+  *         存在的理由：真板上出现"计数不动"时，光看 flips=0 分不清是
+  *         NVIC 没使能 / CCR 算成 0 / 定时器没计数 / CCMR 没切成输出。
+  */
+void EncGen_DbgSnapshot(uint16_t out[6]);
+
 /** 本次实际用的 PSC / 时钟（诊断用；0 表示当前没有在发） */
 uint16_t EncGen_LastPsc(void);
 uint32_t EncGen_LastClkHz(void);

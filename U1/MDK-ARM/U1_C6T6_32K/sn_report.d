@@ -1,0 +1,4 @@
+u1_c6t6_32k\sn_report.o: ../Core/Src/sn_report.c
+u1_c6t6_32k\sn_report.o: ../Core/Inc/sn_report.h
+u1_c6t6_32k\sn_report.o: D:\Develop\Keil_MDK\ARM\ARMCC\Bin\..\include\stdint.h
+u1_c6t6_32k\sn_report.o: D:\Develop\Keil_MDK\ARM\ARMCC\Bin\..\include\string.h

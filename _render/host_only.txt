@@ -1,0 +1,313 @@
+============================================================
+ 1/8  Protocol layer host unit test
+============================================================
+=== FOC JIG U1 协议层宿主单元测试 ===
+
+[1] CRC16-MODBUS
+  CRC("123456789") = 0x4B37  (标准值 0x4B37)
+[2] 组帧/解帧 往返 + 协议命令实际字节
+  0x0009 固件起始帧: A5 5B 00 09 12 34 00 09 00 02 00 00 10 00 01 02 03 C8 61 
+  0x000A 固件数据帧: A5 5B 00 0A 12 34 00 04 DE AD BE EF 79 2E 
+  0x000B 固件结束帧: A5 5B 00 0B 12 34 00 00 FE 81 
+  0x000C 查Flash版本:  A5 5B 00 0C 12 34 00 00 3E 34 
+  0x000D 查FOC板版本: A5 5B 00 0D 12 34 00 00 FE 09 
+  0x0112 烧录FOC板:    A5 5B 01 12 12 34 00 00 ED 9D 
+  ACK 0x0009 成功:      A5 5B 00 09 00 01 00 01 00 DD 89 
+  ACK 0x000C v1.0.0:      A5 5B 00 0C 00 01 00 04 00 01 00 00 2A 2A 
+  ACK 0x000D 失败:      A5 5B 00 0D 00 05 00 04 0C 00 FF FF 5A 31 
+[3] 非法帧拒绝
+[4] 字节流状态机
+
+=== 共 61 项检查, 失败 0 项 ===
+[PASS] protocol_test
+
+============================================================
+ 2/8  Full-chain test (PC frame to target flash, all simulated)
+============================================================
+=== FOC JIG U1 全链路宿主仿真 (PC帧→上传→SPI Flash→ISP→被烧板) ===
+
+[T1] SPII Flash 器件识别
+    JEDEC ID = 0xC84018 (期望 0xC84018)
+[T2] 空 Flash 查询 / 未知命令 / CRC 错误 / SEQ 回显
+[T3] 上传 → 查询 → 双槽切换
+    扇区擦除=2 页编程=8 WREN=14 RDSR=24 WEL违规=0
+[T4] 0x0009 参数异常
+[T5] 上传溢出 → 错误锁存
+[T6] 字节数与声明不符 → ERR_COUNT 且不写完整标志
+[T7] 上传 10s 无新数据 → ERR_TIMEOUT 并回 IDLE
+[T8] 0x0112 前置检查
+[T9] 端到端: PC帧 → 上传 → SPI Flash → 0x0112 SWD → 被烧板 Flash
+    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=3 编程字=102 SWD 事务=721
+    烧 402 B 用了 34016 个 SWCLK 周期 (86647 周期/KB)
+    推算 300KB: 26.0 s @1MHz   13.0 s @2MHz   6.5 s @4MHz
+    (只算 SWD 链路时间; 真实擦除还要等 Flash: 128KB 扇区约 1.3s/个)
+[T10] 烧录中 BUSY / 目标不在时干净失败
+[T13] SPI Flash 不在线/型号不对 → 第一条命令就以 ERR_FLASH 暴露
+[T14] 0x000E 测量: mode=0 只读 / mode=1 测试 / 非法 mode
+[T15] 0x000F 脉冲捕获: mode=0 只读 / mode=1 测试 / 非法 mode
+
+=== 共 250 项检查, 失败 0 项 ===
+[PASS] app_test
+
+============================================================
+ 3/8  Measurement module test (divider to voltage, thresholds)
+============================================================
+============================================================
+ measure.c host unit test (divider -> voltage -> threshold)
+============================================================
+
+--- 1. conversion (counts -> input mV) ---
+  [ok]   V24: 24000 mV in (got 24001, want 24000 +-243)
+  [ok]   V10: 10000 mV in (got 10000, want 10000 +-103)
+  [ok]   V5: 5000 mV in (got 5000, want 5000 +-53)
+  [ok]   V33: 3300 mV in (got 3300, want 3300 +-36)
+  [ok]   PHA: 24000 mV in (got 24002, want 24000 +-243)
+  [ok]   PHB: 12000 mV in (got 11998, want 12000 +-123)
+  [ok]   PHC: 0 mV in (got 0, want 0 +-3)
+  [ok]   CUR1: 1000 mV in (got 1000, want 1000 +-13)
+  [ok]   CUR2: 2000 mV in (got 2000, want 2000 +-23)
+
+--- 2. sheet cross-check (24V/10V/7V -> 3.04032/1.2668/0.88676 V) ---
+  [ok]   sheet pt (got 3040431, want 3040320 +-150)
+         24000 mV -> 3.04043 V (sheet 3.04032 V)
+  [ok]   sheet pt (got 1266846, want 1266800 +-150)
+         10000 mV -> 1.26685 V (sheet 1.26680 V)
+  [ok]   sheet pt (got 886792, want 886760 +-150)
+         7000 mV -> 0.88679 V (sheet 0.88676 V)
+
+--- 3. EMA filter ---
+  [ok]   V5 first sample seeds EMA (no ramp from 0) (got 5000, want 5000 +-50)
+  [ok]   V5 moves toward 4V, not a jump
+  [ok]   V5 settles to 4V after 600 polls (1/64) (got 4000, want 4000 +-40)
+
+--- 4. threshold + stability ---
+  [ok]   not ok after 1 poll (needs stability count)
+  [ok]   ok after MEAS_STABLE_N polls in range
+  [ok]   test begin clears stability -> AllOk=0
+  [ok]   fault mask has all 9 bits right after test begin
+  [ok]   test still running one poll before stable
+  [ok]   test done once all channels stable
+  [ok]   AllOk=1 after the test completed
+  [ok]   fault mask cleared
+
+--- 4b. test timeout ---
+  [ok]   test reports timeout after MEAS_TEST_TIMEOUT_MS
+  [ok]   timeout result stays latched (idempotent)
+
+--- 5. saturation flag ---
+  [ok]   mid-scale is not saturated
+  [ok]   counts=0 flagged as saturated (open/shorted?)
+  [ok]   counts=4095 flagged as saturated
+
+--- 6. full-scale mapping ---
+  [ok]   V24 full scale ~26.05V (got 26049, want 26050 +-60)
+  [ok]   V33 full scale ~3.63V (got 3630, want 3630 +-30)
+  [ok]   CUR1 full scale = 3.3V (got 3300, want 3300 +-20)
+
+--- 7. debug printout ---
+  [ok]   MEAS_Print produced output
+  [ok]   line starts with 'M V24='
+  [ok]   line contains V5=5000
+  [ok]   line contains V33=3300
+  [ok]   line reports OK=1
+         M V24=24001 V10=10000 V5=5000 V33=3300 PHA=6002 PHB=6002 PHC=6002 CUR1=1500 CUR2=1500 OK=1 F=0x000
+
+--- 8. bounds safety ---
+  [ok]   MEAS_GetMv out of range returns 0
+  [ok]   MEAS_IsOk out of range returns 0
+  [ok]   MEAS_Name out of range returns '?'
+  [ok]   MEAS_Get out of range yields zeros
+  [ok]   MEAS_Get(NULL) does not crash
+
+--- 9. snapshot ---
+  [ok]   snapshot ch_count = 9
+  [ok]   snapshot marked valid
+  [ok]   snapshot marked all-ok (full-scale thresholds)
+  [ok]   snapshot round counts scans
+  [ok]   snapshot dt_ms = gap between rounds
+  [ok]   snapshot carries VDDA
+  [ok]   snapshot carries config fingerprint
+  [ok]   config fingerprint is non-zero
+  [ok]   ch[V24].mv matches MEAS_GetMv (got 24001, want 24001 +-1)
+  [ok]   ch[V24].raw carries the raw code
+  [ok]   ch[V24] flagged ok
+  [ok]   ch[CUR1] not flagged sat
+  [ok]   MEAS_Snapshot(NULL) does not crash
+
+--- 10. cross-check compare + tolerance ---
+  [ok]   identical snapshots -> no mismatch
+  [ok]   per-channel mismatch array cleared
+  [ok]   100mV on 5V rail is inside the 200mV tolerance
+  [ok]   400mV on 5V rail flagged
+  [ok]   per-channel array flags the offending channel
+  [ok]   1500mV on a phase channel is inside tolerance
+  [ok]   2500mV on a phase flagged
+  [ok]   lower peer reading also flagged
+  [ok]   short peer snapshot -> all channels flagged
+  [ok]   NULL snapshots are handled
+
+--- 11. meas_pack wire format ---
+  [ok]   snapshot layout is 55B
+  [ok]   cross-check block is 21B
+  [ok]   0x000E response is 77B
+  [ok]   snapshot fits LINK_MAX_PAYLOAD (64)
+  [ok]   response fits FRAME_MAX_DATA (256)
+  [ok]   MeasPack_Snapshot returns 55
+  [ok]   byte0 = flags
+  [ok]   byte1 = ch_count
+  [ok]   round is big-endian
+  [ok]   cfg_crc sits at [8..9]
+  [ok]   channel 0 raw starts at [10]
+  [ok]   channel 0 flags at [14] (5B stride)
+  [ok]   last channel record ends at byte 54
+  [ok]   unpack succeeds
+  [ok]   scalar fields round-trip
+  [ok]   all 9 channel records round-trip
+  [ok]   MeasPack_CcBlock returns 21
+  [ok]   cc flags at [0]
+  [ok]   mask big-endian at [1..2]
+  [ok]   peer mv[0] starts at [3]
+  [ok]   cc unpack succeeds
+  [ok]   cc flags/mask round-trip
+  [ok]   all 9 peer mv values round-trip
+  [ok]   snapshot: buffer too small refused
+  [ok]   snapshot: NULL refused
+  [ok]   snapshot: NULL src refused
+  [ok]   unpack: short input refused
+  [ok]   unpack: NULL refused
+  [ok]   cc block: buffer too small refused
+  [ok]   cc unpack: short refused
+  [ok]   cc block with NULL peer still encodes (mv = 0)
+
+============================================================
+ RESULT: 95 passed, 0 failed
+============================================================
+[PASS] measure_test
+
+============================================================
+ 4/8  UART port driver + U1 to U2 internal link
+============================================================
+========================================
+ UART port + U1<->U2 link host test
+========================================
+
+[1) 环形缓冲 / 逐字节收发]
+
+[2) 发送链式续传 (300B > 256B 环)]
+
+[3) 接收环满 → 丢新字节并计数]
+
+[4) 发送队列满 → 计数, 解除后继续发]
+
+[5) ORE 错误后重新挂接收 (否则这一路永久哑掉)]
+
+[6) 链路 PING 往返 / 应答数据搬运]
+
+[7) 链路超时 (对侧不在) + 状态可恢复]
+
+[8) 链路抗干扰 (CRC 错 / 垃圾 / 超长 LEN) + 恢复]
+
+[9) 忙保护 / timeout=0 的非阻塞语义]
+
+[10) STATUS 数据区打包/解包]
+
+[10b) 链路代码版本一致性检查]
+
+[11) 端到端 STATUS (U1 读 U2 健康度)]
+
+[12) 交叉校验快照交换 (55B 负载)]
+
+[13) 脉冲结果交换 (45B)]
+
+========================================
+ checks: 783, failed: 0
+ ALL PASS
+========================================
+[PASS] uart_test
+
+============================================================
+ 5/8  TIM pulse capture (edge timestamps to period/duty)
+============================================================
+========================================
+ pulse_cap / pulse_pack host test
+========================================
+
+[1) 频率/占空比]
+        20kHz: 周期=20000 ns 高=6652 ns 占空比=333‰ 边沿=100
+
+[2) 低频边界 10Hz]
+
+[3) 无信号]
+
+[4) 丢边沿 / 毛刺]
+
+[5) 超范围]
+
+[6) 环覆盖（边沿数 >> 32）]
+
+[7) 窗口与状态机]
+
+[8) pulse_pack 线格式]
+
+[9) 两端对比]
+
+========================================
+ checks: 84, failed: 0
+ ALL PASS
+========================================
+[PASS] pulse_test
+
+============================================================
+ 6/8  Cross-language byte check (Python vs C firmware)
+============================================================
+=== ����У��: Python ʵ�� vs �̼� C ʵ�� ʵ���ֽ� ===
+
+[CRC] CRC16("123456789") = 0x4B37 (��׼ 0x4B37)  OK
+[֡ ] 0x0009 �̼���ʼ֡         A5 5B 00 09 12 34 00 09 00 02 00 00 10 00 01 02 03 C8 61  OK
+[֡ ] 0x000A �̼�����֡         A5 5B 00 0A 12 34 00 04 DE AD BE EF 79 2E  OK
+[֡ ] 0x000B �̼�����֡         A5 5B 00 0B 12 34 00 00 FE 81  OK
+[֡ ] 0x000C ��Flash�汾      A5 5B 00 0C 12 34 00 00 3E 34  OK
+[֡ ] 0x000D ��FOC��汾       A5 5B 00 0D 12 34 00 00 FE 09  OK
+[֡ ] 0x0112 ��¼FOC��        A5 5B 01 12 12 34 00 00 ED 9D  OK
+[֡ ] ACK 0x0009 �ɹ�        A5 5B 00 09 00 01 00 01 00 DD 89  OK
+[֡ ] ACK 0x000C v1.0.0    A5 5B 00 0C 00 01 00 04 00 01 00 00 2A 2A  OK
+[֡ ] ACK 0x000D ʧ��        A5 5B 00 0D 00 05 00 04 0C 00 FF FF 5A 31  OK
+[��֡] ȫ��������������                 OK
+[��֡] �۸� CRC ���ܾ�                  OK
+[Ԥ��] �̼����񱾵�Ԥ�� (check_image_blob)
+  ���ļ�              ok=False (���� False)  OK
+  ����������            ok=False (���� False)  OK
+  ���� F1 ����         ok=True  (���� True )  OK
+  SP ���� RAM        ok=True  (���� True )  OK
+  ��λ������ Thumb      ok=True  (���� True )  OK
+  Bootloader ����    ok=False (���� False)  OK
+
+=== �� 18 ��, ʧ�� 0 �� ===
+[PASS] foc_jig_tool selftest
+
+============================================================
+ 7/8  Duplicated copies in sync (U1 vs U2)
+============================================================
+    uart_port.c : ok
+    uart_port.h : ok
+    uart_link.c : ok
+    uart_link.h : ok
+    protocol_frame.c : ok
+    protocol_frame.h : ok
+    measure.c : ok
+    measure.h : ok
+    meas_pack.c : ok
+    meas_pack.h : ok
+    pulse_cap.c : ok
+    pulse_cap.h : ok
+    pulse_pack.c : ok
+    pulse_pack.h : ok
+    jig_mode.h : ok
+[PASS] 15 duplicated files are identical
+
+============================================================
+ 8/8  Keil MDK build (U1 + U2)
+============================================================
+[SKIP] SKIP_KEIL=1
+
+===== ALL PASS (host tests; Keil builds unless SKIP_KEIL=1) =====

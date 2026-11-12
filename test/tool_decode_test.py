@@ -135,6 +135,17 @@ def mk_dutrecv(body=b""):
     return bytes([0x00]) + be16(len(body)) + body
 
 
+def mk_flow6():
+    """0x0022 应答 21B：状态 + 步数 + 失败步 + 6×(code, detail u16)"""
+    d = bytes([0x05, 0x06, 0x01])
+    steps = [(0x02, 0x0002), (0x01, 0x0000), (0x01, 0x0000),
+             (0x00, 0x0000), (0x00, 0x0000), (0x01, 0x0000)]
+    for code, det in steps:
+        d += bytes([code]) + be16(det)
+    assert len(d) == 21, len(d)
+    return d
+
+
 def mk_runall():
     """0x0010 应答 29B：状态 1 + 步数 1 + 跑到第几步 1 + 首个失败 1 + 12 × 2"""
     d = bytes([0x00, 12, 12, 0])
@@ -225,6 +236,15 @@ def main():
           or ("GET_ENC" in out and "不支持：(无)" in out), "INFO：caps=0x03FF 九条全支持")
     check("20000" in out, "INFO：PWM 上限 20000 Hz")
     check("电流检测2" in out, "INFO：ADC 掩码 9 路都列出")
+
+    # ⑨ 0x0022 六步流程（21B）
+    link = FakeLink({T.CMD_FLOW_TEST: mk_flow6()})
+    out = run(T.do_flow6, link)
+    check("第一个失败步 = 1" in out, "流程：报出第一个失败步")
+    check("第 2 路不合格" in out, "流程：ADC 的 detail 翻译成通道号")
+    check("A0 自检通过" in out, "流程：AS:CS 的码翻译成人话")
+    check("跳过" in out, "流程：没走的分支显示为跳过")
+    check("不合格" in out, "流程：状态 05 时给出「不合格」结论")
 
     # ⑨ 0x001F 发原始字节：对方不回字（最常见）
     link = FakeLink({T.CMD_DUT_SEND: mk_dutsend(7, b"")})

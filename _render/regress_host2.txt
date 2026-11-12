@@ -1,0 +1,778 @@
+============================================================
+ 1/12  Protocol layer host unit test
+============================================================
+=== FOC JIG U1 协议层宿主单元测试 ===
+
+[1] CRC16-MODBUS
+  CRC("123456789") = 0x4B37  (标准值 0x4B37)
+[2] 组帧/解帧 往返 + 协议命令实际字节
+  0x0009 固件起始帧: A5 5B 00 09 12 34 00 09 00 02 00 00 10 00 01 02 03 C8 61 
+  0x000A 固件数据帧: A5 5B 00 0A 12 34 00 04 DE AD BE EF 79 2E 
+  0x000B 固件结束帧: A5 5B 00 0B 12 34 00 00 FE 81 
+  0x000C 查Flash版本:  A5 5B 00 0C 12 34 00 00 3E 34 
+  0x000D 查FOC板版本: A5 5B 00 0D 12 34 00 00 FE 09 
+  0x0112 烧录FOC板:    A5 5B 01 12 12 34 00 00 ED 9D 
+  ACK 0x0009 成功:      A5 5B 00 09 00 01 00 01 00 DD 89 
+  ACK 0x000C v1.0.0:      A5 5B 00 0C 00 01 00 04 00 01 00 00 2A 2A 
+  ACK 0x000D 失败:      A5 5B 00 0D 00 05 00 04 0C 00 FF FF 5A 31 
+[3] 非法帧拒绝
+[4] 字节流状态机
+
+=== 共 61 项检查, 失败 0 项 ===
+[PASS] protocol_test
+
+============================================================
+ 2/12  Full-chain test (PC frame to target flash, all simulated)
+============================================================
+C:/Program Files/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/15.2.0/../../../../x86_64-w64-mingw32/bin/ld.exe: C:\Users\ADMINI~1\AppData\Local\Temp\dsh-gSOV4N\ccT6U5D7.o:app.c:(.text+0x118b): undefined reference to `EncChk_EdgesFromPulses'
+C:/Program Files/mingw64/bin/../lib/gcc/x86_64-w64-mingw32/15.2.0/../../../../x86_64-w64-mingw32/bin/ld.exe: C:\Users\ADMINI~1\AppData\Local\Temp\dsh-gSOV4N\ccT6U5D7.o:app.c:(.text+0x1229): undefined reference to `EncChk_All'
+collect2.exe: error: ld returned 1 exit status
+[FAIL] app_test compile error
+
+============================================================
+ 3/12  Measurement module test (divider to voltage, thresholds)
+============================================================
+============================================================
+ measure.c host unit test (divider -> voltage -> threshold)
+============================================================
+
+--- 1. conversion (counts -> input mV) ---
+  [ok]   V24: 24000 mV in (got 24001, want 24000 +-243)
+  [ok]   V10: 10000 mV in (got 10000, want 10000 +-103)
+  [ok]   V5: 5000 mV in (got 5000, want 5000 +-53)
+  [ok]   V33: 3300 mV in (got 3300, want 3300 +-36)
+  [ok]   PHA: 24000 mV in (got 24002, want 24000 +-243)
+  [ok]   PHB: 12000 mV in (got 11998, want 12000 +-123)
+  [ok]   PHC: 0 mV in (got 0, want 0 +-3)
+  [ok]   CUR1: 1000 mV in (got 1000, want 1000 +-13)
+  [ok]   CUR2: 2000 mV in (got 2000, want 2000 +-23)
+
+--- 2. sheet cross-check (24V/10V/7V -> 3.04032/1.2668/0.88676 V) ---
+  [ok]   sheet pt (got 3040431, want 3040320 +-150)
+         24000 mV -> 3.04043 V (sheet 3.04032 V)
+  [ok]   sheet pt (got 1266846, want 1266800 +-150)
+         10000 mV -> 1.26685 V (sheet 1.26680 V)
+  [ok]   sheet pt (got 886792, want 886760 +-150)
+         7000 mV -> 0.88679 V (sheet 0.88676 V)
+
+--- 3. EMA filter ---
+  [ok]   V5 first sample seeds EMA (no ramp from 0) (got 5000, want 5000 +-50)
+  [ok]   V5 moves toward 4V, not a jump
+  [ok]   V5 settles to 4V after 600 polls (1/64) (got 4000, want 4000 +-40)
+
+--- 4. threshold + stability ---
+  [ok]   not ok after 1 poll (needs stability count)
+  [ok]   ok after MEAS_STABLE_N polls in range
+  [ok]   test begin clears stability -> AllOk=0
+  [ok]   fault mask has all 9 bits right after test begin
+  [ok]   test still running one poll before stable
+  [ok]   test done once all channels stable
+  [ok]   AllOk=1 after the test completed
+  [ok]   fault mask cleared
+
+--- 4b. test timeout ---
+  [ok]   test reports timeout after MEAS_TEST_TIMEOUT_MS
+  [ok]   timeout result stays latched (idempotent)
+
+--- 5. saturation flag ---
+  [ok]   mid-scale is not saturated
+  [ok]   counts=0 flagged as saturated (open/shorted?)
+  [ok]   counts=4095 flagged as saturated
+
+--- 6. full-scale mapping ---
+  [ok]   V24 full scale ~26.05V (got 26049, want 26050 +-60)
+  [ok]   V33 full scale ~3.63V (got 3630, want 3630 +-30)
+  [ok]   CUR1 full scale = 3.3V (got 3300, want 3300 +-20)
+
+--- 7. debug printout ---
+  [ok]   MEAS_Print produced output
+  [ok]   line starts with 'M V24='
+  [ok]   line contains V5=5000
+  [ok]   line contains V33=3300
+  [ok]   line reports OK=1
+         M V24=24001 V10=10000 V5=5000 V33=3300 PHA=6002 PHB=6002 PHC=6002 CUR1=1500 CUR2=1500 OK=1 F=0x000
+
+--- 8. bounds safety ---
+  [ok]   MEAS_GetMv out of range returns 0
+  [ok]   MEAS_IsOk out of range returns 0
+  [ok]   MEAS_Name out of range returns '?'
+  [ok]   MEAS_Get out of range yields zeros
+  [ok]   MEAS_Get(NULL) does not crash
+
+--- 9. snapshot ---
+  [ok]   snapshot ch_count = 9
+  [ok]   snapshot marked valid
+  [ok]   snapshot marked all-ok (full-scale thresholds)
+  [ok]   snapshot round counts scans
+  [ok]   snapshot dt_ms = gap between rounds
+  [ok]   snapshot carries VDDA
+  [ok]   snapshot carries config fingerprint
+  [ok]   config fingerprint is non-zero
+  [ok]   ch[V24].mv matches MEAS_GetMv (got 24001, want 24001 +-1)
+  [ok]   ch[V24].raw carries the raw code
+  [ok]   ch[V24] flagged ok
+  [ok]   ch[CUR1] not flagged sat
+  [ok]   MEAS_Snapshot(NULL) does not crash
+
+--- 10. cross-check compare + tolerance ---
+  [ok]   identical snapshots -> no mismatch
+  [ok]   per-channel mismatch array cleared
+  [ok]   100mV on 5V rail is inside the 200mV tolerance
+  [ok]   400mV on 5V rail flagged
+  [ok]   per-channel array flags the offending channel
+  [ok]   1500mV on a phase channel is inside tolerance
+  [ok]   2500mV on a phase flagged
+  [ok]   lower peer reading also flagged
+  [ok]   short peer snapshot -> all channels flagged
+  [ok]   NULL snapshots are handled
+
+--- 11. meas_pack wire format ---
+  [ok]   snapshot layout is 55B
+  [ok]   cross-check block is 21B
+  [ok]   0x000E response is 77B
+  [ok]   snapshot fits LINK_MAX_PAYLOAD (64)
+  [ok]   response fits FRAME_MAX_DATA (256)
+  [ok]   MeasPack_Snapshot returns 55
+  [ok]   byte0 = flags
+  [ok]   byte1 = ch_count
+  [ok]   round is big-endian
+  [ok]   cfg_crc sits at [8..9]
+  [ok]   channel 0 raw starts at [10]
+  [ok]   channel 0 flags at [14] (5B stride)
+  [ok]   last channel record ends at byte 54
+  [ok]   unpack succeeds
+  [ok]   scalar fields round-trip
+  [ok]   all 9 channel records round-trip
+  [ok]   MeasPack_CcBlock returns 21
+  [ok]   cc flags at [0]
+  [ok]   mask big-endian at [1..2]
+  [ok]   peer mv[0] starts at [3]
+  [ok]   cc unpack succeeds
+  [ok]   cc flags/mask round-trip
+  [ok]   all 9 peer mv values round-trip
+  [ok]   snapshot: buffer too small refused
+  [ok]   snapshot: NULL refused
+  [ok]   snapshot: NULL src refused
+  [ok]   unpack: short input refused
+  [ok]   unpack: NULL refused
+  [ok]   cc block: buffer too small refused
+  [ok]   cc unpack: short refused
+  [ok]   cc block with NULL peer still encodes (mv = 0)
+
+============================================================
+ RESULT: 95 passed, 0 failed
+============================================================
+[PASS] measure_test
+
+============================================================
+ 4/12  UART port driver + U1 to U2 internal link
+============================================================
+========================================
+ UART port + U1<->U2 link host test
+========================================
+
+[1) 环形缓冲 / 逐字节收发]
+
+[2) 发送链式续传 (300B > 256B 环)]
+
+[3) 接收环满 → 丢新字节并计数]
+
+[4) 发送队列满 → 计数, 解除后继续发]
+
+[5) ORE 错误后重新挂接收 (否则这一路永久哑掉)]
+
+[5b) 飞行中再入队 → 不许把没发出去的字节当成已发 (D6)]
+
+[6) 链路 PING 往返 / 应答数据搬运]
+
+[7) 链路超时 (对侧不在) + 状态可恢复]
+
+[8) 链路抗干扰 (CRC 错 / 垃圾 / 超长 LEN) + 恢复]
+
+[9) 忙保护 / timeout=0 的非阻塞语义]
+
+[10) STATUS 数据区打包/解包]
+
+[10b) 链路代码版本一致性检查]
+
+[10c) ENC_XCHK 载荷编解码]
+
+[11) 端到端 STATUS (U1 读 U2 健康度)]
+
+[12) 交叉校验快照交换 (55B 负载)]
+
+[13) 脉冲结果交换 (45B)]
+
+[14) 半截帧超时]
+
+[15) 请求重传 + 从机幂等]
+
+[16) 事件上报 (EVENT / EVENT_GET)]
+
+[17) ARM 同步触发]
+
+[18) LINK_RESET 链路复位]
+
+========================================
+ checks: 925, failed: 0
+ ALL PASS
+========================================
+[PASS] uart_test
+
+============================================================
+ 5/12  TIM pulse capture (edge timestamps to period/duty)
+============================================================
+========================================
+ pulse_cap / pulse_pack host test
+========================================
+
+[1) 频率/占空比]
+        20kHz: 周期=20000 ns 高=6652 ns 占空比=333‰ 边沿=100
+
+[2) 低频边界 10Hz]
+
+[3) 无信号]
+
+[4) 丢边沿 / 毛刺]
+
+[5) 超范围]
+
+[6) 环覆盖（边沿数 >> 32）]
+
+[7) 窗口与状态机]
+
+[8) pulse_pack 线格式]
+
+[9) 两端对比]
+
+========================================
+ checks: 84, failed: 0
+ ALL PASS
+========================================
+[PASS] pulse_test
+
+    --- pulse_cfg (register-level TIM/NVIC shim) ---
+========================================
+ pulse_cfg (TIM capture HW layer) host test
+========================================
+
+[1) PULSE_CfgInit：计数器自由运行 / 初始化时不响应中断]
+
+[2) 开窗：NVIC 动作的顺序 + 全部在关中断状态下做]
+
+[3) 开窗清掉排队中的中断请求（否则它会在新窗口里跑）]
+
+[4) 边沿入队 / 结算（三相）+ 先溢出后捕获的 +1 补偿]
+
+[5) 真实溢出把时间戳高位抬高 65536，跨溢出的差值仍要对]
+
+[6) TIM1 的溢出是独立向量（TIM1_UP），C 相时间戳也要跟着扩]
+
+[7) 关窗与到点收尾]
+
+========================================
+ checks: 60, failed: 0
+ ALL PASS
+========================================
+[PASS] pulse_cfg_test
+
+============================================================
+ 6/12  DUT protocol pack/unpack (docs/15 layout)
+============================================================
+===== dut_proto 单测 =====
+
+-- 1. 长度常量（规范 §2/§7）--
+  [ok]   INFO 应答 = 16B
+  [ok]   TEST_MODE 请求 = 3B
+  [ok]   PWM 请求 = 10B
+  [ok]   LEVEL 请求 = 2B
+  [ok]   CURRENT 请求 = 8B
+  [ok]   GET_ADC 请求 = 2B（掩码 9 路必须 2 字节）
+  [ok]   GET_ENC 应答 = 14B
+  [ok]   GET_ADC 满通道应答装得进 64B 单帧
+
+-- 2. TEST_MODE 打包 --
+  [ok]   返回长度 3
+  [ok]   进入 + 1000ms = 01 03 E8（大端）
+  [ok]   缓冲不够 → 返回 0
+
+-- 2b. TEST_MODE 参数校验（规范 §7.3 / §9.2）--
+  [ok]   进入 + 最小 200ms 合法
+  [ok]   进入 + 最大 10000ms 合法
+  [ok]   进入 + 199ms 非法
+  [ok]   进入 + 10001ms 非法
+  [ok]   进入 + 0ms 非法（不许关掉看门狗）
+  [ok]   退出时不带看门狗合法
+  [ok]   mode=2 非法
+
+-- 3. PWM 打包（规范 §7.5）--
+  [ok]   返回长度 10
+  [ok]   1kHz / 50%×3 / 300 个 = 03E8 01F4 01F4 01F4 012C
+  [ok]   空指针 → 0
+
+-- 3b. PWM 参数校验 --
+  [ok]   范围内合法
+  [ok]   不检查范围时合法
+  [ok]   低于下限 → 非法
+  [ok]   高于上限 → 非法
+  [ok]   占空比 1001 → 非法
+  [ok]   占空比 1000（100%）合法
+  [ok]   count=0（连续输出）合法
+  [ok]   频率 0 → 非法
+
+-- 4. LEVEL（规范 §7.6）--
+  [ok]   返回长度 2
+  [ok]   位图 0x21 + rsvd 0
+  [ok]   A=高 B=低 C=高阻 → 0x21
+  [ok]   全低 → 0x00
+  [ok]   全高 → 0x15
+  [ok]   全高阻 → 0x2A
+  [ok]   非法电平值 → 0xFF
+  [ok]   取 A 相 = 高
+  [ok]   取 B 相 = 低
+  [ok]   取 C 相 = 高阻
+  [ok]   非法相 → 0xFF
+  [ok]   0x21 合法
+  [ok]   全低合法
+  [ok]   全高合法（互锁由 DUT 侧按母线风险再判）
+  [ok]   某相取值 11 → 非法
+  [ok]   保留位 bit6 非 0 → 非法
+  [ok]   保留位 bit7 非 0 → 非法
+
+-- 5. CURRENT（规范 §7.7）--
+  [ok]   返回长度 8
+  [ok]   静态通流 A→B 100% 200ms = 00 01 02 03E8 00C8 00
+  [ok]   A→B 合法
+  [ok]   同相（同桥臂直通）→ 非法
+  [ok]   上桥选了两相 → 非法
+  [ok]   掩码超出 A/B/C → 非法
+  [ok]   mode=2 → 非法
+  [ok]   mode=1 PWM 通流合法
+  [ok]   占空比 1001 → 非法
+  [ok]   duration=0（保持到 STOP）合法
+  [ok]   空指针 → 非法
+
+-- 6. GET_ADC（规范 §7.8）--
+  [ok]   返回长度 2
+  [ok]   要 ch7+ch8 = 01 80（第 8 路要得到，这是改 2 字节的原因）
+  [ok]   解示例帧 OK
+  [ok]   状态 = 00
+  [ok]   收到 2 路
+  [ok]   ch0 raw=0x081A mv=300
+  [ok]   ch1 raw=0x0830 mv=312
+  [ok]   少给一路（要 3 给 2）→ 失败
+  [ok]   长度不是 1+5n → 失败
+  [ok]   只要状态、0 路 → OK
+  [ok]   空指针 → 失败
+  [ok]   Mask_Count(0) = 0
+  [ok]   Mask_Count(0x0003) = 2
+  [ok]   Mask_Count(9 路全要) = 9
+
+-- 7. INFO（规范 §7.2）--
+  [ok]   解示例帧 OK
+  [ok]   状态 = 00
+  [ok]   dut_ver = 0x0101（与本文件常量一致）
+  [ok]   固件版本 1.0.0
+  [ok]   caps = 0x03FF
+  [ok]   PWM 范围 100~20000 Hz
+  [ok]   adc_mask = ch0/ch1
+  [ok]   长度不足 → 失败
+
+-- 8. GET_ENC（规范 §7.9）--
+  [ok]   解示例帧 OK
+  [ok]   A = 1000
+  [ok]   B = 2000
+  [ok]   Z = 1
+  [ok]   dir = +1
+  [ok]   dir = 0xFF 解析为 -1
+  [ok]   长度不足 → 失败
+  [ok]   A = 0x12345678（大端）
+
+-- 9. 状态应答 --
+  [ok]   解 00 OK
+  [ok]   解 FF NIY
+  [ok]   长度 0 → 失败
+  [ok]   空指针 → 失败
+
+-- 10. PING 回显 --
+  [ok]   返回长度 4
+  [ok]   原样拷贝 DE AD BE EF
+  [ok]   长度 0 返回 0（空 DATA）
+  [ok]   缓冲不够 → 0
+  [ok]   空指针 → 0
+
+-- 11. 能力位图（规范 §8）--
+  [ok]   caps 含 PING
+  [ok]   caps 含 GET_ENC
+  [ok]   caps 全集不含 0x0209（它只覆盖已定义的 9 条 0x0200..0x0208）
+  [ok]   全 1 caps 含 0x020F（bit15，能声明的最后一条）
+  [ok]   0x0210 超出 16 位 caps → 不算支持
+  [ok]   0x02FF 超出 16 位 caps → 不算支持
+  [ok]   caps=0 不含 PWM
+  [ok]   只有 PWM 位时不含 LEVEL
+  [ok]   命令码超出范围 → 0
+  [ok]   命令码超出范围（高）→ 0
+  [ok]   必做项都在 caps 全集中
+  [ok]   GET_ENC 的位号 = 命令码偏移（caps 与命令码对得上）
+
+-- 12. 用 docs/15 §12 的示例帧核对 DATA 段（防文档与代码漂移）--
+  [ok]   PWM：文档 DATA 长度 = 代码打出长度
+  [ok]   PWM：文档 DATA 与代码逐字节一致
+  [ok]   CURRENT：文档 DATA 长度 = 代码打出长度
+  [ok]   CURRENT：文档 DATA 与代码逐字节一致
+  [ok]   GET_ADC：文档 DATA 长度 = 代码打出长度
+  [ok]   GET_ADC：文档 DATA 与代码逐字节一致
+  [ok]   GET_ENC：文档 DATA 长度 = 常量
+  [ok]   TEST_MODE：文档 DATA 与代码逐字节一致
+  [ok]   TEST_MODE：长度一致
+  [ok]   LEVEL：长度一致
+  [ok]   LEVEL：文档 DATA 与代码逐字节一致
+
+===== dut_proto: 119 项通过, 0 项失败 =====
+[PASS] dut_proto_test
+
+============================================================
+ 7/12 Three-phase output check (phase voltage vs duty x VBUS)
+============================================================
+===== phase_chk 单测（④ 三相输出检测判据）=====
+
+-- 1. PhaseChk_ExpectMv --
+  [ok]   0‰ → 0
+  [ok]   1000‰ → 全母线
+  [ok]   500‰、母线 24V → 12V
+  [ok]   500‰、母线 24001 → 12001（四舍五入）
+  [ok]   极小母线也不炸
+  [ok]   >1000‰ 被夹到 1000
+  [ok]   满量程母线 26050 → 13025
+
+-- 2. 三种「不判」（都不能算失败）--
+  [ok]   高阻 → HIZ|OK（不是失败）
+  [ok]   母线 4999mV < 5000 → VBUS_LOW
+  [ok]   母线太低同时置 NODATA（表示没判）
+  [ok]   母线太低不会误报 DEVIATION
+  [ok]   数据不可用 → NODATA（不是失败）
+
+-- 3. 主判据（母线 24000、期望 500‰ → 期望 12000，容差 1200）--
+  [ok]   完全一致 → OK
+  [ok]   期望/误差/容差三个数都对
+  [ok]   低 1200mV（正好等于容差）→ OK
+  [ok]   低 1201mV（超出容差 1mV）→ DEVIATION
+  [ok]   高 1200mV → OK（对称）
+  [ok]   高 1201mV → DEVIATION
+  [ok]   err_mv 带符号（偏高是正数）
+  [ok]   err_mv 偏低是负数
+
+-- 3b. 容差绝对下限 300mV（母线 5000 时 5% 只有 250）--
+  [ok]   母线 5V、误差 250mV → OK（用 300 的底）
+  [ok]   容差取到下限 300
+  [ok]   误差 301mV → DEVIATION
+  [ok]   母线 5V 时容差用下限 300（再确认一次）
+  [ok]   out 里的旧值被清掉（不会读到上一轮的数）
+  [ok]   out.flags 被覆盖成本次结果
+
+-- 4. 静态电平模式（expect_pwm=0）--
+  [ok]   静态高电平 + 捕获无信号 → OK（**不能**误报 NOSIGNAL）
+  [ok]   静态低电平 + 捕获无信号 → OK
+  [ok]   静态高电平却测到 200mV → DEVIATION（这才是真故障）
+
+-- 5. PWM 模式：脉冲交叉核对 --
+  [ok]   命令输出 500‰ 却测不到边沿 → NOSIGNAL
+  [ok]   命令 0‰（本来就该没输出）+ 没边沿 → OK（不该报 NOSIGNAL）
+  [ok]   占空比差 45‰ → 不报
+  [ok]   占空比差 51‰ → DUTY_DIFF
+  [ok]   反向差 51‰ → 也报
+  [ok]   没有 VALID 时不拿占空比做比对
+  [ok]   两个问题同时存在 → 两个旗标都置
+
+-- 6. PhaseChk_Make 组装 --
+  [ok]   A 相取到对的通道（12000）、母线 24000、数据可用
+  [ok]   A 相的脉冲数据也带过来了
+  [ok]   B 相取到 11000（通道映射正确，不是都取 A）
+  [ok]   C 相取到 13000
+  [ok]   C 相带出 NOSIGNAL
+  [ok]   快照 VALID 没置 → meas_ok=0
+  [ok]   采集溢出（OVERFLOW）→ meas_ok=0
+  [ok]   该相贴边 → meas_ok=0
+  [ok]   只有 B 相贴边，A 相仍然可用
+  [ok]   母线贴边 → 三相都判不了
+  [ok]   pulse 传 NULL 时脉冲字段清零、电压字段照常
+  [ok]   snap 传 NULL 时 meas_ok=0
+  [ok]   相位号非法 → meas_ok=0（不越界读）
+
+-- 7. 三相汇总 --
+  [ok]   三相全好 → DONE，无 ANY_BAD
+  [ok]   一相超差 → ANY_BAD
+  [ok]   三相全高阻 → DONE，**不算失败**
+  [ok]   三相都因母线太低而没判 → 不算失败
+  [ok]   一相不判 + 一相好 + 一相坏 → ANY_BAD
+  [ok]   out 传 NULL 也能跑（只求汇总；这组里有一相坏的，所以汇总里仍有 ANY_BAD）
+  [ok]   in 传 NULL → 返回 0
+
+-- 8. 边界与文本 --
+  [ok]   in 传 NULL → 返回 0
+  [ok]   out 传 NULL 也能判（返回棋标）
+  [ok]   FlagText(OK)
+  [ok]   FlagText(0)
+  [ok]   FlagText(DEVIATION)
+  [ok]   FlagText(未定义位) → mixed
+
+===== phase_chk: 62 项通过, 0 项失败 =====
+[PASS] phase_chk_test
+
+============================================================
+ 8/12 Encoder pulse planner (counts, PSC/CCR, duration)
+============================================================
+===== enc_plan 单测（⑤ 编码器脉冲规划）=====
+
+-- 1. 脉冲 → 边沿 --
+  [ok]   0 个脉冲 → 0 个边沿 (= 0)
+  [ok]   1 个脉冲 → 2 个边沿（上+下） (= 2)
+  [ok]   1000 个 → 2000 个边沿 (= 2000)
+  [ok]   2000 个 → 4000 个边沿 (= 4000)
+  [ok]   上限 32767 → 65534（不溢出 u16） (= 65534)
+
+-- 2. 单路时长 --
+  [ok]   1000 个 @5kHz = 200ms (= 200)
+  [ok]   2000 个 @10kHz = 200ms (= 200)
+  [ok]   1 个 @5kHz = 0.2ms → 向上取整 1ms (= 1)
+  [ok]   1 个 @3Hz = 333.3ms → 334ms (= 334)
+  [ok]   0 个脉冲 → 0ms (= 0)
+  [ok]   频率 0 → 0ms（不除零） (= 0)
+  [ok]   300 个 @1kHz = 300ms (= 300)
+
+-- 3. 预分频 PSC --
+  [ok]   5kHz：不分频就够（CCR=7200） (= 0)
+  [ok]   10kHz：不分频 (= 0)
+  [ok]   600Hz：刚好不用分频 (= 0)
+  [ok]   100Hz：要 PSC=5（clk 降到 12MHz） (= 5)
+  [ok]   f=0 时按下限 100Hz 算 → PSC=5 (= 5)
+  [ok]   时钟为 0 → 不可实现（0xFFFF） (= 65535)
+
+-- 4. CCR（翻转模式：f = clk/(2×CCR)）--
+  [ok]   72MHz / 5kHz  → CCR 7200 (= 7200)
+  [ok]   72MHz / 10kHz → CCR 3600 (= 3600)
+  [ok]   72MHz / 20kHz → CCR 1800 (= 1800)
+  [ok]   12MHz / 100Hz → CCR 60000（PSC=5 之后） (= 60000)
+  [ok]   12MHz / 5kHz  → CCR 1200 (= 1200)
+  [ok]   12MHz / 10kHz → CCR 600 (= 600)
+  [ok]   72MHz / 100Hz 直接算会 360000 → 超 16 位，返回 0 (= 0)
+  [ok]   时钟 0 → 0 (= 0)
+  [ok]   频率 0 → 0（不除零） (= 0)
+  [ok]   2MHz / 20kHz → CCR 50（仍 ≥1，可用） (= 50)
+
+-- 5. 默认参数（用户给的：A1000/B2000/Z1）--
+  [ok]   个数：A=1000、B=2000、Z=1（三路各不相同）
+  [ok]   频率：A=5kHz、B=10kHz、Z=5kHz
+  [ok]   默认参数校验通过
+  [ok]   整串时长 = max(200,200,1) + 5ms 余量 = 205ms (= 205)
+  [ok]   A 应产生 2000 个边沿 (= 2000)
+  [ok]   B 应产生 4000 个边沿 (= 4000)
+  [ok]   Z 应产生 2 个边沿 (= 2)
+  [ok]   Default(NULL) 不炸
+
+-- 6. 校验规则（非法必须挡住，且不能有任何输出）--
+  [ok]   空指针 → 非法
+  [ok]   三路都不发 → 非法
+  [ok]   三路都不发 → 时长 0 (= 0)
+  [ok]   频率 99Hz（低于下限）→ 非法
+  [ok]   频率 20001Hz（高于上限）→ 非法
+  [ok]   频率踩下限 100Hz → 合法
+  [ok]   频率踩上限 20000Hz → 合法
+  [ok]   不发的那一路频率非法也要挡住（不许蒙混过关）
+  [ok]   脉冲数超上限 → 非法
+  [ok]   脉冲数踩上限 → 合法
+  [ok]   100Hz 与 20kHz 混发 → 合法（PSC 按最低那路算）
+  [ok]   混发时长 = max(100ms, 5ms) + 5 = 105ms (= 105)
+
+-- 7. 只发一路 --
+  [ok]   只发 Z 一个脉冲 → 合法
+  [ok]   时长 = 1ms + 5ms 余量 (= 6)
+
+===== enc_plan: 50 项通过, 0 项失败 =====
+[PASS] enc_plan_test
+
+============================================================
+ 9/12 Judgement: phase-current + voltage (jig vs DUT)
+============================================================
+===== cur_chk 单测（⑥ 相电流判据）=====
+
+-- 1. CurChk_TakeJig --
+  [ok]   电流1 取到 1650mV（走的是 MEAS_CH_CUR1，不是别的通道）
+  [ok]   电流2 取到 1655mV
+  [ok]   快照 VALID 没置 → 不可用
+  [ok]   采集溢出 → 不可用
+  [ok]   该通道贴边 → 不可用
+  [ok]   只有电流1 贴边，电流2 仍可用
+  [ok]   通道号非法 → 不可用
+  [ok]   快照传 NULL → 不可用
+  [ok]   出参传 NULL → 不可用
+
+-- 2. 数据不全 → NODATA（**不算失败**）--
+  [ok]   治具侧不可用 → NODATA
+  [ok]   DUT 没报这一路 → NODATA
+  [ok]   NODATA 时不会误报 DEVIATION
+  [ok]   两边都不可用 → NODATA
+
+-- 3. 一致性（中点偏置拓扑：1650 → 2000，变化量 +350）--
+  [ok]   两边完全一致 → OK
+  [ok]   三个数都对（dj/dd/err）
+  [ok]   差 5mV（在容差内）→ OK
+  [ok]   容差取到绝对下限 30
+  [ok]   差 50mV → DEVIATION
+  [ok]   err 带符号（治具偏低是负数）
+  [ok]   偏差正好等于容差（30）→ OK
+  [ok]   偏差 31（超 1mV）→ DEVIATION
+  [ok]   变化量 2000mV 时容差放大到 100mV（5%）
+  [ok]   正好 100 → OK
+  [ok]   101 → DEVIATION
+
+-- 4. 负方向（零电流输出 0V 的拓扑：0 → 350，变化量也是 +350）--
+  [ok]   0 起步：两边一致 → OK
+  [ok]   变化量算对
+
+-- 4b. 反方向电流（变化量为负也要认）--
+  [ok]   负方向、两边一致 → OK
+  [ok]   负变化量算对（不是当成 0 或大正数）
+  [ok]   负方向差太多 → DEVIATION
+
+-- 5. 通流检查（电流没流起来）--
+  [ok]   两边都没动 → NOSIGNAL（真故障，不是 NODATA）
+  [ok]   NOSIGNAL 时不能同时标 OK
+  [ok]   只动了 10mV（低于 50 的门限）→ 仍算没通上
+  [ok]   动 50mV（正好到门限）→ 算通上了
+  [ok]   只有 DUT 一边动了 → **不**算 NOSIGNAL
+  [ok]   一边动一边不动 → DEVIATION（这才对）
+
+-- 6. 边界与文本 --
+  [ok]   in 传 NULL → 返回 0
+  [ok]   out 传 NULL 也能判
+  [ok]   out 里的旧值被覆盖（不会读到上一轮的数）
+  [ok]   FlagText(OK)
+  [ok]   FlagText(0)
+  [ok]   FlagText(NOSIGNAL)
+  [ok]   FlagText(未定义位)
+  [ok]   两路电流
+
+===== cur_chk: 43 项通过, 0 项失败 =====
+===== vol_chk 单测（② 电压检测判据）=====
+
+-- 1. 从快照 / DUT 应答取值 --
+  [ok]   24V 通道取到 1000mV
+  [ok]   C 相取到 1006mV（通道对应没串）
+  [ok]   电流2 取到 1008mV
+  [ok]   通道号超范围 → 不可用
+  [ok]   快照 NULL → 不可用
+  [ok]   出参 NULL → 不可用
+  [ok]   快照 VALID 没置 → 不可用
+  [ok]   采集溢出 → 不可用
+  [ok]   该通道贴边 → 不可用
+  [ok]   只有 24V 贴边，别的通道仍可用
+  [ok]   DUT 的 ch0 取到 1000mV
+  [ok]   DUT 的 ch2 取到 1002mV
+  [ok]   DUT 没报 ch3 → 取不到
+  [ok]   DUT 应答 NULL → 取不到
+
+-- 2. 数据不全 → NODATA（**不算失败**）--
+  [ok]   治具侧不可用 → NODATA
+  [ok]   DUT 没报 → NODATA
+  [ok]   两边都不可用 → NODATA
+
+-- 3. 一致性与容差 --
+  [ok]   完全一致 → OK
+  [ok]   误差 0、容差取下限 200
+  [ok]   差 200mV（正好等于容差）→ OK
+  [ok]   差 201mV → DEVIATION
+  [ok]   err 带符号（治具偏高是正数）
+  [ok]   差 -201mV → DEVIATION
+  [ok]   err 偏低是负数
+  [ok]   24V 读数 24000mV → 容差 1200mV（5%）
+  [ok]   差 1200mV（正好）→ OK
+  [ok]   差 1201mV → DEVIATION
+  [ok]   对侧读数 10000mV → 容差 500mV
+
+-- 4. 9 路一起判 --
+  [ok]   9 路全一致 → DONE，无 ANY_BAD / ANY_NODATA
+  [ok]   一路超差 → ANY_BAD
+  [ok]   没有「没判」的路时不置 ANY_NODATA
+  [ok]   超差的那一路旗标落在正确的下标上
+  [ok]   别的路仍然是 OK
+  [ok]   DUT 只支持 3 路 → **不算失败**
+  [ok]   其余 6 路算 NODATA
+  [ok]   声明支持的 ch0 判成 OK
+  [ok]   没声明的 ch6 是 NODATA
+  [ok]   声明了但没报的路**不算失败**
+  [ok]   ch4 没报 → NODATA
+  [ok]   NODATA 时误差是 0（没拿 0 当读数去比）
+  [ok]   治具快照无效 → 9 路全不判，不算失败
+  [ok]   并且汇总里置了 ANY_NODATA
+  [ok]   out 传 NULL → 只求汇总
+  [ok]   快照传 NULL → 全 NODATA（不崩）
+
+-- 5. 边界与文本 --
+  [ok]   in 传 NULL → 返回 0
+  [ok]   out 传 NULL 也能判
+  [ok]   out 旧值被覆盖
+  [ok]   FlagText(OK)
+  [ok]   FlagText(0)
+  [ok]   FlagText(DEVIATION)
+  [ok]   FlagText(未定义位)
+
+===== vol_chk: 51 项通过, 0 项失败 =====
+[PASS] judgement tests (cur_chk + vol_chk)
+
+============================================================
+ 10/12  Cross-language byte check (Python vs C firmware)
+============================================================
+=== ����У��: Python ʵ�� vs �̼� C ʵ�� ʵ���ֽ� ===
+
+[CRC] CRC16("123456789") = 0x4B37 (��׼ 0x4B37)  OK
+[֡ ] 0x0009 �̼���ʼ֡         A5 5B 00 09 12 34 00 09 00 02 00 00 10 00 01 02 03 C8 61  OK
+[֡ ] 0x000A �̼�����֡         A5 5B 00 0A 12 34 00 04 DE AD BE EF 79 2E  OK
+[֡ ] 0x000B �̼�����֡         A5 5B 00 0B 12 34 00 00 FE 81  OK
+[֡ ] 0x000C ��Flash�汾      A5 5B 00 0C 12 34 00 00 3E 34  OK
+[֡ ] 0x000D ��FOC��汾       A5 5B 00 0D 12 34 00 00 FE 09  OK
+[֡ ] 0x0112 ��¼FOC��        A5 5B 01 12 12 34 00 00 ED 9D  OK
+[֡ ] ACK 0x0009 �ɹ�        A5 5B 00 09 00 01 00 01 00 DD 89  OK
+[֡ ] ACK 0x000C v1.0.0    A5 5B 00 0C 00 01 00 04 00 01 00 00 2A 2A  OK
+[֡ ] ACK 0x000D ʧ��        A5 5B 00 0D 00 05 00 04 0C 00 FF FF 5A 31  OK
+[��֡] ȫ��������������                 OK
+[��֡] �۸� CRC ���ܾ�                  OK
+[Ԥ��] �̼����񱾵�Ԥ�� (check_image_blob)
+  ���ļ�              ok=False (���� False)  OK
+  ����������            ok=False (���� False)  OK
+  ���� F1 ����         ok=True  (���� True )  OK
+  SP ���� RAM        ok=True  (���� True )  OK
+  ��λ������ Thumb      ok=True  (���� True )  OK
+  Bootloader ����    ok=False (���� False)  OK
+
+=== �� 18 ��, ʧ�� 0 �� ===
+[PASS] foc_jig_tool selftest
+
+============================================================
+ 11/12  Duplicated copies in sync (U1 vs U2)
+============================================================
+    uart_port.c : ok
+    uart_port.h : ok
+    uart_link.c : ok
+    uart_link.h : ok
+    protocol_frame.c : ok
+    protocol_frame.h : ok
+    measure.c : ok
+    measure.h : ok
+    meas_pack.c : ok
+    meas_pack.h : ok
+    pulse_cap.c : ok
+    pulse_cap.h : ok
+    pulse_pack.c : ok
+    pulse_pack.h : ok
+    pulse_cfg.c : ok
+    pulse_cfg.h : ok
+    jig_mode.h : ok
+[PASS] 17 duplicated files are identical
+
+============================================================
+ 12/12  Keil MDK build (U1 + U2)
+============================================================
+[SKIP] SKIP_KEIL=1
+
+===== FAILURES PRESENT =====

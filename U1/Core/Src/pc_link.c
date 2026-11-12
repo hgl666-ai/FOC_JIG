@@ -22,6 +22,7 @@
 #include "uart_cfg.h"
 #include "uart_port.h"
 #include "app_frame.h"
+#include "app.h"          /* APP_PcInput：ASCII 控制台与帧解析的统一入口 */
 #else
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
@@ -114,12 +115,14 @@ void PcLink_Poll(void)
     uint16_t n;
 
     /* 只搬字节、不解析：解析统一在 APP_Frame_Poll() 里做，
-     * 和 USB 那条路（APP_USB_Receive 只调 APP_Frame_Feed）完全一致 */
+     * 和 USB 那条路完全一致。⚠ 必须走 APP_PcInput() 而不是 APP_Frame_Feed()：
+     * 那个入口里还有"这一串是不是 ASCII 命令行"的判断（串口助手手敲 AS:Bb 用），
+     * 绕过它的话，USB 和串口两条路的行为就会不一样。 */
     while ((n = UartPort_Read(UART_CFG_PORT_PC, chunk, (uint16_t)sizeof(chunk))) > 0u) {
         uint16_t i;
 
         for (i = 0u; i < n; i++) {
-            APP_Frame_Feed(chunk[i]);
+            APP_PcInput(chunk[i]);
         }
     }
 }

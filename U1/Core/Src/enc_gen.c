@@ -58,6 +58,8 @@ static uint32_t s_dur_ms;
 static uint16_t s_psc;
 static uint32_t s_clk;
 static uint8_t  s_ph_used;               /* bit0=A bit1=B bit2=Z，哪几路在发 */
+/* 开跑瞬间的寄存器快照（0x0023 诊断用） */
+static uint16_t s_dbg[6];
 
 /* ------------------------------------------------------------------ */
 static void enc_pins_to_input(void)
@@ -108,6 +110,15 @@ static void enc_hw_off(void)
 /* ------------------------------------------------------------------ */
 void EncGen_Init(void)
 {
+    /* ⚠ TIM4 的时钟必须由本模块自己开。
+     *   坑：`MX_TIM4_Init()` 用的是 `HAL_TIM_IC_Init()`（输入捕获），而
+     *   `__HAL_RCC_TIM4_CLK_ENABLE()` 却写在 `HAL_TIM_PWM_MspInit()` 里
+     *   （tim.c），那个回调只有 `HAL_TIM_PWM_Init()` 会调 → 改走 IC 后再没人开时钟。
+     *   后果：TIM4 寄存器写不进/读全 0，计数器不走、中断不来
+     *   （表现：0x0012 回 done=0 aborted=1 flips=0；0x0023 回 12 字节全 0）。
+     *   —— 2026-11-12 真板实测定位。*/
+    __HAL_RCC_TIM4_CLK_ENABLE();
+
     s_busy    = 0u;
     s_aborted = 0u;
     s_done    = 0u;
@@ -143,6 +154,10 @@ uint8_t EncGen_Start(const enc_plan_t *p)
 
     s_psc = EncPlan_PscFor(ENC_PLAN_TIM_CLK_HZ, f_min);
     s_clk = ENC_PLAN_TIM_CLK_HZ / ((uint32_t)s_psc + 1u);
+
+    /* 纵深防御：万一 Init 之后有人关了时钟（或 CubeMX 再生成打乱了 MSP），这里补一次。
+     * 幂等，代价是一次寄存器写。*/
+    __HAL_RCC_TIM4_CLK_ENABLE();
 
     /* ── 先停、再复位计数（顺序很重要，见下） ── */
     enc_hw_off();
@@ -194,8 +209,23 @@ uint8_t EncGen_Start(const enc_plan_t *p)
         ENC_TIM->DIER = dier;               /* 不开 UIE：本文件不需要溢出 */
     }
 
+    /* ⚠ 必须把 NVIC 使能补回来：上面为了清掉"已经 pending 的请求"把它关过，
+     *   不补的话比较中断永远进不来 → 翻转数恒 0 → 被 Poll 的超时兜底强停
+     *   （表现就是 0x0012 应答 done_mask=0 / aborted=1 / 翻转全 0）。
+     *   EncGen_Init() 里那次使能只在开机时有效，第一次 Start 之后就失效了。
+     *   —— 2026-11-12 真板实测发现，此前宿主测试用替身，验不出来。*/
+    HAL_NVIC_EnableIRQ(ENC_IRQn);
+
     s_busy = 1u;
     ENC_TIM->CR1 = TIM_CR1_CEN;             /* 开跑 */
+
+    /* 抓一份"刚开跑"的寄存器值（0x0023 读它做诊断） */
+    s_dbg[0] = (uint16_t)ENC_TIM->PSC;
+    s_dbg[1] = (uint16_t)ENC_TIM->CCR3;     /* A 相 */
+    s_dbg[2] = (uint16_t)ENC_TIM->CCR1;     /* Z 相 */
+    s_dbg[3] = (uint16_t)ENC_TIM->DIER;
+    s_dbg[4] = (uint16_t)ENC_TIM->CCER;
+    s_dbg[5] = (uint16_t)ENC_TIM->CR1;
     return 1u;
 }
 
@@ -230,6 +260,18 @@ uint8_t EncGen_DoneMask(void)  { return s_done; }
 uint8_t EncGen_Aborted(void)   { return s_aborted; }
 uint16_t EncGen_LastPsc(void)  { return s_psc; }
 uint32_t EncGen_LastClkHz(void){ return s_clk; }
+
+void EncGen_DbgSnapshot(uint16_t out[6])
+{
+    uint8_t i;
+
+    if (out == 0) {
+        return;
+    }
+    for (i = 0u; i < 6u; i++) {
+        out[i] = s_dbg[i];
+    }
+}
 
 uint16_t EncGen_Flips(uint8_t ph)
 {

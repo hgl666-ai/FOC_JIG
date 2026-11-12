@@ -162,6 +162,25 @@
 #define MGR_DUT_SEND_DEF_TMO_MS 200u      /* 请求里时长填 0 时的默认值 */
 #define MGR_DUT_SEND_MAX_TMO_MS 2000u     /* 时长上限：防止 PC 传个大数把命令拖死 */
 #define MGR_DUT_SNIFF_SIZE      64u       /* 嗅探缓冲：DUT 口空闲时攒下的原始字节 */
+
+/*── 0x0022 六步测试流程（烧完固件之后跑；FOC 侧只需认 docs/24 那几条 AS 命令）──
+ * 应答 = 状态(1) + 跑到第几步(1) + 第一个失败步号(1) + 6 步 × [code(1) + detail(2)]
+ *        = 3 + 18 = 21 字节
+ * code：00 跳过（这条分支没走）· 01 通过 · 02 失败 · 03 不判
+ * detail：每步自己解释，见 app.c 里 APP_FlowTestTask 的注释 */
+#define MGR_CMD_ENC_DBG          0x0023u   /* 编码器发生器的 TIM4 寄存器快照（诊断） */
+#define MGR_ENC_DBG_RESP_LEN     12u       /* 6 个 u16 */
+#define MGR_CMD_FLOW_TEST        0x0022u
+#define MGR_FLOW_TEST_RESP_LEN   21u
+#define MGR_FLOW_STEPS           6u
+#define MGR_FLOW_ITEM_LEN        3u
+/* 0x0022 的可选参数（1 字节）：强制走某条分支，调试/标定用
+ *   不给（LEN=0）= 正常，按 AS:CS 的真实返回码分支
+ *   02 = 强制当 A2 处理 → 一定走步5（编码器）
+ *   03 = 强制当 A3 处理 → 一定走步4（三相） */
+#define MGR_FLOW_FORCE_NONE      0x00u
+#define MGR_FLOW_FORCE_A2        0x02u
+#define MGR_FLOW_FORCE_A3        0x03u
 #define MGR_SWD_SELFTEST_RESP_LEN  16u
 #define DUT_SCRATCH_ADDR         (0x080E0000u)  /* F4 sector 11（最后一个 128KB） */
 #define DUT_SCRATCH_SECTOR       11u

@@ -1,0 +1,17 @@
+
+============================================================
+ 7/7  Keil MDK build (U1 + U2)
+============================================================
+
+    --- Keil build U1 ---
+    (UV4 is a GUI app; waiting for the build to finish...)
+"U1\U1.axf" - 0 Error(s), 0 Warning(s).
+[PASS] Keil build U1: 0 Error, 0 Warning
+
+    --- Keil build U2 ---
+    (UV4 is a GUI app; waiting for the build to finish...)
+Program Size: Code=10014 RO-data=314 RW-data=20 ZI-data=3564  
+"U2\U2.axf" - 0 Error(s), 0 Warning(s).
+[PASS] Keil build U2: 0 Error, 0 Warning
+
+===== ALL PASS (host tests; Keil builds unless SKIP_KEIL=1) =====
