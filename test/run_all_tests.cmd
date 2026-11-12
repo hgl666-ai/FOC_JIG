@@ -37,7 +37,7 @@ echo.
 echo ============================================================
 echo  2/12  Full-chain test (PC frame to target flash, all simulated)
 echo ============================================================
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\pc_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_selftest.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%ROOT%\test\swdsim\sim_target.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" "-DFL6_CMD_GAP_MS=0u" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\pc_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_selftest.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%ROOT%\test\swdsim\sim_target.c"
 if errorlevel 1 goto :app_build_fail
 "%ROOT%\test\app_test.exe"
 if errorlevel 1 goto :app_fail
@@ -50,14 +50,14 @@ rem  are compiled out and the DUT passthrough cases (T17) run instead.
 :appdut
 echo.
 echo     --- app_test in DUT-link mode ---
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" "-DJIG_DUT_LINK=1" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_dut_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%SRC%\cur_chk.c" "%SRC%\vol_chk.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\pc_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_selftest.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%SRC%\dut_proto.c" "%ROOT%\test\swdsim\sim_target.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" "-DFL6_CMD_GAP_MS=0u" "-DJIG_DUT_LINK=1" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_dut_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%SRC%\cur_chk.c" "%SRC%\vol_chk.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\pc_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_selftest.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%SRC%\dut_proto.c" "%ROOT%\test\swdsim\sim_target.c"
 if errorlevel 1 goto :appdut_build_fail
 "%ROOT%\test\app_dut_test.exe"
 if errorlevel 1 goto :appdut_fail
 echo [PASS] app_test (DUT link mode)
 echo.
 echo     --- app_test in BENCH mode: DUT link on USART3, no U2 (jig_mode.h 3.4.1) ---
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" "-DJIG_DUT_LINK=1" "-DJIG_U2_LINK=0" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_bench_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%SRC%\cur_chk.c" "%SRC%\vol_chk.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\pc_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_selftest.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%SRC%\dut_proto.c" "%ROOT%\test\swdsim\sim_target.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DSWD_SIM_BUILD" "-DMEAS_HOST_TEST" "-DFL6_CMD_GAP_MS=0u" "-DJIG_DUT_LINK=1" "-DJIG_U2_LINK=0" %INC% -I"%ROOT%\test\swdsim" -o "%ROOT%\test\app_bench_test.exe" "%ROOT%\test\app_test.c" "%SRC%\app.c" "%SRC%\app_frame.c" "%SRC%\uart_cfg.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%SRC%\enc_plan.c" "%SRC%\phase_chk.c" "%SRC%\enc_chk.c" "%SRC%\sn_report.c" "%SRC%\cur_chk.c" "%SRC%\vol_chk.c" "%ROOT%\U1\Core\Src\protocol_frame.c" "%ROOT%\U1\Core\Src\uart_port.c" "%ROOT%\U1\Core\Src\uart_link.c" "%SRC%\pc_link.c" "%SRC%\fw_upload.c" "%SRC%\gd25q128.c" "%SRC%\swd_programmer.c" "%SRC%\swd_selftest.c" "%SRC%\swd_phy.c" "%SRC%\swd_dp.c" "%SRC%\swd_memap.c" "%SRC%\cortex_m.c" "%SRC%\stm32f4_flash.c" "%SRC%\dut_proto.c" "%ROOT%\test\swdsim\sim_target.c"
 if errorlevel 1 goto :appbench_build_fail
 "%ROOT%\test\app_bench_test.exe"
 if errorlevel 1 goto :appbench_fail
@@ -92,7 +92,7 @@ echo.
 echo ============================================================
 echo  3/12  Measurement module test (divider to voltage, thresholds)
 echo ============================================================
-"%GCC%" -std=c99 -Wall -Wextra -O1 "-DMEAS_HOST_TEST" "-DMEAS_PRINT_ENABLE=1" %INC% -o "%ROOT%\test\measure_test.exe" "%ROOT%\test\measure_test.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%ROOT%\U1\Core\Src\protocol_frame.c"
+"%GCC%" -std=c99 -Wall -Wextra -O1 "-DMEAS_HOST_TEST" "-DFL6_CMD_GAP_MS=0u" "-DMEAS_PRINT_ENABLE=1" %INC% -o "%ROOT%\test\measure_test.exe" "%ROOT%\test\measure_test.c" "%SRC%\measure.c" "%SRC%\meas_pack.c" "%SRC%\pulse_cap.c" "%SRC%\pulse_pack.c" "%ROOT%\U1\Core\Src\protocol_frame.c"
 if errorlevel 1 goto :meas_build_fail
 "%ROOT%\test\measure_test.exe"
 if errorlevel 1 goto :meas_fail

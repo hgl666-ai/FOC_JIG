@@ -3130,7 +3130,7 @@ static void t30_flow6(void)
         tx_len = 0;
         n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq++, 0, 0u);
         APP_USB_Receive((uint8_t *)s_ascii_in, n);
-        pump(2);
+        host_advance(200u); pump(2);
         CHECK(app_state == APP_STATE_FLOW6, "受理后进入 FLOW6");
         CHECK(as_sent("AS:Bb"), "步2 先问版本（AS:Bb）");
 
@@ -3140,10 +3140,12 @@ static void t30_flow6(void)
 
         as_inject("AS:A0\r\n");
         pump(2);
-        CHECK(as_sent("AS:S0"), "拿到 AS:A0 立刻发 AS:S0 停电机");
+        CHECK(as_sent("AS:S800"), "A0 之后起转（AS:S800）");
+        host_advance(2100u); pump(2);
+        CHECK(as_sent("AS:S0"), "转满 2 秒后停车（AS:S0）");
 
-        host_advance(60u);
-        pump(3);                                       /* 停稳 → DONE → 发报告 */
+        host_advance(1100u);
+        pump(3);                                       /* 静置 1 秒 → DONE → 发报告 */
         CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u,
               "流程跑完给出报告");
         CHECK(ac == MGR_CMD_FLOW_TEST && dlen == MGR_FLOW_TEST_RESP_LEN,
@@ -3167,7 +3169,7 @@ static void t30_flow6(void)
         tx_len = 0;
         n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq++, 0, 0u);
         APP_USB_Receive((uint8_t *)s_ascii_in, n);
-        pump(2);
+        host_advance(200u); pump(2);
         as_inject("AS:V1.2.3\r\n");
         pump(2);
         as_inject("AS:A2\r\n");
@@ -3177,7 +3179,7 @@ static void t30_flow6(void)
         pump(3);
         CHECK(as_sent("AS:MC"), "A2 分支：发 AS:MC 进数编码器模式");
 
-        as_inject("AS:MC0\r\n");
+        host_advance(30u); as_inject("AS:MC0\r\n");
         pump(2);                                       /* 进模式 → 开始打脉冲 */
         CHECK(g_enc_rec_cnt[0] == 100u && g_enc_rec_cnt[1] == 100u &&
               g_enc_rec_cnt[2] == 10u,
@@ -3201,14 +3203,14 @@ static void t30_flow6(void)
         tx_len = 0;
         n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq++, 0, 0u);
         APP_USB_Receive((uint8_t *)s_ascii_in, n);
-        pump(2);
+        host_advance(200u); pump(2);
         as_inject("AS:V1.2.3\r\n");
         pump(2);
         as_inject("AS:A2\r\n");
         pump(2);
         host_advance(60u);
         pump(3);
-        as_inject("AS:MC0\r\n");
+        host_advance(30u); as_inject("AS:MC0\r\n");
         pump(2);
         pump(4);                                         /* 等脉冲发完 + 发出 AS:ME */
         as_inject("AS:D,A=100,B=100,Z=0\r\n");         /* 没有 Z 的编码器 */
@@ -3225,14 +3227,14 @@ static void t30_flow6(void)
         tx_len = 0;
         n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq++, 0, 0u);
         APP_USB_Receive((uint8_t *)s_ascii_in, n);
-        pump(2);
+        host_advance(200u); pump(2);
         as_inject("AS:V1.2.3\r\n");
         pump(2);
         as_inject("AS:A2\r\n");
         pump(2);
         host_advance(60u);
         pump(3);
-        as_inject("AS:MC0\r\n");
+        host_advance(30u); as_inject("AS:MC0\r\n");
         pump(2);
         pump(4);
         as_inject("AS:D,A=150,B=100,Z=10\r\n");        /* A 相多了 50 个 → 超 ±2% */
@@ -3263,7 +3265,7 @@ static int flow6_run_a3(uint8_t *d, uint16_t *dlen_out)
     tx_len = 0;
     n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq, 0, 0u);
     APP_USB_Receive((uint8_t *)s_ascii_in, n);
-    pump(2);
+    host_advance(200u); pump(2);
     as_inject("AS:V1.2.3\r\n");
     pump(2);
     as_inject("AS:A3\r\n");                        /* 相位缺失 → 走步4 */
@@ -3368,7 +3370,7 @@ static void f6_start(uint16_t seq)
     tx_len = 0;
     n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, seq, 0, 0u);
     APP_USB_Receive((uint8_t *)s_ascii_in, n);
-    pump(2);
+    host_advance(200u); pump(2);
 }
 
 /* 等报告（最多 6000 个 tick）；返回 1 = 拿到 */
@@ -3406,8 +3408,10 @@ static void t32_flow6_all_green(void)
     CHECK(as_sent("AS:CS"), "发出 AS:CS");
     as_inject("AS:A0\r\n");
     pump(2);
-    CHECK(as_sent("AS:S0"), "收到 A0 立刻停车");
-    host_advance(60u);
+    CHECK(as_sent("AS:S800"), "A0 之后起转（AS:S800）");
+    host_advance(2100u); pump(2);
+    CHECK(as_sent("AS:S0"), "转满 2 秒后停车");
+    host_advance(1100u);
     pump(3);
 
     CHECK(f6_wait(d, &dlen) != 0, "给出报告");
@@ -3515,7 +3519,7 @@ static void t36_flow6_enc_timeout(void)
     host_advance(60u);
     pump(3);
     CHECK(as_sent("AS:MC"), "发出 AS:MC");
-    as_inject("AS:MC0\r\n");
+    host_advance(30u); as_inject("AS:MC0\r\n");
     pump(2);
     CHECK(g_enc_start_calls > 0u, "治具开始打脉冲");
     /* 之后什么都不注入，等 2 秒超时 */
@@ -3618,19 +3622,19 @@ static void t38_flow6_force(void)
     tx_len = 0;
     n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLOW_TEST, 0x1180u, &force, 1u);
     APP_USB_Receive((uint8_t *)s_ascii_in, n);
-    pump(2);
+    host_advance(200u); pump(2);
 
     as_inject("bb:0.3.0\r\n");             /* 步2：实测的版本回字格式 */
     pump(2);
     CHECK(as_sent("AS:CS"), "发出 AS:CS");
     as_inject("AS:A0\r\n");                /* 真实是 A0，但强制分支要按 A2 走 */
     pump(2);
-    CHECK(as_sent("AS:S0"), "A0 后先停电机");
-    host_advance(60u);
-    pump(3);
+    CHECK(as_sent("AS:S800"), "A0 后先起转（AS:S800）");
+    host_advance(2100u); pump(2);          /* 起转观察 2 秒 */
+    host_advance(1100u); pump(3);          /* 停车静置 1 秒 → 强制分支生效 */
     CHECK(as_sent("AS:MC"), "**强制后仍然走进步5**（发出 AS:MC）");
 
-    as_inject("AS:MC0\r\n");               /* 对面进计数模式 */
+    host_advance(30u); as_inject("AS:MC0\r\n");               /* 对面进计数模式 */
     pump(2);
     CHECK(g_enc_start_calls > 0u, "收到 AS:MC0 之后才开始打脉冲");
     pump(2);                               /* 等脉冲发完 → 发 AS:ME */

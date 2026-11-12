@@ -1080,6 +1080,10 @@ static uint8_t APP_ProgramPreCheck(void)
  * 可能是任意 ASCII（例如 AS: 命令的回报），必须先原样留下来给人看。
  * 所以空闲时改成"只嗅探、不解析"：字节进 s_dut_sniff，由 0x0020 取走。
  * （链路层只在"我们确实在等一帧应答"时才读口，那时 Link_Busy 为 1，走原路。） */
+/* DUT 口原始字节日志（诊断用，0x0026 读）：只保留"上一条命令之后"收到的内容 */
+static uint8_t  s_dut_log[MGR_DUT_LOG_SIZE];
+static uint16_t s_dut_log_len;
+
 static uint8_t  s_dut_sniff[MGR_DUT_SNIFF_SIZE];
 static uint16_t s_dut_sniff_len;
 static uint16_t s_dut_sniff_drop;
@@ -1095,6 +1099,16 @@ static void APP_DutSniff(void)
     uint8_t b;
 
     while (UartPort_Read(UART_CFG_PORT_DUT, &b, 1u) == 1u) {
+        if (s_dut_log_len < (uint16_t)MGR_DUT_LOG_SIZE) {
+            s_dut_log[s_dut_log_len] = b;        /* 原样留一份给 0x0026 */
+            s_dut_log_len++;
+        } else {
+            /* 满了就左移一格（滚动缓冲）：永远保留"最近"的 96 字节。
+             * ⚠ 不能靠"发命令时清空"来限制长度 —— 那样收尾命令会把现场擦掉
+             *   （2026-11-12 实测：想看的步3 证据被 AS:S0 清没了）。*/
+            memmove(&s_dut_log[0], &s_dut_log[1], (size_t)(MGR_DUT_LOG_SIZE - 1u));
+            s_dut_log[MGR_DUT_LOG_SIZE - 1u] = b;
+        }
         if (s_dut_sniff_len < (uint16_t)MGR_DUT_SNIFF_SIZE) {
             s_dut_sniff[s_dut_sniff_len] = b;
             s_dut_sniff_len++;
@@ -1319,12 +1333,17 @@ static void APP_DutRecvCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
 #define FL6_SUB_SEND  0u
 #define FL6_SUB_WAIT  1u
 #define FL6_SUB_RUN   2u
+#define FL6_SUB_SPIN  3u          /* 起转观察中（AS:S800 已发） */
+#define FL6_SUB_HOLD  4u          /* 停车静置中（AS:S0 已发，等惯性） */
 
 #define FL6_ALIVE_TRIES   15u      /* AS:Bb 轮询次数 */
 #define FL6_ALIVE_GAP_MS  400u     /* 每次间隔：对面回一条要 1.1~1.8s，太短会互相踩 */
 #define FL6_SELF_TMO_MS   12000u   /* AS:CS 等回字上限：对面校准中间会回 AS:A5，
                                     * 我们忽略它继续等 A0~A3，所以总时长要给够 */
 #define FL6_STOP_MS       50u      /* 停电机后等三相关断 */
+#define FL6_SPIN_MS       2000u    /* 自检通过后起转观察时间（AS:S800 转这么久） */
+#define FL6_SETTLE_MS     1000u    /* 停车后静置：等惯性停住 + 反电动势衰减，
+                                    * 否则步4 采相电压、步5 数编码器都会被污染 */
 #define FL6_PWM_TMO_MS    3000u    /* AS:PW + 采三相的上限 */
 #define FL6_PULSE_WIN_MS  200u     /* 脉冲采集窗口 */
 #define FL6_ENC_TMO_MS    2000u    /* 发完脉冲等 FOC 报数的上限 */
@@ -1334,6 +1353,13 @@ static void APP_DutRecvCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
 #define FL6_ENC_RUN_MS    2000u    /* 等脉冲发完的上限（真机上 100 个 @5kHz ≈ 20ms） */
 #define FL6_ENC_ACK_MS    3000u    /* 等对面回 AS:MC0 的上限（实测约 1.5~2s） */
 #define FL6_TOTAL_TMO_MS  30000u   /* 整个流程的总看门狗 —— 卡住也一定会收尾 */
+/* 两条 AS 命令之间的最小间隔。
+ * 依据（2026-11-12 实测）：手动连发间隔 246ms 正常，流程里 4ms 就丢命令 ——
+ * 对面刚发完回复，RX 还没重新挂好，这时候推过去的命令会被丢掉。
+ * 宿主测试里没有这个物理延迟，用 -DFL6_CMD_GAP_MS=0u 关掉，免得几十条时序断言跟着改。*/
+#ifndef FL6_CMD_GAP_MS
+#define FL6_CMD_GAP_MS    150u
+#endif
 
 static uint16_t s_fl6_seq;
 static uint8_t  s_fl6_step;
@@ -1344,8 +1370,13 @@ static uint32_t s_fl6_t0;
 static uint16_t s_fl6_tries;
 static uint8_t  s_fl6_cs;                  /* AS:CS 的返回码 0..3，0xFF = 超时 */
 static uint32_t s_fl6_tall;                /* 流程开始时刻（总看门狗用） */
+static uint32_t s_fl6_next;                /* 最早允许发下一条命令的时刻 */
 static uint8_t  s_fl6_forced;              /* 1 = 看门狗已经强制收尾过 */
 static uint8_t  s_fl6_force;                /* 0=正常；2/3 = 强制走步5/步4（调试用） */
+static uint16_t s_fl6_last_a;              /* FOC 上报的原始数字（0x0025 读） */
+static uint16_t s_fl6_last_b;
+static uint16_t s_fl6_last_z;
+static uint8_t  s_fl6_last_ok;             /* 1 = 收到过并解析成功 */
 static uint8_t  s_fl6_exp_a;
 static uint8_t  s_fl6_exp_b;
 static uint8_t  s_fl6_exp_z;
@@ -1397,6 +1428,15 @@ static void FL6_Goto(uint8_t step)
     s_fl6_sub   = FL6_SUB_SEND;
     s_fl6_t0    = HAL_GetTick();
     s_fl6_tries = 0u;                    /* 换一步就重新数 */
+    /* 换步之后先等 150ms 再开口：对面可能还在发上一条的回复，
+     * 这时候推命令过去会被它丢掉（2026-11-12 实测）。*/
+    s_fl6_next  = HAL_GetTick() + (uint32_t)FL6_CMD_GAP_MS;
+}
+
+/** 到点了吗？各步的 SEND 分支先问一句，没到就下一轮再来 */
+static uint8_t FL6_Ready(void)
+{
+    return ((int32_t)(HAL_GetTick() - s_fl6_next) >= 0) ? 1u : 0u;
 }
 
 /** 本步做完 → 决定下一步走哪（分支都在这里） */
@@ -1506,6 +1546,9 @@ static void APP_FlowTestTask(void)
     /*──────── 步2 存活：轮询 AS:Bb ────────*/
     case FL6_S_ALIVE:
         if (s_fl6_sub == FL6_SUB_SEND) {
+            if (FL6_Ready() == 0u) {
+                break;                                    /* 还没到可发时刻 */
+            }
             /* 只在第一次清缓冲；重试时累积着等（识别是"全文找前缀"，累积无副作用） */
             (void)FL6_SendEx(AS_CMD_VERSION, (s_fl6_tries == 0u) ? 1u : 0u);
             break;
@@ -1531,6 +1574,9 @@ static void APP_FlowTestTask(void)
     /*──────── 步3 自检 AS:CS → 立刻停 ────────*/
     case FL6_S_SELF:
         if (s_fl6_sub == FL6_SUB_SEND) {
+            if (FL6_Ready() == 0u) {
+                break;
+            }
             (void)FL6_Send(AS_CMD_SELFTEST);
             break;
         }
@@ -1540,13 +1586,35 @@ static void APP_FlowTestTask(void)
             if (c != 0xFFu) {
                 s_fl6_cs = c;
                 FL6_Set(FL6_S_SELF, 0x01u, c);
-                (void)FL6_Send(AS_CMD_STOP);             /* ⚠ 不管哪个码都先停 */
-                s_fl6_sub = FL6_SUB_RUN;                 /* 停完等 50ms 再走下一步 */
+                if (c == 0u) {
+                    /* A0 = 自检通过 → **起转验证**。
+                     * 实测 AS:CS 回 A0 并不会自己转，必须显式发 AS:S800。*/
+                    (void)FL6_Send(AS_CMD_RUN);
+                    s_fl6_sub = FL6_SUB_SPIN;            /* 覆盖 Send 设的 WAIT */
+                    s_fl6_t0  = HAL_GetTick();
+                } else {
+                    (void)FL6_Send(AS_CMD_STOP);         /* A1/A2/A3：有故障，只停不加电 */
+                    s_fl6_sub = FL6_SUB_RUN;
+                }
             } else if ((uint32_t)(now - s_fl6_t0) >= (uint32_t)FL6_SELF_TMO_MS) {
                 s_fl6_cs = 0xFFu;
                 FL6_Set(FL6_S_SELF, 0x02u, 0xFFu);
                 (void)FL6_Send(AS_CMD_STOP);
                 s_fl6_sub = FL6_SUB_RUN;
+            }
+            break;
+        }
+        if (s_fl6_sub == FL6_SUB_SPIN) {         /* 起转观察中 */
+            if ((uint32_t)(now - s_fl6_t0) >= (uint32_t)FL6_SPIN_MS) {
+                (void)FL6_Send(AS_CMD_STOP);     /* 转满 → 停车 */
+                s_fl6_sub = FL6_SUB_HOLD;        /* 覆盖 Send 设的 WAIT */
+                s_fl6_t0  = HAL_GetTick();
+            }
+            break;
+        }
+        if (s_fl6_sub == FL6_SUB_HOLD) {         /* 停车静置：等惯性 + 反电动势 */
+            if ((uint32_t)(now - s_fl6_t0) >= (uint32_t)FL6_SETTLE_MS) {
+                FL6_Advance();
             }
             break;
         }
@@ -1559,6 +1627,9 @@ static void APP_FlowTestTask(void)
     /*──────── 步4 三相：AS:PW + 采 3 路 PWM ────────*/
     case FL6_S_PWM:
         if (s_fl6_sub == FL6_SUB_SEND) {
+            if (FL6_Ready() == 0u) {
+                break;
+            }
             (void)FL6_Send(AS_CMD_PWM);
             /* ⚠ 必须走 cfg 层（PULSE_CfgStart）：它负责开 NVIC、清寄存器、清边沿环。
              *   只调算法层的 PULSE_Start 在真板子上等于"窗口开了但捕获中断没使能"
@@ -1598,19 +1669,20 @@ static void APP_FlowTestTask(void)
     /*──────── 步5 编码器：AS:MC + 发脉冲 + 收 AS:AaBbCc ────────*/
     case FL6_S_ENC:
         if (s_fl6_sub == FL6_SUB_SEND) {
+            if (FL6_Ready() == 0u) {
+                break;
+            }
             (void)FL6_Send(AS_CMD_ENC);
             break;
         }
         if (s_fl6_sub == FL6_SUB_WAIT) {
-            /* 必须等对面回 `AS:MC0` 再打脉冲 —— 实测 FOC 进计数模式要 1.5~2 秒，
-             * 抢跑打出去的脉冲它根本收不到（2026-11-11 实测：脉冲全丢，上报全是噪声）。*/
-            if (s_dut_sniff_len == 0u) {
-                if ((uint32_t)(now - s_fl6_t0) >= (uint32_t)FL6_ENC_ACK_MS) {
-                    (void)FL6_Send(AS_CMD_STOP);
-                    FL6_Set(FL6_S_ENC, 0x02u, 0xFFFCu);   /* FFFC = 对面没进计数模式 */
-                    FL6_Advance();
-                }
-                break;                                   /* 还没回：继续等 */
+            /* ⚠ 这里改成"发完 AS:MC 等 20ms 就打"，**不再等 AS:MC0**。
+             *   依据（2026-11-12 实测）：MC0 要 1.5~2 秒才回，而 FOC 的计数窗口
+             *   看来在 `AS:MC` 之后就开始了（MC0 一到，`AS:D` 紧跟其后就上报）。
+             *   等 MC0 再打，脉冲正好落在窗口外 → 数到 0。
+             *   20ms 是给对面配 EXTI 的余量，不能省。*/
+            if ((uint32_t)(now - s_fl6_t0) < 20u) {
+                break;                                   /* 给对面几毫秒启动 */
             }
             {
                 enc_plan_t p;
@@ -1661,6 +1733,11 @@ static void APP_FlowTestTask(void)
             if (APP_AsParseEncD(s_dut_sniff, s_dut_sniff_len, &a, &b, &c) != 0u) {
                 uint16_t mask = 0u;
 
+                s_fl6_last_a  = a;                   /* 留一份原始数字给 0x0025 */
+                s_fl6_last_b  = b;
+                s_fl6_last_z  = c;
+                s_fl6_last_ok = 1u;
+
                 if ((a + 2u >= (uint16_t)s_fl6_exp_a) && (a <= (uint16_t)s_fl6_exp_a + 2u)) {
                     mask |= 0x0001u;
                 }
@@ -1691,6 +1768,9 @@ static void APP_FlowTestTask(void)
     case FL6_S_DONE:
     default:
         if (s_fl6_sub == FL6_SUB_SEND) {
+            if (FL6_Ready() == 0u) {
+                break;
+            }
             (void)FL6_Send(AS_CMD_STOP);
             FL6_Set(FL6_S_DONE, 0x01u, 0u);
             break;
@@ -1758,8 +1838,12 @@ static void APP_FlowTestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     }
     s_fl6_seq    = pc_seq;
     s_fl6_cs     = 0xFFu;
-    s_fl6_tall   = HAL_GetTick();
-    s_fl6_forced = 0u;
+    s_fl6_tall    = HAL_GetTick();
+    s_fl6_forced  = 0u;
+    s_fl6_last_ok = 0u;
+    s_fl6_last_a  = 0u;
+    s_fl6_last_b  = 0u;
+    s_fl6_last_z  = 0u;
     FL6_Goto(FL6_S_ADC);
     app_state = APP_STATE_FLOW6;
 }
@@ -3449,6 +3533,32 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
     case MGR_CMD_DUT_RAW:
         APP_DutCmd(cmd, data, len);
         break;
+
+    /*── 0x0026 dump DUT 口最近收到的原始字节（诊断：流程期间对面回了什么）──*/
+    case MGR_CMD_DUT_LOG: {
+        uint8_t out[1u + MGR_DUT_LOG_SIZE];
+        uint16_t n2 = (s_dut_log_len > (uint16_t)MGR_DUT_LOG_SIZE)
+                      ? (uint16_t)MGR_DUT_LOG_SIZE : s_dut_log_len;
+
+        out[0] = (uint8_t)n2;
+        if (n2 > 0u) {
+            memcpy(&out[1], s_dut_log, n2);
+        }
+        APP_SendAck(cmd, out, (uint16_t)(1u + n2));
+        break;
+    }
+
+    /*── 0x0025 上一次流程里 FOC 上报的编码器原始数字（诊断）──*/
+    case MGR_CMD_ENC_LAST: {
+        uint8_t out[MGR_ENC_LAST_RESP_LEN];
+
+        out[0] = s_fl6_last_ok;
+        out[1] = (uint8_t)(s_fl6_last_a >> 8); out[2] = (uint8_t)s_fl6_last_a;
+        out[3] = (uint8_t)(s_fl6_last_b >> 8); out[4] = (uint8_t)s_fl6_last_b;
+        out[5] = (uint8_t)(s_fl6_last_z >> 8); out[6] = (uint8_t)s_fl6_last_z;
+        APP_SendAck(cmd, out, MGR_ENC_LAST_RESP_LEN);
+        break;
+    }
 
     /*── 0x0023 编码器发生器的寄存器快照（诊断：0x0012 发不出脉冲时用）──*/
     case MGR_CMD_ENC_DBG: {
