@@ -3534,6 +3534,41 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
         APP_DutCmd(cmd, data, len);
         break;
 
+    /*── 0x0027 双槽完整状态（上传之后确认两个槽都齐了）──*/
+    case MGR_CMD_FLASH_SLOTS: {
+        uint8_t out[MGR_FLASH_SLOTS_RESP_LEN];
+        uint8_t k;
+
+        for (k = 0u; k < 2u; k++) {
+            uint32_t sz   = 0u;
+            uint8_t  flag = 0u;
+            uint8_t  v[3] = { 0u, 0u, 0u };
+            uint8_t  st;
+            uint8_t  r = Flash_ReadHead(k, &sz, v, &flag);
+
+            if (r == 2u) {
+                st = (uint8_t)FW_SLOT_ST_READFAIL;      /* SPI 读不到：硬件故障 */
+            } else if ((sz == 0u) || (sz > FW_MAX_IMAGE_SIZE)) {
+                st = (uint8_t)FW_SLOT_ST_EMPTY;         /* 没上传过 */
+            } else if (flag == FW_FLAG_COMPLETE) {
+                st = (uint8_t)FW_SLOT_ST_COMPLETE;      /* 完整标志已落盘 */
+            } else {
+                st = (uint8_t)FW_SLOT_ST_INCOMPLETE;    /* 传了但没收到结束帧 */
+            }
+
+            out[(k * 8u) + 0u] = st;
+            out[(k * 8u) + 1u] = (uint8_t)(sz >> 24);
+            out[(k * 8u) + 2u] = (uint8_t)(sz >> 16);
+            out[(k * 8u) + 3u] = (uint8_t)(sz >> 8);
+            out[(k * 8u) + 4u] = (uint8_t)(sz);
+            out[(k * 8u) + 5u] = v[0];
+            out[(k * 8u) + 6u] = v[1];
+            out[(k * 8u) + 7u] = v[2];
+        }
+        APP_SendAck(cmd, out, MGR_FLASH_SLOTS_RESP_LEN);
+        break;
+    }
+
     /*── 0x0026 dump DUT 口最近收到的原始字节（诊断：流程期间对面回了什么）──*/
     case MGR_CMD_DUT_LOG: {
         uint8_t out[1u + MGR_DUT_LOG_SIZE];

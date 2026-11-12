@@ -168,7 +168,13 @@
  *        = 3 + 18 = 21 字节
  * code：00 跳过（这条分支没走）· 01 通过 · 02 失败 · 03 不判
  * detail：每步自己解释，见 app.c 里 APP_FlowTestTask 的注释 */
-#define MGR_CMD_DUT_LOG          0x0026u   /* dump DUT 口最近收到的原始字节（诊断） */
+#define MGR_CMD_DUT_LOG          0x0026u
+#define MGR_CMD_FLASH_SLOTS      0x0027u   /* 双槽完整状态（Boot/App 各 8 字节） */
+#define MGR_FLASH_SLOTS_RESP_LEN 16u
+#define FW_SLOT_ST_EMPTY      0x00u
+#define FW_SLOT_ST_INCOMPLETE 0x01u
+#define FW_SLOT_ST_COMPLETE   0x02u
+#define FW_SLOT_ST_READFAIL   0xFFu   /* dump DUT 口最近收到的原始字节（诊断） */
 #define MGR_DUT_LOG_SIZE         96u
 #define MGR_CMD_ENC_LAST         0x0025u   /* 上一次流程里 FOC 上报的 A/B/Z 原始值 */
 #define MGR_ENC_LAST_RESP_LEN    7u        /* ok(1) + A(2) + B(2) + Z(2) */

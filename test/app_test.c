@@ -3712,6 +3712,45 @@ static void t39_flow6_slow_alive(void)
 }
 #endif /* JIG_DUT_LINK */
 
+/*==============================================================================
+ * T40 0x0027 双槽完整状态
+ *----------------------------------------------------------------------------
+ * 应答 16 字节 = 两槽各 8 字节：[状态][大小 4B BE][版本 3B]
+ * 前 8 字节 = Slot0(Boot)，后 8 字节 = Slot1(App)
+ *============================================================================*/
+static void t40_flash_slots(void)
+{
+    uint16_t n, ac, as_, dlen;
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t seq = 0x140u;
+
+    printf("\n-- T40 0x0027 双槽完整状态 --\n");
+
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLASH_SLOTS, seq, 0, 0u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(2);
+
+    CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u,
+          "0x0027 有应答");
+    CHECK(ac == MGR_CMD_FLASH_SLOTS && as_ == seq, "命令号/序号回显正确");
+    CHECK(dlen == MGR_FLASH_SLOTS_RESP_LEN, "应答 16 字节（两槽 × 8）");
+
+    CHECK((d[0] == FW_SLOT_ST_EMPTY) || (d[0] == FW_SLOT_ST_INCOMPLETE) ||
+          (d[0] == FW_SLOT_ST_COMPLETE) || (d[0] == FW_SLOT_ST_READFAIL),
+          "Slot0(Boot) 状态是四种合法值之一");
+    CHECK((d[8] == FW_SLOT_ST_EMPTY) || (d[8] == FW_SLOT_ST_INCOMPLETE) ||
+          (d[8] == FW_SLOT_ST_COMPLETE) || (d[8] == FW_SLOT_ST_READFAIL),
+          "Slot1(App) 状态是四种合法值之一");
+
+    /* 参数越界也要能应答（LEN=1 不被当成非法） */
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_FLASH_SLOTS, (uint16_t)(seq + 1u), 0, 0u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(2);
+    CHECK(tx_len > 0u, "重发也能应答");
+}
+
 int main(void)
 {
     printf("=== FOC JIG U1 全链路宿主仿真 (PC帧→上传→SPI Flash→SWD→被烧板) ===\n\n");
@@ -3768,6 +3807,7 @@ int main(void)
     t38_flow6_force();          /* 0x0022 强制分支 */
     t39_flow6_slow_alive();     /* 0x0022 慢回也算活着 */
 #endif
+    t40_flash_slots();          /* 0x0027 双槽状态 */
 #endif
 #if (JIG_DUT_LINK == 0)
     t19_enc_peer();             /* ⑤ 回环：需要假 U2，只在非 DUT 构建里跑 */
