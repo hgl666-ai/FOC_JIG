@@ -24,6 +24,9 @@
 ============================================================
  2/12  Full-chain test (PC frame to target flash, all simulated)
 ============================================================
+D:/Project/FOC_JIG/test/app_test.c:3760:13: warning: 't41_swd_speed' defined but not used [-Wunused-function]
+ 3760 | static void t41_swd_speed(void)
+      |             ^~~~~~~~~~~~~
 D:/Project/FOC_JIG/test/app_test.c:3721:13: warning: 't40_flash_slots' defined but not used [-Wunused-function]
  3721 | static void t40_flash_slots(void)
       |             ^~~~~~~~~~~~~~~
@@ -148,7 +151,11 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 
 -- T40 0x0027 双槽完整状态 --
 
-=== 共 627 项检查, 失败 0 项 ===
+-- T41 0x0028 SWD 速度设置/查询 --
+
+-- T42 相电流不参与步1 判定 --
+
+=== 共 641 项检查, 失败 0 项 ===
 [PASS] app_test (DUT link mode)
 
     --- app_test in BENCH mode: DUT link on USART3, no U2 (jig_mode.h 3.4.1) ---
@@ -227,7 +234,11 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 
 -- T40 0x0027 双槽完整状态 --
 
-=== 共 627 项检查, 失败 0 项 ===
+-- T41 0x0028 SWD 速度设置/查询 --
+
+-- T42 相电流不参与步1 判定 --
+
+=== 共 641 项检查, 失败 0 项 ===
 [PASS] app_test (bench mode: DUT link, no U2)
 
 ============================================================
@@ -1043,7 +1054,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 
     --- Keil build U1 ---
     (UV4 is a GUI app; waiting for the build to finish...)
-Program Size: Code=50880 RO-data=732 RW-data=836 ZI-data=13788  
+Program Size: Code=50916 RO-data=732 RW-data=836 ZI-data=13788  
 "U1\U1.axf" - 0 Error(s), 0 Warning(s).
 [PASS] Keil build U1: 0 Error, 0 Warning
 

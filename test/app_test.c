@@ -3419,7 +3419,7 @@ static void t32_flow6_all_green(void)
     CHECK(d[0] == APP_STATUS_OK, "**六步全过 → 状态 00**");
     CHECK(d[1] == 6u && d[2] == 0u, "跑到第 6 步，没有失败步");
     CHECK(d[3] == 0x01u, "步1(ADC)：注入合格码值 → 通过");
-    CHECK(((uint16_t)((d[4] << 8) | d[5])) == 0x00FFu, "步1 detail = FF（六路都好）");
+    CHECK(((uint16_t)((d[4] << 8) | d[5])) == 0x00FFu, "步1 detail = FF（四路电源都好）");
     CHECK(d[6] == 0x01u, "步2(存活)：通过");
     CHECK(d[9] == 0x01u, "步3(自检)：通过");
     CHECK(d[12] == 0x00u && d[15] == 0x00u, "步4/步5：A0 时跳过");
@@ -3751,6 +3751,118 @@ static void t40_flash_slots(void)
     CHECK(tx_len > 0u, "重发也能应答");
 }
 
+/*==============================================================================
+ * T41 0x0028 设置/查询 SWD 速度
+ *----------------------------------------------------------------------------
+ * LEN=0          → 回 4 字节：[用户设定 u16][当前生效 u16]
+ * LEN=1 DATA=v   → v = 1~255 设置；v = 0 恢复默认；回 1 字节状态
+ *============================================================================*/
+static void t41_swd_speed(void)
+{
+    uint16_t n, ac, as_, dlen;
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t seq = 0x150u;
+    uint8_t  v;
+
+    printf("\n-- T41 0x0028 SWD 速度设置/查询 --\n");
+
+    /* 查询：默认状态下用户设定应为 0（= 用编译默认） */
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_SWD_SPEED, seq, 0, 0u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(2);
+    CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+          && ac == MGR_CMD_SWD_SPEED && dlen == MGR_SWD_SPEED_RESP_LEN,
+          "查询回 4 字节");
+    CHECK(d[0] == 0u && d[1] == 0u, "默认状态下用户设定 = 0（用编译默认）");
+
+    /* 设置 24 */
+    v = 24u;
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_SWD_SPEED, (uint16_t)(seq + 1u), &v, 1u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(2);
+    CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+          && dlen == 1u && d[0] == APP_STATUS_OK, "设置成功回 00");
+
+    /* 再查：用户设定 = 24，生效值也应 = 24 */
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_SWD_SPEED, (uint16_t)(seq + 2u), 0, 0u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(2);
+    CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u && dlen == 4u,
+          "查询回 4 字节（第二次）");
+    CHECK(((uint16_t)((d[0] << 8) | d[1])) == 24u, "用户设定 = 24");
+    CHECK(((uint16_t)((d[2] << 8) | d[3])) == 24u, "当前生效 = 24");
+
+    /* 设 0 = 恢复默认 */
+    v = 0u;
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_SWD_SPEED, (uint16_t)(seq + 3u), &v, 1u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(2);
+    CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+          && dlen == 1u && d[0] == APP_STATUS_OK, "设 0 恢复默认，回 00");
+
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_SWD_SPEED, (uint16_t)(seq + 4u), 0, 0u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(2);
+    CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+          && dlen == 4u && d[0] == 0u && d[1] == 0u,
+          "恢复默认后用户设定回到 0");
+
+    /* 参数越界：LEN=2 → 0B */
+    tx_len = 0;
+    n = Frame_Build((uint8_t *)s_ascii_in, MGR_CMD_SWD_SPEED, (uint16_t)(seq + 5u),
+                    (const uint8_t *)"\x01\x02", 2u);
+    APP_USB_Receive((uint8_t *)s_ascii_in, n);
+    pump(2);
+    CHECK(tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u
+          && dlen == 1u && d[0] == APP_STATUS_ERR_PARAM, "LEN=2 → 0B 参数错");
+}
+
+/*==============================================================================
+ * T42 两路相电流**不参与**判定（2026-11-13 定）
+ *----------------------------------------------------------------------------
+ * 产线不测相电流：把两路电流灌成明显不合格（0mV），步1 仍必须判"通过"。
+ * 改之前它们会让步1 失败（detail=7/8），每块板都判不合格。
+ *============================================================================*/
+#if (JIG_DUT_LINK != 0)
+static void t42_adc_current_ignored(void)
+{
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t dlen = 0;
+
+    printf("\n-- T42 相电流不参与步1 判定 --\n");
+
+    /* 4 路电源灌成合格，两路电流灌成 0（明显不合格） */
+    MEAS_TestInject((meas_id_t)MEAS_CH_V24,  3773u);
+    MEAS_TestInject((meas_id_t)MEAS_CH_V10,  1572u);
+    MEAS_TestInject((meas_id_t)MEAS_CH_V5,   3723u);
+    MEAS_TestInject((meas_id_t)MEAS_CH_V33,  3723u);
+    MEAS_TestInject((meas_id_t)MEAS_CH_CUR1, 0u);      /* 0mV：以前会判失败 */
+    MEAS_TestInject((meas_id_t)MEAS_CH_CUR2, 0u);
+    for (int i = 0; i < 800; i++) {
+        MEAS_Poll();
+        g_tick++;
+    }
+
+    f6_start(0x11A0u);
+    CHECK(as_sent("AS:Bb"), "步2 先问版本");
+    as_inject("bb:0.3.0\r\n");
+    pump(2);
+    as_inject("AS:A0\r\n");
+    pump(2);
+    host_advance(2100u); pump(2);      /* 起转观察 2 秒 */
+    host_advance(1100u); pump(3);      /* 停车静置 1 秒 */
+    CHECK(f6_wait(d, &dlen) != 0, "给出报告");
+    CHECK(d[3] == 0x01u, "步1(ADC)：电流不合格**不影响** → 仍判通过");
+    CHECK(((uint16_t)((d[4] << 8) | d[5])) == 0x00FFu, "步1 detail = FF（四路电源全好）");
+    CHECK(d[0] == 0x00u, "整体 status = 00（合格）");
+}
+#endif /* JIG_DUT_LINK */
+
 int main(void)
 {
     printf("=== FOC JIG U1 全链路宿主仿真 (PC帧→上传→SPI Flash→SWD→被烧板) ===\n\n");
@@ -3808,6 +3920,10 @@ int main(void)
     t39_flow6_slow_alive();     /* 0x0022 慢回也算活着 */
 #endif
     t40_flash_slots();          /* 0x0027 双槽状态 */
+    t41_swd_speed();            /* 0x0028 SWD 速度设置/查询 */
+#if (JIG_DUT_LINK != 0)
+    t42_adc_current_ignored();  /* 步1：相电流不参与判定 */
+#endif
 #endif
 #if (JIG_DUT_LINK == 0)
     t19_enc_peer();             /* ⑤ 回环：需要假 U2，只在非 DUT 构建里跑 */

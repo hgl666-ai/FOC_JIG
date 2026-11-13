@@ -42,6 +42,7 @@
 #include "swd_selftest.h"   /* 0x001E SWD 烧录自检（B1：不依赖 SPI Flash） */
 #include "swd_memap.h"      /* SWD_MemReadBlock：读被测板 96-bit UID */
 #include "swd_phy.h"        /* SWD_OK 状态枚举 / SWD_PhyInit / SWD_PhySetDelay */
+#include "swd_config.h"     /* SWD_DELAY_LOOPS：0x0028 恢复默认速度用 */
 #include "swd_dp.h"         /* SWD_Connect / SWD_PowerUp（0x001E mode=7/8 用） */
 #include "enc_gen.h"
 #include "jig_mode.h"
@@ -104,6 +105,10 @@ FOC_STATIC_ASSERT(MGR_CUR_TEST_RESP_LEN == (2u + (CUR_CHK_CH_COUNT * MGR_CUR_ITE
  *============================================================================*/
 APP_State_t app_state = APP_STATE_INIT;
 uint16_t    pc_seq    = 0u;
+
+/* SWD 位翻转速度的用户设定（0 = 用编译默认 SWD_DELAY_LOOPS）。
+ * 掉电不保留：避免忘了改回来，导致以后一直用慢速。 */
+static uint16_t s_swd_delay_ovr;
 
 static uint16_t prog_seq = 0u;      /* 0x0112 受理时的帧序号, 烧完 ACK 回显用 */
 static uint16_t s_sst_seq = 0u;     /* 0x001E SWD 自检受理时的帧序号 */
@@ -1494,16 +1499,10 @@ static void FL6_Adc(void)
             break;
         }
     }
-    if (bad == 0xFFu) {                                   /* 两路电流：停在约 1.65V 中点 */
-        for (i = (uint8_t)MEAS_CH_CUR1; i <= (uint8_t)MEAS_CH_CUR2; i++) {
-            uint32_t mv = snap.ch[i].mv;
-
-            if (((snap.ch[i].flags & MEAS_CHF_OK) == 0u) || (mv < 1150u) || (mv > 2150u)) {
-                bad = (uint16_t)i;
-                break;
-            }
-        }
-    }
+    /* 两路相电流**不参与判定**（2026-11-13 定）。
+     * 原因：产线不测相电流（传感器不接/不要求），判它会让每块板都在步1 失败。
+     * 它们仍在 MEAS 里被采样（0x000E 可单独读），只是不再影响合格判定。
+     * 所以步1 的 detail 现在只会是 0~3（24V/10V/5V/3.3V），全好仍是 0x00FF。 */
     FL6_Set(FL6_S_ADC, (bad == 0xFFu) ? 0x01u : 0x02u, bad);
     FL6_Advance();
 }
@@ -3513,6 +3512,10 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
             break;
         }
         prog_seq  = pc_seq;
+        /* 每次开烧前重新套用速度设定：`0x001E` 的速度扫描结束会把延时
+         * 恢复成编译默认（swd_selftest.c:676），不重新套用就等于把用户的设定抹了。*/
+        SWD_PhySetDelay((s_swd_delay_ovr != 0u) ? s_swd_delay_ovr
+                                                : (uint16_t)SWD_DELAY_LOOPS);
         app_state = APP_STATE_PROGRAMMING;
         SWDP_Start();
         break;
@@ -3533,6 +3536,36 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
     case MGR_CMD_DUT_RAW:
         APP_DutCmd(cmd, data, len);
         break;
+
+    /*── 0x0028 设置/查询 SWD 速度（试档位：设一档、烧一次、看结果）──*/
+    case MGR_CMD_SWD_SPEED: {
+        if (len == 0u) {                       /* 查询 */
+            uint8_t  out[MGR_SWD_SPEED_RESP_LEN];
+            uint16_t eff = SWD_PhyGetDelay();
+
+            out[0] = (uint8_t)(s_swd_delay_ovr >> 8);
+            out[1] = (uint8_t)(s_swd_delay_ovr);
+            out[2] = (uint8_t)(eff >> 8);
+            out[3] = (uint8_t)(eff);
+            APP_SendAck(cmd, out, MGR_SWD_SPEED_RESP_LEN);
+            break;
+        }
+        if (len != 1u) {
+            uint8_t e = APP_STATUS_ERR_PARAM;
+
+            APP_SendAck(cmd, &e, 1u);
+            break;
+        }
+        {
+            uint8_t st = APP_STATUS_OK;
+
+            s_swd_delay_ovr = (uint16_t)data[0];       /* 0 = 恢复默认 */
+            SWD_PhySetDelay((s_swd_delay_ovr != 0u) ? s_swd_delay_ovr
+                                                    : (uint16_t)SWD_DELAY_LOOPS);
+            APP_SendAck(cmd, &st, 1u);
+        }
+        break;
+    }
 
     /*── 0x0027 双槽完整状态（上传之后确认两个槽都齐了）──*/
     case MGR_CMD_FLASH_SLOTS: {

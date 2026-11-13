@@ -169,7 +169,9 @@
  * code：00 跳过（这条分支没走）· 01 通过 · 02 失败 · 03 不判
  * detail：每步自己解释，见 app.c 里 APP_FlowTestTask 的注释 */
 #define MGR_CMD_DUT_LOG          0x0026u
-#define MGR_CMD_FLASH_SLOTS      0x0027u   /* 双槽完整状态（Boot/App 各 8 字节） */
+#define MGR_CMD_FLASH_SLOTS      0x0027u
+#define MGR_CMD_SWD_SPEED        0x0028u   /* 设置/查询 SWD 位翻转速度（试档位用） */
+#define MGR_SWD_SPEED_RESP_LEN   4u        /* [用户设定 u16][当前生效 u16] */   /* 双槽完整状态（Boot/App 各 8 字节） */
 #define MGR_FLASH_SLOTS_RESP_LEN 16u
 #define FW_SLOT_ST_EMPTY      0x00u
 #define FW_SLOT_ST_INCOMPLETE 0x01u

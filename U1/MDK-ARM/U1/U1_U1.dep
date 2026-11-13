@@ -711,7 +711,7 @@ I (../Core/Inc/usart.h)(0x6AD332DF)
 F (../Core/Src/app_frame.c)(0x6AF15F6F)(--c99 -c --cpu Cortex-M3 -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32F1xx_HAL_Driver/Inc -I ../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32F1xx/Include -I ../Drivers/CMSIS/Include -I ../USB_DEVICE/App -I ../USB_DEVICE/Target -I ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc -I ../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc-I.\RTE\_U1-ID:\Develop\Keil_MDK\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-ID:\Develop\Keil_MDK\ARM\PACK\Keil\STM32F1xx_DFP\2.3.0\Device\Include-D__UVISION_VERSION="534" -D_RTE_ -DSTM32F10X_MD -D_RTE_ -DUSE_HAL_DRIVER -DSTM32F103xB -DJIG_HAS_DEBUG_UART="1" -DJIG_DUT_LINK="1"-o u1\app_frame.o --omf_browse u1\app_frame.crf --depend u1\app_frame.d)
 I (../Core/Inc/app_frame.h)(0x6AF15F6F)
 I (D:\Develop\Keil_MDK\ARM\ARMCC\include\stdint.h)(0x5E8E3CC2)
-I (../Core/Inc/flash_map.h)(0x6AF52AAD)
+I (../Core/Inc/flash_map.h)(0x6AF59C6A)
 I (../Core/Inc/protocol_frame.h)(0x6AD332DF)
 I (D:\Develop\Keil_MDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 F (../Core/Src/gd25q128.c)(0x6AE557C9)(--c99 -c --cpu Cortex-M3 -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32F1xx_HAL_Driver/Inc -I ../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32F1xx/Include -I ../Drivers/CMSIS/Include -I ../USB_DEVICE/App -I ../USB_DEVICE/Target -I ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc -I ../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc-I.\RTE\_U1-ID:\Develop\Keil_MDK\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-ID:\Develop\Keil_MDK\ARM\PACK\Keil\STM32F1xx_DFP\2.3.0\Device\Include-D__UVISION_VERSION="534" -D_RTE_ -DSTM32F10X_MD -D_RTE_ -DUSE_HAL_DRIVER -DSTM32F103xB -DJIG_HAS_DEBUG_UART="1" -DJIG_DUT_LINK="1"-o u1\gd25q128.o --omf_browse u1\gd25q128.crf --depend u1\gd25q128.d)
@@ -790,14 +790,14 @@ I (../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_ll_usb.h)(0x6AD332DF)
 I (../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_pcd_ex.h)(0x6AD332DF)
 I (../Core/Inc/uart_link.h)(0x6AD332DF)
 I (../Core/Inc/uart_port.h)(0x6AEBF2D3)
-I (../Core/Inc/flash_map.h)(0x6AF52AAD)
+I (../Core/Inc/flash_map.h)(0x6AF59C6A)
 I (../Core/Inc/gd25q128.h)(0x6AE557DB)
 I (D:\Develop\Keil_MDK\ARM\ARMCC\include\string.h)(0x5E8E3CC2)
 F (../Core/Src/bsp_uart.c)(0x6AD332DF)(--c99 -c --cpu Cortex-M3 -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32F1xx_HAL_Driver/Inc -I ../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32F1xx/Include -I ../Drivers/CMSIS/Include -I ../USB_DEVICE/App -I ../USB_DEVICE/Target -I ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc -I ../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc-I.\RTE\_U1-ID:\Develop\Keil_MDK\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-ID:\Develop\Keil_MDK\ARM\PACK\Keil\STM32F1xx_DFP\2.3.0\Device\Include-D__UVISION_VERSION="534" -D_RTE_ -DSTM32F10X_MD -D_RTE_ -DUSE_HAL_DRIVER -DSTM32F103xB -DJIG_HAS_DEBUG_UART="1" -DJIG_DUT_LINK="1"-o u1\bsp_uart.o --omf_browse u1\bsp_uart.crf --depend u1\bsp_uart.d)
 I (../Core/Inc/bsp_uart.h)(0x6AD332DF)
 I (D:\Develop\Keil_MDK\ARM\ARMCC\include\stdint.h)(0x5E8E3CC2)
 I (../Core/Inc/jig_mode.h)(0x6AEAEA4D)
-F (../Core/Src/app.c)(0x6AF52AAD)(--c99 -c --cpu Cortex-M3 -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32F1xx_HAL_Driver/Inc -I ../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32F1xx/Include -I ../Drivers/CMSIS/Include -I ../USB_DEVICE/App -I ../USB_DEVICE/Target -I ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc -I ../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc-I.\RTE\_U1-ID:\Develop\Keil_MDK\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-ID:\Develop\Keil_MDK\ARM\PACK\Keil\STM32F1xx_DFP\2.3.0\Device\Include-D__UVISION_VERSION="534" -D_RTE_ -DSTM32F10X_MD -D_RTE_ -DUSE_HAL_DRIVER -DSTM32F103xB -DJIG_HAS_DEBUG_UART="1" -DJIG_DUT_LINK="1"-o u1\app.o --omf_browse u1\app.crf --depend u1\app.d)
+F (../Core/Src/app.c)(0x6AF6E247)(--c99 -c --cpu Cortex-M3 -g -O3 --apcs=interwork --split_sections -I ../Core/Inc -I ../Drivers/STM32F1xx_HAL_Driver/Inc -I ../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -I ../Drivers/CMSIS/Device/ST/STM32F1xx/Include -I ../Drivers/CMSIS/Include -I ../USB_DEVICE/App -I ../USB_DEVICE/Target -I ../Middlewares/ST/STM32_USB_Device_Library/Core/Inc -I ../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc-I.\RTE\_U1-ID:\Develop\Keil_MDK\ARM\PACK\ARM\CMSIS\5.7.0\CMSIS\Core\Include-ID:\Develop\Keil_MDK\ARM\PACK\Keil\STM32F1xx_DFP\2.3.0\Device\Include-D__UVISION_VERSION="534" -D_RTE_ -DSTM32F10X_MD -D_RTE_ -DUSE_HAL_DRIVER -DSTM32F103xB -DJIG_HAS_DEBUG_UART="1" -DJIG_DUT_LINK="1"-o u1\app.o --omf_browse u1\app.crf --depend u1\app.d)
 I (../Core/Inc/app.h)(0x6AF42A06)
 I (../Core/Inc/main.h)(0x6AD332DF)
 I (../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal.h)(0x6AD332DF)
@@ -838,7 +838,7 @@ I (../Core/Inc/uart_port.h)(0x6AEBF2D3)
 I (../Core/Inc/app_frame.h)(0x6AF15F6F)
 I (../Core/Inc/jig_as.h)(0x6AF4465E)
 I (../Core/Inc/protocol_frame.h)(0x6AD332DF)
-I (../Core/Inc/flash_map.h)(0x6AF52AAD)
+I (../Core/Inc/flash_map.h)(0x6AF59C6A)
 I (../Core/Inc/fw_upload.h)(0x6AD332DF)
 I (../Core/Inc/gd25q128.h)(0x6AE557DB)
 I (../Core/Inc/swd_programmer.h)(0x6AD332DF)
@@ -860,6 +860,7 @@ I (../Core/Inc/sn_report.h)(0x6AE3FFF0)
 I (../Core/Inc/swd_selftest.h)(0x6AE93D10)
 I (../Core/Inc/swd_memap.h)(0x6AD332DF)
 I (../Core/Inc/swd_phy.h)(0x6AE933B3)
+I (../Core/Inc/swd_config.h)(0x6AEAAA79)
 I (../Core/Inc/swd_dp.h)(0x6AE946BB)
 I (../Core/Inc/enc_gen.h)(0x6AF50A32)
 I (../Core/Inc/pc_link.h)(0x6AE43B70)
@@ -901,7 +902,7 @@ I (../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_ll_usb.h)(0x6AD332DF)
 I (../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_pcd_ex.h)(0x6AD332DF)
 I (../Core/Inc/pc_link.h)(0x6AE43B70)
 I (../Core/Inc/jig_mode.h)(0x6AEAEA4D)
-I (../Core/Inc/flash_map.h)(0x6AF52AAD)
+I (../Core/Inc/flash_map.h)(0x6AF59C6A)
 I (../USB_DEVICE/App/usbd_cdc_if.h)(0x6AD332DF)
 I (../Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Inc/usbd_cdc.h)(0x6AD332DF)
 I (../Middlewares/ST/STM32_USB_Device_Library/Core/Inc/usbd_ioreq.h)(0x6AD332DF)
@@ -1147,7 +1148,7 @@ I (../Core/Inc/swd_dp.h)(0x6AE946BB)
 I (../Core/Inc/swd_memap.h)(0x6AD332DF)
 I (../Core/Inc/cortex_m.h)(0x6AD332DF)
 I (../Core/Inc/stm32f4_flash.h)(0x6AD332DF)
-I (../Core/Inc/flash_map.h)(0x6AF52AAD)
+I (../Core/Inc/flash_map.h)(0x6AF59C6A)
 I (../Core/Inc/gd25q128.h)(0x6AE557DB)
 I (../Core/Inc/bsp_uart.h)(0x6AD332DF)
 I (../Core/Inc/jig_mode.h)(0x6AEAEA4D)
@@ -1188,7 +1189,7 @@ I (../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_pcd.h)(0x6AD332DF)
 I (../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_ll_usb.h)(0x6AD332DF)
 I (../Drivers/STM32F1xx_HAL_Driver/Inc/stm32f1xx_hal_pcd_ex.h)(0x6AD332DF)
 I (../Core/Inc/swd_config.h)(0x6AEAAA79)
-I (../Core/Inc/flash_map.h)(0x6AF52AAD)
+I (../Core/Inc/flash_map.h)(0x6AF59C6A)
 I (../Core/Inc/swd_phy.h)(0x6AE933B3)
 I (../Core/Inc/swd_dp.h)(0x6AE946BB)
 I (../Core/Inc/swd_memap.h)(0x6AD332DF)

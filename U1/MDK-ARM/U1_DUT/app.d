@@ -62,6 +62,7 @@ u1_dut\app.o: ../Core/Inc/sn_report.h
 u1_dut\app.o: ../Core/Inc/swd_selftest.h
 u1_dut\app.o: ../Core/Inc/swd_memap.h
 u1_dut\app.o: ../Core/Inc/swd_phy.h
+u1_dut\app.o: ../Core/Inc/swd_config.h
 u1_dut\app.o: ../Core/Inc/swd_dp.h
 u1_dut\app.o: ../Core/Inc/enc_gen.h
 u1_dut\app.o: ../Core/Inc/pc_link.h
