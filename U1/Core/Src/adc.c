@@ -150,6 +150,16 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
+#if (VOL_ADC_PULLDOWN != 0)
+    /* [实验] PA4(10V)/PA5(24V) 改成"输入 + 内部下拉"。
+     * 为什么必须切成数字输入：F1 的模拟输入模式下 PULL 位无效。
+     * 副作用：约 40kΩ 下拉并联到分压网络 → 接上线读数偏低约 10%。*/
+    GPIO_InitStruct.Pin  = GPIO_PIN_4 | GPIO_PIN_5;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+#endif
+
     /* USER CODE BEGIN ADC1_MspInit 1 */
     /* ADC1 -> DMA1_Channel1，循环模式、半字搬运。
      * 刻意**不**调 HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn)：

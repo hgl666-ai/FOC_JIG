@@ -67,4 +67,3 @@ u1_dut\app.o: ../Core/Inc/swd_dp.h
 u1_dut\app.o: ../Core/Inc/enc_gen.h
 u1_dut\app.o: ../Core/Inc/pc_link.h
 u1_dut\app.o: D:\Develop\Keil_MDK\ARM\ARMCC\Bin\..\include\string.h
-u1_dut\app.o: ../Core/Inc/usart.h

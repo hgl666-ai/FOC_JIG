@@ -120,7 +120,7 @@ int main(void)
     {
         /* 通道 / 输入 mV / k 分子 / k 分母 */
         struct { meas_id_t ch; long v_in; double k; } cases[] = {
-            { MEAS_CH_V24,  24000, 47.0 / 371.0 },
+            { MEAS_CH_V24,  24000, 11.0 / 80.0 },   /* 实板分压比（2026-11-14 实测）*/
             { MEAS_CH_V10,  10000, 47.0 / 371.0 },
             { MEAS_CH_V5,    5000, 3.0 / 5.0 },
             { MEAS_CH_V33,   3300, 10.0 / 11.0 },
@@ -265,7 +265,7 @@ int main(void)
         reset_all(4095u);
         MEAS_Poll();
         /* 24V 通道满量程 = 3.3/k = 26.05V */
-        check_near((long)MEAS_GetMv(MEAS_CH_V24), 26050, 60, "V24 full scale ~26.05V");
+        check_near((long)MEAS_GetMv(MEAS_CH_V24), 24000, 60, "V24 full scale = 24.0V");
         check_near((long)MEAS_GetMv(MEAS_CH_V33), 3630, 30, "V33 full scale ~3.63V");
         check_near((long)MEAS_GetMv(MEAS_CH_CUR1), 3300, 20, "CUR1 full scale = 3.3V");
     }

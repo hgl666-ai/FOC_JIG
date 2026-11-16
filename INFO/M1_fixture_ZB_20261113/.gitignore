@@ -1,0 +1,31 @@
+# ---> Python
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# dirs
+.vscode/
+.idea/
+.zcode/
+_output/
+build/
+test/
+unused/
+examples/
+_CubeMXDemo_/
+
+# files
+~$*.xlsx
+
+# keil
+*.bak
+MDK-ARM/M1_fixture_ZB/
+MDK-ARM/.vscode/
+MDK-ARM/.pack/
+MDK-ARM/.cmsis/
+MDK-ARM/.eide/
+MDK-ARM/build/

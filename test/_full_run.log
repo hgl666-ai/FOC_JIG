@@ -24,11 +24,11 @@
 ============================================================
  2/12  Full-chain test (PC frame to target flash, all simulated)
 ============================================================
-D:/Project/FOC_JIG/test/app_test.c:3760:13: warning: 't41_swd_speed' defined but not used [-Wunused-function]
- 3760 | static void t41_swd_speed(void)
+D:/Project/FOC_JIG/test/app_test.c:3811:13: warning: 't41_swd_speed' defined but not used [-Wunused-function]
+ 3811 | static void t41_swd_speed(void)
       |             ^~~~~~~~~~~~~
-D:/Project/FOC_JIG/test/app_test.c:3721:13: warning: 't40_flash_slots' defined but not used [-Wunused-function]
- 3721 | static void t40_flash_slots(void)
+D:/Project/FOC_JIG/test/app_test.c:3772:13: warning: 't40_flash_slots' defined but not used [-Wunused-function]
+ 3772 | static void t40_flash_slots(void)
       |             ^~~~~~~~~~~~~~~
 D:/Project/FOC_JIG/test/app_test.c:1118:13: warning: 'pulse_fake_reset' defined but not used [-Wunused-function]
  1118 | static void pulse_fake_reset(void)
@@ -52,9 +52,9 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 [T7] 上传 10s 无新数据 → ERR_TIMEOUT 并回 IDLE
 [T8] 0x0070 前置检查
 [T9] 端到端: PC帧 → 上传 → SPI Flash → 0x0112 SWD → 被烧板 Flash
-    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=5 编程字=102 SWD 事务=902
-    烧 402 B 用了 42474 个 SWCLK 周期 (108192 周期/KB)
-    推算 300KB: 32.5 s @1MHz   16.2 s @2MHz   8.1 s @4MHz
+    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=5 编程字=102 SWD 事务=897
+    烧 402 B 用了 42239 个 SWCLK 周期 (107593 周期/KB)
+    推算 300KB: 32.3 s @1MHz   16.1 s @2MHz   8.1 s @4MHz
     (只算 SWD 链路时间; 真实擦除还要等 Flash: 128KB 扇区约 1.3s/个)
 [T10] 烧录中 BUSY / 目标不在时干净失败
 [T13] SPI Flash 不在线/型号不对 → 第一条命令就以 ERR_FLASH 暴露
@@ -89,9 +89,9 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 [T7] 上传 10s 无新数据 → ERR_TIMEOUT 并回 IDLE
 [T8] 0x0070 前置检查
 [T9] 端到端: PC帧 → 上传 → SPI Flash → 0x0112 SWD → 被烧板 Flash
-    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=5 编程字=102 SWD 事务=902
-    烧 402 B 用了 42474 个 SWCLK 周期 (108192 周期/KB)
-    推算 300KB: 32.5 s @1MHz   16.2 s @2MHz   8.1 s @4MHz
+    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=5 编程字=102 SWD 事务=897
+    烧 402 B 用了 42239 个 SWCLK 周期 (107593 周期/KB)
+    推算 300KB: 32.3 s @1MHz   16.1 s @2MHz   8.1 s @4MHz
     (只算 SWD 链路时间; 真实擦除还要等 Flash: 128KB 扇区约 1.3s/个)
 [T10] 烧录中 BUSY / 目标不在时干净失败
 [T13] SPI Flash 不在线/型号不对 → 第一条命令就以 ERR_FLASH 暴露
@@ -102,7 +102,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 
 -- T20 0x0014 相电流检测（完整流程）--
 
--- T21 0x0015 电压检测（9 路 vs DUT）--
+-- T21 0x0015 电压检测（6 路：三相/两路电流/3.3V）--
 
 -- T18 0x0012 编码器脉冲发生 --
 
@@ -132,7 +132,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 -- T31b 0x0022 步4：单相缺失 --
 
 -- T32 六步流程：全绿路径 --
-     [ADC] ch0=24000mV/0x01 ch1=10000mV/0x01 ch2=5000mV/0x01 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
+     [ADC] ch0=23970mV/0x01 ch1=0mV/0x03 ch2=0mV/0x03 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
 
 -- T33 六步流程：存活超时（板子没起来）--
 
@@ -145,7 +145,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 -- T37 六步流程：参数校验 --
 
 -- T38 0x0022 强制分支（强制走步5）--
-     [ADC] ch0=24000mV/0x01 ch1=10000mV/0x01 ch2=5000mV/0x01 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
+     [ADC] ch0=23970mV/0x01 ch1=0mV/0x03 ch2=0mV/0x03 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
 
 -- T39 慢回也算活着（AS:Bb 延迟回复）--
 
@@ -153,9 +153,11 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 
 -- T41 0x0028 SWD 速度设置/查询 --
 
--- T42 相电流不参与步1 判定 --
+-- T43 SN 自动检测（3.3V 判在位 → 读 UID → 发 0x0024）--
 
-=== 共 641 项检查, 失败 0 项 ===
+-- T42 步1 通道表：5V 已移除、两路相电流参与判定 --
+
+=== 共 662 项检查, 失败 0 项 ===
 [PASS] app_test (DUT link mode)
 
     --- app_test in BENCH mode: DUT link on USART3, no U2 (jig_mode.h 3.4.1) ---
@@ -172,9 +174,9 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 [T7] 上传 10s 无新数据 → ERR_TIMEOUT 并回 IDLE
 [T8] 0x0070 前置检查
 [T9] 端到端: PC帧 → 上传 → SPI Flash → 0x0112 SWD → 被烧板 Flash
-    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=5 编程字=102 SWD 事务=902
-    烧 402 B 用了 42474 个 SWCLK 周期 (108192 周期/KB)
-    推算 300KB: 32.5 s @1MHz   16.2 s @2MHz   8.1 s @4MHz
+    IDCODE=0x2BA01477 DEV_ID=0x413 擦扇区=5 编程字=102 SWD 事务=897
+    烧 402 B 用了 42239 个 SWCLK 周期 (107593 周期/KB)
+    推算 300KB: 32.3 s @1MHz   16.1 s @2MHz   8.1 s @4MHz
     (只算 SWD 链路时间; 真实擦除还要等 Flash: 128KB 扇区约 1.3s/个)
 [T10] 烧录中 BUSY / 目标不在时干净失败
 [T13] SPI Flash 不在线/型号不对 → 第一条命令就以 ERR_FLASH 暴露
@@ -185,7 +187,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 
 -- T20 0x0014 相电流检测（完整流程）--
 
--- T21 0x0015 电压检测（9 路 vs DUT）--
+-- T21 0x0015 电压检测（6 路：三相/两路电流/3.3V）--
 
 -- T18 0x0012 编码器脉冲发生 --
 
@@ -215,7 +217,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 -- T31b 0x0022 步4：单相缺失 --
 
 -- T32 六步流程：全绿路径 --
-     [ADC] ch0=24000mV/0x01 ch1=10000mV/0x01 ch2=5000mV/0x01 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
+     [ADC] ch0=23970mV/0x01 ch1=0mV/0x03 ch2=0mV/0x03 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
 
 -- T33 六步流程：存活超时（板子没起来）--
 
@@ -228,7 +230,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 -- T37 六步流程：参数校验 --
 
 -- T38 0x0022 强制分支（强制走步5）--
-     [ADC] ch0=24000mV/0x01 ch1=10000mV/0x01 ch2=5000mV/0x01 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
+     [ADC] ch0=23970mV/0x01 ch1=0mV/0x03 ch2=0mV/0x03 ch3=3300mV/0x01 ch7=1650mV/0x01 ch8=1650mV/0x01 
 
 -- T39 慢回也算活着（AS:Bb 延迟回复）--
 
@@ -236,9 +238,11 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 
 -- T41 0x0028 SWD 速度设置/查询 --
 
--- T42 相电流不参与步1 判定 --
+-- T43 SN 自动检测（3.3V 判在位 → 读 UID → 发 0x0024）--
 
-=== 共 641 项检查, 失败 0 项 ===
+-- T42 步1 通道表：5V 已移除、两路相电流参与判定 --
+
+=== 共 662 项检查, 失败 0 项 ===
 [PASS] app_test (bench mode: DUT link, no U2)
 
 ============================================================
@@ -249,7 +253,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 ============================================================
 
 --- 1. conversion (counts -> input mV) ---
-  [ok]   V24: 24000 mV in (got 24001, want 24000 +-243)
+  [ok]   V24: 24000 mV in (got 24000, want 24000 +-243)
   [ok]   V10: 10000 mV in (got 10000, want 10000 +-103)
   [ok]   V5: 5000 mV in (got 5000, want 5000 +-53)
   [ok]   V33: 3300 mV in (got 3300, want 3300 +-36)
@@ -292,7 +296,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
   [ok]   counts=4095 flagged as saturated
 
 --- 6. full-scale mapping ---
-  [ok]   V24 full scale ~26.05V (got 26049, want 26050 +-60)
+  [ok]   V24 full scale = 24.0V (got 24000, want 24000 +-60)
   [ok]   V33 full scale ~3.63V (got 3630, want 3630 +-30)
   [ok]   CUR1 full scale = 3.3V (got 3300, want 3300 +-20)
 
@@ -302,7 +306,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
   [ok]   line contains V5=5000
   [ok]   line contains V33=3300
   [ok]   line reports OK=1
-         M V24=24001 V10=10000 V5=5000 V33=3300 PHA=6002 PHB=6002 PHC=6002 CUR1=1500 CUR2=1500 OK=1 F=0x000
+         M V24=22113 V10=10000 V5=5000 V33=3300 PHA=6002 PHB=6002 PHC=6002 CUR1=1500 CUR2=1500 OK=1 F=0x000
 
 --- 8. bounds safety ---
   [ok]   MEAS_GetMv out of range returns 0
@@ -320,7 +324,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
   [ok]   snapshot carries VDDA
   [ok]   snapshot carries config fingerprint
   [ok]   config fingerprint is non-zero
-  [ok]   ch[V24].mv matches MEAS_GetMv (got 24001, want 24001 +-1)
+  [ok]   ch[V24].mv matches MEAS_GetMv (got 22113, want 22113 +-1)
   [ok]   ch[V24].raw carries the raw code
   [ok]   ch[V24] flagged ok
   [ok]   ch[CUR1] not flagged sat
@@ -942,7 +946,9 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 
 [4) 只差 1 bit 也算换板（UID 是身份证，不能模糊匹配）]
 
-===== sn_report: 22 项通过, 0 项失败 =====
+[5) 自动检测：去抖 4 次 / 每次插入只报一次 / 拔板清零]
+
+===== sn_report: 40 项通过, 0 项失败 =====
 ========================================
  enc_chk: encoder three-way judgement
 ========================================
@@ -1054,7 +1060,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 
     --- Keil build U1 ---
     (UV4 is a GUI app; waiting for the build to finish...)
-Program Size: Code=50916 RO-data=732 RW-data=836 ZI-data=13788  
+Program Size: Code=50468 RO-data=752 RW-data=828 ZI-data=13532  
 "U1\U1.axf" - 0 Error(s), 0 Warning(s).
 [PASS] Keil build U1: 0 Error, 0 Warning
 

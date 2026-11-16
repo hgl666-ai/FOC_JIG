@@ -89,6 +89,76 @@ int main(void)
     CHECK(SnReport_IsNewBoard(u2) == 1u, "最后 1 bit 不同 → 视为新板");
     CHECK(SnReport_Build(u2, out) == SN_REPORT_LEN, "新板也能正常组帧");
 
+    SECTION("5) 自动检测：去抖 4 次 / 每次插入只报一次 / 拔板清零");
+    {
+        uint32_t t = 0u;
+        uint8_t  done = 0u, cnt = 0u;
+        uint8_t  i, trig;
+
+        /* 5.1 连续 3 次在位还不够（去抖 4 次）*/
+        t = 0u;
+        for (i = 0u; i < 3u; i++) {
+            t += SN_DET_POLL_MS;
+            trig = SnReport_AutoPoll(SN_DET_ST_PRESENT, t);
+            CHECK(trig == 0u, "第 3 次在位还不够（去抖要 4 次）");
+        }
+        /* 5.2 第 4 次触发读 UID */
+        t += SN_DET_POLL_MS;
+        trig = SnReport_AutoPoll(SN_DET_ST_PRESENT, t);
+        CHECK(trig == 1u, "第 4 次在位 → 触发读 UID");
+        SnReport_AutoGetState(&done, &cnt);
+        CHECK(done == 1u && cnt == 4u, "标志位：done=1，in_cnt=4");
+
+        /* 5.3 同一块板还插着 → 不再触发（本次插入只报一次）*/
+        t += SN_DET_POLL_MS;
+        CHECK(SnReport_AutoPoll(SN_DET_ST_PRESENT, t) == 0u,
+              "同一次插入不重复触发");
+
+        /* 5.4 拔板 → 两个标志清零 */
+        t += SN_DET_POLL_MS;
+        CHECK(SnReport_AutoPoll(SN_DET_ST_ABSENT, t) == 0u, "拔板不触发");
+        SnReport_AutoGetState(&done, &cnt);
+        CHECK(done == 0u && cnt == 0u, "拔板后 done/in_cnt 都清 0（允许下次插入再报）");
+
+        /* 5.5 再插一次 → 又能触发（同一块板插两次就报两次）*/
+        for (i = 0u; i < 4u; i++) {
+            t += SN_DET_POLL_MS;
+            trig = SnReport_AutoPoll(SN_DET_ST_PRESENT, t);
+        }
+        CHECK(trig == 1u, "重新插入 → 再次触发（同板插两次报两次）");
+
+        /* 5.6 读 UID 失败 → 清 done，下轮重试 */
+        SnReport_AutoResult(0u);
+        SnReport_AutoGetState(&done, &cnt);
+        CHECK(done == 0u, "读失败 → done 清 0（下轮重试）");
+        t += SN_DET_POLL_MS;
+        CHECK(SnReport_AutoPoll(SN_DET_ST_PRESENT, t) == 1u, "下一轮会再试");
+
+        /* 5.7 读成功 → 保持 done，不再触发 */
+        SnReport_AutoResult(1u);
+        t += SN_DET_POLL_MS;
+        CHECK(SnReport_AutoPoll(SN_DET_ST_PRESENT, t) == 0u, "读成功后就停手了");
+
+        /* 5.8 中间值不影响状态（滞回）*/
+        SnReport_AutoResult(0u);                    /* 造成 done=0，允许再触发 */
+        t += SN_DET_POLL_MS;
+        CHECK(SnReport_AutoPoll(SN_DET_ST_PRESENT, t) == 1u, "重新武装");
+        SnReport_AutoResult(1u);
+        t += SN_DET_POLL_MS;
+        CHECK(SnReport_AutoPoll(SN_DET_ST_MID, t) == 0u, "中间值不触发也不清标志");
+        SnReport_AutoGetState(&done, &cnt);
+        CHECK(done == 1u, "中间值保持 done 不变");
+
+        /* 5.9 节流：不到 200ms 不重复判断 */
+        t += SN_DET_POLL_MS;
+        CHECK(SnReport_AutoPoll(SN_DET_ST_ABSENT, t) == 0u, "拔板（到点了，清标志）");
+        CHECK(SnReport_AutoPoll(SN_DET_ST_PRESENT, t) == 0u, "同一毫秒内再调 → 被节流");
+
+        /* 5.10 阈值：实测量级 */
+        CHECK(SN_DET_PRESENT_RAW == 2000u && SN_DET_ABSENT_RAW == 100u,
+              "阈值与实测匹配（在位 3707 / 拔板 1）");
+    }
+
     printf("\n===== sn_report: %d 项通过, %d 项失败 =====\n", g_pass, g_fail);
     return (g_fail == 0) ? 0 : 1;
 }

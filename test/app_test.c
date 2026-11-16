@@ -2109,19 +2109,23 @@ static void t20_cur_test(void)
     }
 }
 /*==============================================================================
- * T21: 0x0015 ② 电压检测 —— 治具 9 路 vs 被测板自己报的
+ * T21: 0x0015 ② 电压检测 —— **治具本地**测 FOC 板 4 路电源
  *----------------------------------------------------------------------------
- * 假 DUT 的 INFO 报 adc_mask = 0x0003（只支持 ch0/ch1），GET_ADC 按掩码答。
- * 验的是**编排**：问 INFO 拿能力位图 → 按位图问 GET_ADC → 9 路判定 → 71B 报告。
- * 数值判定的正确性由 `test/vol_chk_test.c`（51 项纯函数用例）负责 ——
- * 宿主环境里治具自己的 ADC 没有收敛数据，这一层不编造它。
+ * 2026-11-14 改版：不再问 DUT 要 INFO/GET_ADC（FOC 侧没实现那两条命令），
+ * 改成治具读自己的 ADC、和额定值比（判据与六步流程步1 完全一致）。
+ *
+ * 应答 17 字节：[状态][通道数=5][5 × (mV 大端 2B + 旗标 1B)]
+ * 顺序：24V / 10V / CUR1 / CUR2 / 3.3V
+ * 列顺序：24V / 10V / 5V / 3.3V
  *============================================================================*/
 static uint16_t vol_send(uint16_t seq)
 {
     uint8_t  raw[8 + 2];
-    uint16_t n = Frame_Build(raw, MGR_CMD_VOL_TEST, seq, 0, 0u);
+    uint16_t n;
 
+    APP_Run();                       /* 先清掉上一轮可能残留的待处理帧 */
     tx_len = 0;
+    n = Frame_Build(raw, MGR_CMD_VOL_TEST, seq, 0, 0u);
     APP_USB_Receive(raw, n);
     for (int i = 0; (i < 400) && (tx_len == 0); i++) {
         host_advance(1u);
@@ -2130,14 +2134,32 @@ static uint16_t vol_send(uint16_t seq)
     return tx_len;
 }
 
+/* 灌 5 路（24V/10V/CUR1/CUR2/3.3V）的码值并等 EMA 收敛。
+ * 换算：raw = mv × 4095 × k_num / (3300 × k_den)
+ *   24V：k=11/80  → 24000mV ≈ 4095      10V：k=47/371 → 10000mV ≈ 1572
+ *   电流：k=1     → 1650mV  ≈ 2048      3.3V：k=10/11 → 3300mV  ≈ 3723 */
+static void vol_inject(uint16_t pha, uint16_t phb, uint16_t phc,
+                        uint16_t cur1, uint16_t cur2, uint16_t v33)
+{
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_A, pha);
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_B, phb);
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_C, phc);
+    MEAS_TestInject((meas_id_t)MEAS_CH_CUR1, cur1);
+    MEAS_TestInject((meas_id_t)MEAS_CH_CUR2, cur2);
+    MEAS_TestInject((meas_id_t)MEAS_CH_V33,  v33);
+    for (int i = 0; i < 800; i++) {
+        MEAS_Poll();
+        g_tick++;
+    }
+}
+
 static void t21_vol_test(void)
 {
     uint8_t  d[FRAME_MAX_DATA];
     uint16_t n, ac, as_, dlen;
     uint16_t seq = 0x0700u;
 
-    printf("\n-- T21 0x0015 电压检测（9 路 vs DUT）--\n");
-    s_dut_quiet = 0u;
+    printf("\n-- T21 0x0015 电压检测（6 路：三相/两路电流/3.3V）--\n");
 
     /* 1) 这条命令不需要参数 → 带了参数就是 0B */
     {
@@ -2151,52 +2173,73 @@ static void t21_vol_test(void)
               && dlen == 1u && d[0] == 0x0Bu, "带了参数 → 0B ERR_PARAM");
     }
 
-    /* 2) 完整流程 */
+    /* 2) 6 路都在范围内 → 全部通过（三相灌成一致：1886 码 ≈ 12.0V）*/
+    vol_inject(1886u, 1886u, 1886u, 2048u, 2048u, 3723u);
     n = vol_send(seq++);
     CHECK(n > 0u && Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u, "有可解析的应答");
     CHECK(ac == MGR_CMD_VOL_TEST && as_ == (uint16_t)(seq - 1u), "命令与序号回显正确");
-    CHECK(dlen == MGR_VOL_TEST_RESP_LEN, "报告 47 字节");
-    CHECK(d[0] == APP_STATUS_OK, "命令状态 OK");
-
-    /* 3) 头里只剩"被测板状态"——版本号/通道声明不再发（INFO 里问得到）*/
-    CHECK(d[1] == DUT_ST_OK, "INFO 的状态带回来了");
-
-    /* 4) 九路全是「不判」：ch0/ch1 有 DUT 数据但治具侧在这个宿主环境里没有有效读数，
-     *    其余 7 路 DUT 没声明。**不判不算失败**，所以状态码仍是 OK。 */
+    CHECK(dlen == MGR_VOL_TEST_RESP_LEN, "应答 17 字节");
+    CHECK(d[0] == APP_STATUS_OK, "6 路都在范围内 → 状态 OK");
+    CHECK(d[1] == MGR_VOL_LOCAL_CH_COUNT, "通道数 = 6");
     {
-        uint8_t i, n_nodata = 0u, n_bad = 0u;
-        for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
-            uint8_t f = d[2u + ((uint16_t)i * MGR_VOL_CH_ITEM_LEN) + 4u];
-            if ((f & VOL_CHK_F_NODATA) != 0u) n_nodata++;
-            if ((f & VOL_CHK_F_DEVIATION) != 0u) n_bad++;
+        uint8_t i, all_ok = 1u;
+        for (i = 0u; i < (uint8_t)MGR_VOL_LOCAL_CH_COUNT; i++) {
+            uint8_t f = d[4u + ((uint16_t)i * MGR_VOL_CH_ITEM_LEN)];
+            if ((f & VOL_CHK_F_OK) == 0u) {
+                all_ok = 0u;
+            }
         }
-        CHECK(n_nodata == (uint8_t)MEAS_CH_COUNT, "九路都是「不判」（数据缺）");
-        CHECK(n_bad == 0u, "没有一路被判超差");
-        CHECK(d[0] == APP_STATUS_OK, "「不判」不算失败（状态码仍是 OK）");
+        CHECK(all_ok == 1u, "六路旗标都是 OK");
     }
-
-    /* 5) 逐通道的下标位置对得上（ch4 = A 相，在 2+4×5 = 22） */
+    /* 相电压三相一致 → 三个都 OK（PHA[2..4] PHB[5..7] PHC[8..10]）*/
+    CHECK((d[4] & VOL_CHK_F_OK) != 0u && (d[7] & VOL_CHK_F_OK) != 0u
+          && (d[10] & VOL_CHK_F_OK) != 0u, "三相一致 → 三个都 OK");
+    /* CUR1 在 [11..13]、CUR2 在 [14..16] */
     {
-        uint8_t *p4 = &d[2u + (4u * MGR_VOL_CH_ITEM_LEN)];
-        CHECK((p4[4] & VOL_CHK_F_NODATA) != 0u, "ch4（A 相）是 NODATA —— 下标没串");
-        CHECK(p4[0] == 0u && p4[1] == 0u && p4[2] == 0u && p4[3] == 0u,
-              "没判的路 治具/被测板 mV 都是 0（没拿 0 当读数去比）");
+        uint16_t c1 = (uint16_t)((d[11] << 8) | d[12]);
+        uint16_t c2 = (uint16_t)((d[14] << 8) | d[15]);
+
+        CHECK(c1 >= 1600u && c1 <= 1700u, "CUR1 读数 ≈ 1650mV");
+        CHECK(c2 >= 1600u && c2 <= 1700u, "CUR2 读数 ≈ 1650mV");
     }
 
-    /* 6) DUT 缺席 → 0C 超时，状态机回 IDLE */
+    /* 3) A 相明显偏低（三相不一致）→ 只标 A 相为 DEVIATION，整体不合格
+     *    1886 码 ≈ 12000mV，但 A 相只灌 50 码 ≈ 320mV */
+    vol_inject(50u, 1886u, 1886u, 2048u, 2048u, 3723u);
+    n = vol_send(seq++);
+    CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_VOL_TEST_RESP_LEN,
+          "异常时也回 20 字节");
+    CHECK(d[0] == APP_STATUS_ERR_TEST, "三相不一致 → 状态 05");
+    CHECK((d[4] & VOL_CHK_F_DEVIATION) != 0u, "A 相标记为 DEVIATION（偏离最大）");
+    CHECK((d[7] & VOL_CHK_F_OK) != 0u, "B 相仍然 OK（只标偏得最远的那一路）");
+    CHECK((d[10] & VOL_CHK_F_OK) != 0u, "C 相仍然 OK");
+
+    /* 3b) CUR1 灌成 0（贴底）→ 该路参与判定，必须失败 */
+    vol_inject(1886u, 1886u, 1886u, 0u, 2048u, 3723u);
+    n = vol_send(seq++);
+    CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_VOL_TEST_RESP_LEN,
+          "相电流异常也回 20 字节");
+    CHECK(d[0] == APP_STATUS_ERR_TEST, "CUR1 贴底 → 状态 05");
+    CHECK((d[13] & VOL_CHK_F_OK) == 0u, "CUR1 那一路判不合格（flags 在 d[13]）");
+    CHECK((d[16] & VOL_CHK_F_OK) != 0u, "CUR2 仍然 OK（flags 在 d[16]）");
+
+    /* 3c) 三相一致但都偏高 → 组判据不报，单路也不报（相电压不看绝对值）*/
+    vol_inject(3773u, 3773u, 3773u, 2048u, 2048u, 3723u);
+    n = vol_send(seq++);
+    CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_VOL_TEST_RESP_LEN,
+          "三相一致也回 20 字节");
+    CHECK(d[0] == APP_STATUS_OK, "三相一致（哪怕都 24V）→ 判通过");
+
+    /* 4) 不依赖 DUT：把假 DUT 设成不吭声，命令照样立刻返回 */
     s_dut_quiet = 1u;
     n = vol_send(seq++);
-    CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == 1u && d[0] == 0x0Cu,
-          "DUT 不回 → 0C ERR_TIMEOUT");
-    s_dut_quiet = 0u;
-    CHECK(app_state == APP_STATE_IDLE, "超时后状态机回到 IDLE");
-
-    /* 7) 之后还能继续用 */
-    n = vol_send(seq++);
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u
-          && dlen == MGR_VOL_TEST_RESP_LEN, "超时之后还能继续跑（没卡在 APP_STATE_VOL）");
+          && dlen == MGR_VOL_TEST_RESP_LEN,
+          "**DUT 不吭声也能出结果**（不再走 0x02xx 协议）");
+    s_dut_quiet = 0u;
+    CHECK(app_state == APP_STATE_IDLE, "命令结束后状态机是 IDLE");
 
-    /* 8) 跑完之后别的命令仍然可用 */
+    /* 5) 跑完之后别的命令仍然可用 */
     {
         uint8_t mode = MGR_MODE_READ;
         uint8_t raw2[8 + 1];
@@ -2205,6 +2248,10 @@ static void t21_vol_test(void)
         APP_USB_Receive(raw2, n2);
         CHECK(wait_meas_ack(MGR_CMD_MEASURE, 0, 0) == 1, "0x0015 之后 0x000E 仍然可用");
     }
+
+    /* 收尾：4 路灌回 0，恢复"宿主没注入电压"的状态 —— 后面的用例（如"步1 应判失败"）
+     * 依赖这个前提，不清会连累它们。*/
+    vol_inject(0u, 0u, 0u, 0u, 0u, 0u);
 }
 #endif /* JIG_DUT_LINK */
 
@@ -2268,8 +2315,9 @@ static void t22_phase_judge(void)
         APP_USB_Receive(raw, n2);
         CHECK(wait_meas_ack(MGR_CMD_PULSE, 0, 0) == 1, "先跑一次 0x000F mode=1 拿到脉冲结果");
     }
-    /* 灌电压：母线 24V（码 3773）、三相各 12V（码 1861）→ 期望 500‰ × 24V = 12V */
-    MEAS_TestInject((meas_id_t)MEAS_CH_V24,  3773u);
+    /* 灌电压：母线（码 4090 —— **故意不贴边**，因为 phase_chk 把 SAT 当"数据不可用"）、
+     * 三相各 12V（码 1861）→ 期望 500‰ × 母线 */
+    MEAS_TestInject((meas_id_t)MEAS_CH_V24,  4090u);
     MEAS_TestInject((meas_id_t)MEAS_CH_PH_A, 1861u);
     MEAS_TestInject((meas_id_t)MEAS_CH_PH_B, 1861u);
     MEAS_TestInject((meas_id_t)MEAS_CH_PH_C, 1861u);
@@ -2305,7 +2353,9 @@ static void t22_phase_judge(void)
     {
         uint16_t ex = (uint16_t)((d[3] << 8) | d[4]);
         uint16_t mv = (uint16_t)((d[1] << 8) | d[2]);
-        CHECK(ex == 12000u, "A 相的期望值 = 12000mV（500‰ × 24000mV）");
+        /* 期望值 = 500‰ × 母线。母线的实际 mV 随分压比变，所以按 50% 反推核对 */
+        CHECK((ex >= 11700u) && (ex <= 12050u),
+              "A 相的期望值 ≈ 母线的一半（500‰ × 约 24V）");
         /* 实测值由"注入的 ADC 码 + 分压换算"决定，不是精确等于期望值；
          * 该断言要钉的是**它在容差内**（判据用的就是这条），不是钉死一个数。
          * 实测 10851mV vs 期望 12000mV，差 1149 ≤ 容差 1195~1200 → 判 OK。 */
@@ -3338,9 +3388,10 @@ static void t31_flow6_pwm(void)
  * 换算：raw = mv × 4095 × k_num / (3300 × k_den)（与 measure.c 的 k_cfg 一致） */
 static void adc_inject_ok(void)
 {
-    MEAS_TestInject((meas_id_t)MEAS_CH_V24,  3773u);   /* 24V   (k=47/371) */
-    MEAS_TestInject((meas_id_t)MEAS_CH_V10,  1572u);   /* 10V   (k=47/371) */
-    MEAS_TestInject((meas_id_t)MEAS_CH_V5,   3723u);   /* 5V    (k=3/5)    */
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_A, 1886u);   /* A 相 12V */
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_B, 1886u);   /* B 相 12V */
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_C, 1886u);   /* C 相 12V */
+    MEAS_TestInject((meas_id_t)MEAS_CH_V5,   0u);      /* 5V 不判（VOL_CH_SKIP_MASK）*/   /* 5V    (k=3/5)    */
     MEAS_TestInject((meas_id_t)MEAS_CH_V33,  3723u);   /* 3.3V  (k=10/11 -> 引脚 3000mV) */
     MEAS_TestInject((meas_id_t)MEAS_CH_CUR1, 2048u);   /* 1.65V (k=1)      */
     MEAS_TestInject((meas_id_t)MEAS_CH_CUR2, 2048u);
@@ -3829,20 +3880,68 @@ static void t41_swd_speed(void)
  * 改之前它们会让步1 失败（detail=7/8），每块板都判不合格。
  *============================================================================*/
 #if (JIG_DUT_LINK != 0)
+/* T43: SN 自动检测 —— 板子在位 4 次后自动读 UID 并发 0x0024 */
+static void t43_sn_auto(void)
+{
+    uint8_t  d[FRAME_MAX_DATA];
+    uint16_t ac, as_, dlen;
+    uint16_t got = 0u;
+    int      i;
+
+    printf("\n-- T43 SN 自动检测（3.3V 判在位 → 读 UID → 发 0x0024）--\n");
+
+    /* 先把 3.3V 灌成"板子在场"，其余路随便 */
+    MEAS_TestInject((meas_id_t)MEAS_CH_V33, 3723u);
+    for (i = 0; i < 200; i++) {
+        MEAS_Poll();
+        g_tick++;
+    }
+
+    tx_len = 0u;
+    APP_SnEnable(1u);
+    for (i = 0; i < 12; i++) {          /* 12 轮 × 200ms 限速，足够 4 次去抖 */
+        g_tick += 250u;
+        APP_Run();
+    }
+    APP_SnEnable(0u);
+
+    CHECK(tx_len > 0u, "自动检测发出了帧（不是静默）");
+    if (tx_len > 0u && Frame_Parse(tx_buf, tx_len, &ac, &as_, d, &dlen) != 0u) {
+        got = 1u;
+        CHECK(ac == MGR_CMD_BOARD_SN, "帧命令号 = 0x0024");
+        CHECK(as_ == 0u, "主动帧 SEQ = 0");
+        CHECK(dlen == MGR_BOARD_SN_RESP_LEN, "DATA 16 字节");
+        CHECK(d[0] == 0x01u, "版本字节 = 01");
+        /* 仿真目标的 UID = 00310000/00310004/00310008（大端展开） */
+        CHECK(d[1] == 0x00u && d[2] == 0x31u, "UID 字0 高 16 位 = 0x0031");
+    }
+    CHECK(got == 1u, "T43 拿到了可解析的 0x0024 帧");
+
+    /* 同一块板保持在场 → 不再重复报 */
+    tx_len = 0u;
+    APP_SnEnable(1u);
+    for (i = 0; i < 12; i++) {
+        g_tick += 250u;
+        APP_Run();
+    }
+    APP_SnEnable(0u);
+    CHECK(tx_len == 0u, "同一次插入不重复上报");
+}
+
 static void t42_adc_current_ignored(void)
 {
     uint8_t  d[FRAME_MAX_DATA];
     uint16_t dlen = 0;
 
-    printf("\n-- T42 相电流不参与步1 判定 --\n");
+    printf("\n-- T42 步1 通道表：5V 已移除、两路相电流参与判定 --\n");
 
-    /* 4 路电源灌成合格，两路电流灌成 0（明显不合格） */
-    MEAS_TestInject((meas_id_t)MEAS_CH_V24,  3773u);
-    MEAS_TestInject((meas_id_t)MEAS_CH_V10,  1572u);
-    MEAS_TestInject((meas_id_t)MEAS_CH_V5,   3723u);
-    MEAS_TestInject((meas_id_t)MEAS_CH_V33,  3723u);
-    MEAS_TestInject((meas_id_t)MEAS_CH_CUR1, 0u);      /* 0mV：以前会判失败 */
-    MEAS_TestInject((meas_id_t)MEAS_CH_CUR2, 0u);
+    /* ① 5 路全合格（24V/10V/CUR1/CUR2/3.3V）→ 步1 通过 */
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_A, 1886u);   /* A 相 12V（三相一致）*/
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_B, 1886u);
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_C, 1886u);
+    MEAS_TestInject((meas_id_t)MEAS_CH_V33,  3723u);   /* 3.3V = 3300mV */
+    MEAS_TestInject((meas_id_t)MEAS_CH_CUR1, 2048u);   /* 电流 = 1650mV */
+    MEAS_TestInject((meas_id_t)MEAS_CH_CUR2, 2048u);
     for (int i = 0; i < 800; i++) {
         MEAS_Poll();
         g_tick++;
@@ -3857,14 +3956,36 @@ static void t42_adc_current_ignored(void)
     host_advance(2100u); pump(2);      /* 起转观察 2 秒 */
     host_advance(1100u); pump(3);      /* 停车静置 1 秒 */
     CHECK(f6_wait(d, &dlen) != 0, "给出报告");
-    CHECK(d[3] == 0x01u, "步1(ADC)：电流不合格**不影响** → 仍判通过");
-    CHECK(((uint16_t)((d[4] << 8) | d[5])) == 0x00FFu, "步1 detail = FF（四路电源全好）");
+    CHECK(d[3] == 0x01u, "步1(ADC)：五路全合格 → 通过");
+    CHECK(((uint16_t)((d[4] << 8) | d[5])) == 0x00FFu, "步1 detail = FF");
     CHECK(d[0] == 0x00u, "整体 status = 00（合格）");
+
+    /* ② CUR1 贴底（0mV）→ 步1 失败，detail = 2（新通道表里 CUR1 的下标）*/
+    MEAS_TestInject((meas_id_t)MEAS_CH_CUR1, 0u);
+    for (int i = 0; i < 400; i++) {
+        MEAS_Poll();
+        g_tick++;
+    }
+    f6_start(0x11A1u);
+    CHECK(as_sent("AS:Bb"), "第二轮：步2 先问版本");
+    as_inject("bb:0.3.0\r\n");
+    pump(2);
+    as_inject("AS:A0\r\n");
+    pump(2);
+    host_advance(2100u); pump(2);
+    host_advance(1100u); pump(3);
+    CHECK(f6_wait(d, &dlen) != 0, "第二轮：给出报告");
+    CHECK(d[3] == 0x02u, "步1(ADC)：CUR1 贴底 → 失败");
+    CHECK(((uint16_t)((d[4] << 8) | d[5])) == 3u, "步1 detail = 3（CUR1 在新表里的下标）");
 }
 #endif /* JIG_DUT_LINK */
 
 int main(void)
 {
+    /* SN 自动检测默认关掉：它会在插板后主动发 0x0024，
+     * 干扰下面各用例对"第一条应答"的解析。T43 里单独打开验证。 */
+    APP_SnEnable(0u);
+
     printf("=== FOC JIG U1 全链路宿主仿真 (PC帧→上传→SPI Flash→SWD→被烧板) ===\n\n");
     t1_flash_id();
     t2_empty_and_unknown();
@@ -3922,6 +4043,7 @@ int main(void)
     t40_flash_slots();          /* 0x0027 双槽状态 */
     t41_swd_speed();            /* 0x0028 SWD 速度设置/查询 */
 #if (JIG_DUT_LINK != 0)
+    t43_sn_auto();
     t42_adc_current_ignored();  /* 步1：相电流不参与判定 */
 #endif
 #endif

@@ -70,3 +70,72 @@ void SnReport_Reset(void)
     memset(s_last_uid, 0, sizeof(s_last_uid));
     s_have_last = 0u;
 }
+
+/*==============================================================================
+ * 自动检测："插上一块板就报 SN"
+ *----------------------------------------------------------------------------
+ * 标志位与参考项目 diameter_JIG 的 SN_AutoPoll **一一对应**：
+ *     s_done     ← sn_done    本次插入已处理过（拔板清零）
+ *     s_in_cnt   ← in_cnt     连续在位计数（去抖）
+ *     s_poll_tick← poll_tick  轮询节拍
+ *
+ * 和参考项目的区别：
+ *   1. 判在位用 **3.3V 通道 raw**（实测插板 3707 / 拔板 1），它用的是 U1 的 ADC 通道；
+ *   2. 读 SN 走 **SWD 读 UID**（不停机、无扰），它要 UART ISP 复位进 bootloader；
+ *   3. 不加失败冷却（用户 2026-11-16 定：产线上 SN 是第一步，读不到就不往下走）。
+ *
+ * 去重分工（这是"烧录上报"和"插板上报"不重复的关键）：
+ *   · 本路径**每次都报**（同板插两次就报两次），报完调 SnReport_MarkReported()；
+ *   · 烧录路径先 SnReport_IsNewBoard() 比对 —— 插板已经报过 → 烧录不再报。
+ *============================================================================*/
+static uint8_t  s_done;              /* 1 = 本次插入已处理 */
+static uint8_t  s_in_cnt;            /* 连续在位次数 */
+static uint32_t s_poll_tick;         /* 上次轮询时刻 */
+
+uint8_t SnReport_AutoPoll(sn_det_state_t st, uint32_t now_ms)
+{
+    /* 中间值：不做判断，保持现有状态（滞回）*/
+    if (st == SN_DET_ST_MID) {
+        return 0u;
+    }
+
+    /* 节流：不到周期直接返回（拔板检测也要限速，否则每轮都清标志）*/
+    if ((uint32_t)(now_ms - s_poll_tick) < (uint32_t)SN_DET_POLL_MS) {
+        return 0u;
+    }
+    s_poll_tick = now_ms;
+
+    if (st == SN_DET_ST_PRESENT) {
+        if (s_in_cnt < 0xFFu) {
+            s_in_cnt++;
+        }
+        /* 三个条件同时满足才动手：连续 4 次在位 + 本次还没读过 */
+        if ((s_in_cnt >= (uint8_t)SN_DET_DEBOUNCE) && (s_done == 0u)) {
+            s_done = 1u;             /* 先置位，防重入 */
+            return 1u;
+        }
+        return 0u;
+    }
+
+    /* 拔板：清两个标志，允许下次插入再报 */
+    s_in_cnt = 0u;
+    s_done   = 0u;
+    return 0u;
+}
+
+void SnReport_AutoResult(uint8_t ok)
+{
+    if (ok == 0u) {
+        s_done = 0u;                 /* 读失败 → 清标志，下轮重试 */
+    }
+}
+
+void SnReport_AutoGetState(uint8_t *done, uint8_t *in_cnt)
+{
+    if (done != 0) {
+        *done = s_done;
+    }
+    if (in_cnt != 0) {
+        *in_cnt = s_in_cnt;
+    }
+}

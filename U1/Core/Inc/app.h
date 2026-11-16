@@ -22,7 +22,6 @@ typedef enum {
     APP_STATE_ENC,           /* 编码器脉冲串发送中 (0x0012, 约 200ms 后回 ACK) */
     APP_STATE_ENC_PEER,      /* 向 U2 要编码器计数中 (0x0013) */
     APP_STATE_CUR,           /* ⑥ 相电流检测流程中 (0x0014; 需要 JIG_DUT_LINK=1) */
-    APP_STATE_VOL,           /* ② 电压检测流程中 (0x0015; 需要 JIG_DUT_LINK=1) */
     APP_STATE_RUN            /* 0x0010 一键全流程编排中 (需要 JIG_DUT_LINK=1) */,
     APP_STATE_DUT_RAW        /* 0x001F 给 DUT 发原始字节、等它回字的这段窗口 (appended 2026-11-06) */,
     APP_STATE_ASCII          /* PC 串口助手里手敲 AS:xxx 的这条命令行 (appended 2026-11-09) */,
@@ -35,6 +34,9 @@ extern uint16_t    pc_seq;      /* 最近一帧的帧序号, ACK 回显用 */
 /*===== API =====*/
 void APP_Init(void);
 void APP_Run(void);
+
+/** 打开/关闭 SN 上报（0 = 关；测试用，默认开）*/
+void APP_SnEnable(uint8_t en);
 /**
   * @brief  PC 口收到一个字节：**先判 ASCII 命令行，不是才进帧解析**
   * @note   USB 中断（APP_USB_Receive）与串口（PcLink_Poll）两条路都走这里，

@@ -64,7 +64,7 @@ static void    APP_AsciiPoll(void);
 /* 台架版的"自报身份"直接复用 PC 链路的发送环（uart_tx_kick 里有临界区保护），
  * 绝不在这里调阻塞的 HAL_UART_Transmit —— 那会抢走 RX 重挂要用的 HAL Lock，
  * 把正在收的字节永久丢掉（2026-11-05 实测踩到）。*/
-#if (JIG_DUT_LINK != 0) && (JIG_PC_LINK == JIG_PC_LINK_UART)
+#if (JIG_DUT_LINK != 0) && (JIG_PC_LINK == JIG_PC_LINK_UART) && (APP_BENCH_ALIVE_EN != 0)
 #define APP_BENCH_ALIVE   1
 #include "usart.h"          /* extern huart1：心跳要读 huart1.ErrorCode */
 #else
@@ -91,7 +91,7 @@ uint32_t USB_EvtIstrOr(void)   { return 0u; }
  * 放在 app.c 而不是 flash_map.h：这里能同时看到 MEAS_CH_COUNT / ENC_CHK_PH_COUNT /
  * CUR_CHK_CH_COUNT 三个计数宏（它们分别来自 measure.h / enc_chk.h / cur_chk.h）。
  *============================================================================*/
-FOC_STATIC_ASSERT(MGR_VOL_TEST_RESP_LEN == (2u + (MEAS_CH_COUNT * MGR_VOL_CH_ITEM_LEN)),
+FOC_STATIC_ASSERT(MGR_VOL_TEST_RESP_LEN == (2u + (MGR_VOL_LOCAL_CH_COUNT * MGR_VOL_CH_ITEM_LEN)),
                   resp_len_must_match_layout_vol);
 FOC_STATIC_ASSERT(MGR_PHASE_JUDGE_RESP_LEN == (1u + (3u * MGR_PHASE_ITEM_LEN)),
                   resp_len_must_match_layout_phase);
@@ -1476,34 +1476,127 @@ static void FL6_Advance(void)
     }
 }
 
-/** 步1：治具自己读 6 路 ADC 并判（不依赖 FOC，板子通不通都能读） */
-static void FL6_Adc(void)
+/*==============================================================================
+ * 电压检测的通道表（0x0015 与 六步流程步1 **共用**）
+ *----------------------------------------------------------------------------
+ * 2026-11-16 改：5V 那路测不了，换成两路相电流（零电流中点检查）。
+ * 顺序即应答里的顺序，也是 detail 里的通道号。
+ *============================================================================*/
+typedef struct {
+    uint8_t  ch;          /* measure.h 的 meas_id_t */
+    uint16_t nom_mv;      /* 额定值 */
+    uint16_t tol_mv;      /* 容差（±） */
+} vol_ch_item_t;
+
+static const vol_ch_item_t k_vol_ch[MGR_VOL_LOCAL_CH_COUNT] = {
+    /* nom_mv = 0 表示"参与组判据"（相电压），不按额定值判 */
+    { (uint8_t)MEAS_CH_PH_A,     0u,    0u },   /* A 相：三相一致性 */
+    { (uint8_t)MEAS_CH_PH_B,     0u,    0u },   /* B 相 */
+    { (uint8_t)MEAS_CH_PH_C,     0u,    0u },   /* C 相 */
+    { (uint8_t)MEAS_CH_CUR1,  1650u,  500u },   /* 相电流1  零电流中点 ±500mV */
+    { (uint8_t)MEAS_CH_CUR2,  1650u,  500u },   /* 相电流2  同上 */
+    { (uint8_t)MEAS_CH_V33,   3300u,  200u },   /* 3.3V     ±6%（5%=165，取下限 200）*/
+};
+
+#define VOL_PH_COUNT   3u    /* 表里前 3 路是相电压，走组判据 */
+
+/**
+  * @brief  按 k_vol_ch 判一遍全部通道，填 flag[]（0x0015 和 步1 共用）
+  * @param  flag [out] MGR_VOL_LOCAL_CH_COUNT 个旗标（VOL_CHK_F_*）
+  * @retval 1 = 有不合格，0 = 全过
+  * @note   相电压（前 3 路）走"三相一致性"组判据：max-min > VOL_PH_SPREAD_MV
+  *         时，把**离均值最远**的那一路标成 DEVIATION（其余保持 OK），
+  *         这样报告里能直接看出是哪一相不对。
+  */
+static uint8_t APP_VolJudgeAll(uint8_t flag[MGR_VOL_LOCAL_CH_COUNT])
 {
-    static const uint32_t rail_mv[4] = { 24000u, 10000u, 5000u, 3300u };
     meas_snapshot_t snap;
-    uint16_t bad = 0xFFu;
+    uint8_t  any_bad = 0u;
     uint8_t  i;
+    uint32_t pmin = 0xFFFFFFFFu;
+    uint32_t pmax = 0u;
+    uint32_t psum = 0u;
+    uint8_t  pcnt = 0u;
 
     MEAS_Snapshot(&snap);
 
-    for (i = 0u; i < 4u; i++) {                          /* 4 路电源：±5%，下限 200mV */
-        uint32_t ex  = rail_mv[i];
-        uint32_t tol = (ex * 5u) / 100u;
-        uint32_t mv  = snap.ch[i].mv;
+    for (i = 0u; i < (uint8_t)MGR_VOL_LOCAL_CH_COUNT; i++) {
+        uint8_t  ci  = k_vol_ch[i].ch;
+        uint32_t mv  = snap.ch[ci].mv;
+        uint32_t ex  = k_vol_ch[i].nom_mv;
+        uint32_t tol = k_vol_ch[i].tol_mv;
 
-        if (tol < 200u) {
-            tol = 200u;
+        if ((((uint32_t)VOL_CH_SKIP_MASK >> i) & 1u) != 0u) {
+            flag[i] = (uint8_t)VOL_CHK_F_OK;      /* 该路不判（见 jig_mode.h）*/
+            continue;
         }
-        if (((snap.ch[i].flags & MEAS_CHF_OK) == 0u) || (mv + tol < ex) || (mv > ex + tol)) {
+        if ((snap.ch[ci].flags & MEAS_CHF_OK) == 0u) {
+            flag[i] = (uint8_t)VOL_CHK_F_NODATA;  /* 读数不可用 → 判不了 */
+            any_bad = 1u;
+            continue;
+        }
+        if (ex == 0u) {
+            flag[i] = (uint8_t)VOL_CHK_F_OK;      /* 相电压：先记可用，稍后组判 */
+            if (mv < pmin) { pmin = mv; }
+            if (mv > pmax) { pmax = mv; }
+            psum += mv;
+            pcnt++;
+            continue;
+        }
+        if ((mv + tol < ex) || (mv > (ex + tol))) {
+            flag[i] = (uint8_t)VOL_CHK_F_DEVIATION;
+            any_bad = 1u;
+        } else {
+            flag[i] = (uint8_t)VOL_CHK_F_OK;
+        }
+    }
+
+    /* 三相一致性：绕组把它们连在一起，静止时三点应几乎等电位 */
+    if ((pcnt >= 2u) && ((pmax - pmin) > (uint32_t)VOL_PH_SPREAD_MV)) {
+        uint32_t avg    = psum / (uint32_t)pcnt;
+        uint32_t far_d  = 0u;
+        uint8_t  far_i  = 0xFFu;
+
+        for (i = 0u; i < (uint8_t)VOL_PH_COUNT; i++) {
+            uint8_t  ci = k_vol_ch[i].ch;
+            uint32_t mv = snap.ch[ci].mv;
+            uint32_t d;
+
+            if (flag[i] != (uint8_t)VOL_CHK_F_OK) {
+                continue;
+            }
+            d = (mv > avg) ? (mv - avg) : (avg - mv);
+            if (d > far_d) {
+                far_d = d;
+                far_i = i;
+            }
+        }
+        if (far_i != 0xFFu) {
+            flag[far_i] = (uint8_t)VOL_CHK_F_DEVIATION;
+            any_bad = 1u;
+        }
+    }
+    return any_bad;
+}
+
+/** 步1：治具自己读 ADC 并按 k_vol_ch 判（不依赖 FOC，板子通不通都能读） */
+static void FL6_Adc(void)
+{
+    uint8_t  flag[MGR_VOL_LOCAL_CH_COUNT];
+    uint16_t bad = 0xFFu;
+    uint8_t  any;
+    uint8_t  i;
+
+    any = APP_VolJudgeAll(flag);
+
+    /* detail = 表里的下标（0=PHA 1=PHB 2=PHC 3=CUR1 4=CUR2 5=3.3V）*/
+    for (i = 0u; i < (uint8_t)MGR_VOL_LOCAL_CH_COUNT; i++) {
+        if ((flag[i] & (uint8_t)VOL_CHK_F_OK) == 0u) {
             bad = (uint16_t)i;
             break;
         }
     }
-    /* 两路相电流**不参与判定**（2026-11-13 定）。
-     * 原因：产线不测相电流（传感器不接/不要求），判它会让每块板都在步1 失败。
-     * 它们仍在 MEAS 里被采样（0x000E 可单独读），只是不再影响合格判定。
-     * 所以步1 的 detail 现在只会是 0~3（24V/10V/5V/3.3V），全好仍是 0x00FF。 */
-    FL6_Set(FL6_S_ADC, (bad == 0xFFu) ? 0x01u : 0x02u, bad);
+    FL6_Set(FL6_S_ADC, (any != 0u) ? 0x02u : 0x01u, bad);
     FL6_Advance();
 }
 
@@ -2355,143 +2448,70 @@ static void APP_CurTestTask(void)
 #endif /* JIG_DUT_LINK */
 
 /*==============================================================================
- * ② 电压检测：0x0015 —— 治具 9 路 vs 被测板自己报的
+ * ② 电压检测：0x0015 —— 治具用自己的 ADC 量 FOC 板的 4 路电源
+ *----------------------------------------------------------------------------
+ * 2026-11-14 改版。原来是两阶段去问 DUT（0x0201 INFO → 0x0207 GET_ADC），
+ * 再拿 DUT 报的数和自己的读数比差值；但 FOC 侧没有实现这两条命令
+ * （实测：请求发过去一个字节都不回），于是这条命令永远超时（回 0C）。
+ *
+ * 现在改成治具**单方面判定**：
+ *   · 测的仍然是 **FOC 板上的电压** —— 这 4 路 ADC 就接在 FOC 的测试点上；
+ *   · 判据用绝对门限，和六步流程步1 **完全一致**（额定 ±5%，下限 200mV）；
+ *   · 应答 14 字节：状态(1) + 通道数(1) + 每路[mV(2,大端) + 旗标(1)]。
+ *
+ * 为什么不需要 JIG_DUT_LINK：这条命令一次读完就出结果，不跟 DUT 打交道。
+ * 但命令号仍留在原来的条件编译块里，保持 U1（无 DUT 链路）行为不变。
  *============================================================================*/
 #if (JIG_DUT_LINK != 0)
-#define APP_VOL_S_INFO   0u   /* 问 DUT 的 INFO（拿能力位图 + 版本） */
-#define APP_VOL_S_ADC    1u   /* 按位图问 GET_ADC */
-#define APP_VOL_S_DONE   2u   /* 9 路判定 + 出报告 */
 
-static uint16_t      s_vol_seq;
-static uint8_t       s_vol_stage;
-static uint8_t       s_vol_started;
-static uint32_t      s_vol_t0;
-static uint16_t      s_vol_adc_mask;
-static uint8_t       s_vol_amask[DUT_GETADC_REQ_LEN];
-static uint8_t       s_vol_resp[LINK_MAX_PAYLOAD];
-static uint8_t       s_vol_info_st;
-static dut_adc_t     s_vol_dut;
-static vol_chk_out_t s_vol_out[MEAS_CH_COUNT];
+/**
+  * @brief  本地测 4 路电源，组 14 字节应答
+  * @param  out [out] MGR_VOL_TEST_RESP_LEN 字节
+  * @retval 状态字节（APP_STATUS_OK / APP_STATUS_ERR_TEST）
+  * @note   "读数不可用"也算不合格 —— 判不了就不能放行，和六步流程步1 一致。
+  */
+static uint8_t APP_VolMeasureLocal(uint8_t *out)
+{
+    meas_snapshot_t snap;
+    uint8_t  flag[MGR_VOL_LOCAL_CH_COUNT];
+    uint8_t  any_bad;
+    uint8_t  i;
+
+    any_bad = APP_VolJudgeAll(flag);
+    MEAS_Snapshot(&snap);
+
+    out[1] = (uint8_t)MGR_VOL_LOCAL_CH_COUNT;
+    for (i = 0u; i < (uint8_t)MGR_VOL_LOCAL_CH_COUNT; i++) {
+        uint8_t  ci = k_vol_ch[i].ch;
+        uint32_t mv = snap.ch[ci].mv;
+        uint8_t *p  = &out[2u + ((uint16_t)i * 3u)];
+
+        p[0] = (uint8_t)(mv >> 8);
+        p[1] = (uint8_t)(mv);
+        p[2] = flag[i];
+    }
+    out[0] = (any_bad != 0u) ? APP_STATUS_ERR_TEST : APP_STATUS_OK;
+    return out[0];
+}
 
 static void APP_VolTestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
 {
+    uint8_t out[MGR_VOL_TEST_RESP_LEN];
     uint8_t e;
 
-    (void)data;                             /* 这条命令不需要参数 */
-    if (len != 0u) {                        /* 这条命令不需要参数 */
+    (void)data;
+    if (len != 0u) {
         e = APP_STATUS_ERR_PARAM;
         APP_SendAck(cmd, &e, 1u);
         return;
     }
-    (void)Link_RequestPoll(&s_dut_link, 0u, 0, 0);   /* 清残留的保活探测 */
-    memset(&s_vol_dut, 0, sizeof(s_vol_dut));
-    memset(s_vol_out, 0, sizeof(s_vol_out));
-    s_vol_seq     = pc_seq;
-    s_vol_stage   = APP_VOL_S_INFO;
-    s_vol_started = 0u;
-    s_vol_t0      = HAL_GetTick();
-    s_vol_adc_mask = 0u;
-    s_vol_info_st = APP_STATUS_ERR_TIMEOUT;
-    app_state     = APP_STATE_VOL;
-}
-
-static void APP_VolTestAbort(uint8_t e)
-{
-    app_state = APP_STATE_IDLE;
-    APP_SendFrame(MGR_CMD_VOL_TEST, s_vol_seq, &e, 1u);
-}
-
-static void APP_VolTestTask(void)
-{
-    uint16_t rn = 0u;
-    uint8_t  st;
-
-    if (app_state != APP_STATE_VOL) {
+    if (app_state != APP_STATE_IDLE) {          /* 一次读完就出结果，不占用状态机 */
+        e = APP_STATUS_BUSY;
+        APP_SendAck(cmd, &e, 1u);
         return;
     }
-    if ((uint32_t)(HAL_GetTick() - s_vol_t0) > 3000u) {
-        APP_VolTestAbort(APP_STATUS_ERR_TIMEOUT);
-        return;
-    }
-
-    /* 两个阶段共用同一套"发起 → 等 → 处理"骨架 */
-    if (s_vol_started == 0u) {
-        uint16_t dc = (s_vol_stage == APP_VOL_S_INFO) ? DUT_CMD_INFO : DUT_CMD_GET_ADC;
-        const uint8_t *in = (s_vol_stage == APP_VOL_S_INFO) ? 0 : s_vol_amask;
-        uint16_t inlen    = (s_vol_stage == APP_VOL_S_INFO) ? 0u : DUT_GETADC_REQ_LEN;
-
-        if (Link_RequestStart(&s_dut_link, dc, in, inlen) != 0u) {
-            s_vol_started = 1u;
-            s_vol_t0      = HAL_GetTick();
-        } else if ((uint32_t)(HAL_GetTick() - s_vol_t0) > MGR_CUR_TIMEOUT_MS) {
-            APP_VolTestAbort(APP_STATUS_BUSY);
-        }
-        return;
-    }
-
-    st = Link_RequestPoll(&s_dut_link, MGR_CUR_TIMEOUT_MS, s_vol_resp, &rn);
-    if (st == 0u) {
-        return;
-    }
-    s_vol_started = 0u;
-    if (st == 2u) {
-        APP_VolTestAbort(APP_STATUS_ERR_TIMEOUT);
-        return;
-    }
-
-    if (s_vol_stage == APP_VOL_S_INFO) {
-        dut_info_t fi;
-        uint16_t   am = 0u;
-        uint8_t    i;
-
-        if (DutUnpack_Info(s_vol_resp, rn, &fi) == 0u) {
-            APP_VolTestAbort(APP_STATUS_ERR_PARAM);
-            return;
-        }
-        s_vol_info_st  = fi.status;
-        s_vol_adc_mask = fi.adc_mask;
-        for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
-            if ((fi.adc_mask & (uint16_t)(1u << i)) != 0u) {
-                am |= (uint16_t)(1u << i);
-            }
-        }
-        s_vol_amask[0] = (uint8_t)(am >> 8);
-        s_vol_amask[1] = (uint8_t)(am & 0xFFu);
-        s_vol_stage = APP_VOL_S_ADC;
-    } else if (s_vol_stage == APP_VOL_S_ADC) {
-        /* want_mask 传 0：**不要求"要的通道必须来齐"** —— 少给的那几路
-         * 由 VolChk_All 判成 NODATA（不判），而不是整条命令失败。
-         * 这样"被测板只支持一部分通道"也能用。 */
-        if (DutUnpack_Adc(s_vol_resp, rn, 0u, &s_vol_dut) == 0u) {
-            APP_VolTestAbort(APP_STATUS_ERR_PARAM);
-            return;
-        }
-        s_vol_stage = APP_VOL_S_DONE;
-    } else {
-        meas_snapshot_t snap;
-        uint8_t         out[MGR_VOL_TEST_RESP_LEN];
-        uint16_t        sum;
-        uint8_t         i;
-
-        MEAS_Snapshot(&snap);
-        sum = VolChk_All(&snap, &s_vol_dut, s_vol_adc_mask, s_vol_out);
-
-        /* 应答：状态(1) + 被测板状态(1) + 九路×5（治具mV、被测板mV、旗标）
-         * 不再发：版本号/通道声明（INFO 里有）、差值（两数相减就有）、汇总字（看旗标就有）*/
-        out[0] = ((sum & VOL_CHK_SUM_ANY_BAD) != 0u) ? APP_STATUS_ERR_TEST : APP_STATUS_OK;
-        out[1] = s_vol_info_st;
-        for (i = 0u; i < (uint8_t)MEAS_CH_COUNT; i++) {
-            uint8_t *p = &out[2u + ((uint16_t)i * MGR_VOL_CH_ITEM_LEN)];
-            uint16_t jm = 0u, dm = 0u;
-            (void)VolChk_TakeJig(&snap, i, &jm);
-            (void)VolChk_TakeDut(&s_vol_dut, i, &dm);
-            p[0] = (uint8_t)(jm >> 8);  p[1] = (uint8_t)jm;
-            p[2] = (uint8_t)(dm >> 8);  p[3] = (uint8_t)dm;
-            p[4] = (uint8_t)(s_vol_out[i].flags & 0xFFu);
-        }
-        app_state = APP_STATE_IDLE;
-        APP_SendFrame(MGR_CMD_VOL_TEST, s_vol_seq, out, MGR_VOL_TEST_RESP_LEN);
-    }
+    (void)APP_VolMeasureLocal(out);
+    APP_SendAck(cmd, out, MGR_VOL_TEST_RESP_LEN);
 }
 #endif /* JIG_DUT_LINK */
 
@@ -2864,9 +2884,14 @@ static uint8_t APP_RunStartStep(uint8_t n)
         APP_RunDut(DUT_CMD_TEST_MODE, d, 3u);
         return 1u;
 
-    case APP_RUN_STEP_VOL:
-        APP_VolTestCmd(MGR_CMD_VOL_TEST, 0, 0u);
-        return 1u;
+    case APP_RUN_STEP_VOL: {
+        /* 本地测量是同步的：直接算完记结果。
+         * ⚠ 不能调 0x0015 的命令入口 —— 那里会判 app_state（一键测试时是 RUN）。*/
+        uint8_t out[MGR_VOL_TEST_RESP_LEN];
+
+        s_last_ack_st = APP_VolMeasureLocal(out);
+        return 0u;
+    }
 
     case APP_RUN_STEP_PWM:
         /* 1 kHz、三相 50%、300 个 → burst 300 ms（≥ 治具 200 ms 窗口 + 余量） */
@@ -3299,16 +3324,42 @@ static void APP_EncTestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
  * 组 16B（算法版本 + UID + XOR + 预留）后以**自发帧**（SEQ=0）推给 PC。
  * 三条约定：读 UID 失败静默跳过 / 同板不重复报 / 绝不影响烧录结果。
  *============================================================================*/
-static void APP_SnReport(void)
+/**
+  * @brief  连 SWD 读被测板的 12 字节 UID（RM0090 Unique device ID @0x1FFF7A10）
+  * @param  uid [out] 12 字节，大端
+  * @retval 1 = 成功；0 = 失败（连不上 / 读不到）
+  * @note   读 UID 只碰"系统存储区"，**不停内核、不碰 Flash**，所以对
+  *         已经跑起来的被测板完全无扰（和 docs/28 里读相电压的做法不同）。
+  */
+static uint8_t APP_SnReadUid(uint8_t uid[SN_UID_LEN])
 {
     uint32_t w[SN_UID_WORDS];
-    uint8_t  uid[SN_UID_LEN];
-    uint8_t  buf[MGR_BOARD_SN_RESP_LEN];
+    uint32_t idcode = 0u;
     uint8_t  i;
 
-    /* 读 3 个 32 位字（地址/长度都在 sn_report.h 的占位宏里，D9 定了只改那儿） */
-    if (SWD_MemReadBlock(SN_UID_BASE, w, (uint32_t)SN_UID_WORDS) == 0) {
-        return;                                  /* 读不到 → 静默跳过 */
+    if (SWD_Connect(&idcode) != SWD_OK) {
+        return 0u;
+    }
+    if (SWD_PowerUp() != SWD_OK) {
+        return 0u;
+    }
+    if (SWD_MemInit() != SWD_OK) {
+        return 0u;
+    }
+    /* ⚠ 必须用 SWD_MemRead32() 逐个读，**不能用 SWD_MemReadBlock()**：
+     *   ADIv5 规定 AP 读是 posted 的，结果要从 DP 的 RDBUFF 取；
+     *   MemReadBlock 反复读 AP 的 DRW，取到的是错位数据 ——
+     *   2026-11-16 上板实测：块读回的是 SRAM 内容（20 00 26 18 ...），
+     *   而单字读回的是正确 UID（00 44 00 59 ...）。 */
+    for (i = 0u; i < (uint8_t)SN_UID_WORDS; i++) {
+        if (SWD_MemRead32((uint32_t)SN_UID_BASE + (4u * (uint32_t)i), &w[i]) != SWD_OK) {
+            return 0u;
+        }
+    }
+    /* 全 0 / 全 FF 明显不是真 UID（真值有晶圆坐标 + ASCII 批次号）→ 当失败重试 */
+    if (((w[0] == 0u) && (w[1] == 0u) && (w[2] == 0u)) ||
+        ((w[0] == 0xFFFFFFFFu) && (w[1] == 0xFFFFFFFFu) && (w[2] == 0xFFFFFFFFu))) {
+        return 0u;
     }
     for (i = 0u; i < (uint8_t)SN_UID_WORDS; i++) {
         uid[(i * 4u) + 0u] = (uint8_t)(w[i] >> 24);
@@ -3316,14 +3367,91 @@ static void APP_SnReport(void)
         uid[(i * 4u) + 2u] = (uint8_t)(w[i] >> 8);
         uid[(i * 4u) + 3u] = (uint8_t)(w[i]);
     }
-    if (SnReport_IsNewBoard(uid) == 0u) {
-        return;                                  /* 同一块板重复烧录 → 不重复上报 */
-    }
+    return 1u;
+}
+
+/** 组 16B 并发 0x0024 主动帧 */
+static void APP_SnSend(const uint8_t uid[SN_UID_LEN])
+{
+    uint8_t buf[MGR_BOARD_SN_RESP_LEN];
+
     if (SnReport_Build(uid, buf) == 0u) {
         return;
     }
     SnReport_MarkReported(uid);
     APP_SendEvent(MGR_CMD_BOARD_SN, buf, MGR_BOARD_SN_RESP_LEN);
+}
+
+/*==============================================================================
+ * SN 自动检测任务（主循环调用，200 ms 判一次）
+ *----------------------------------------------------------------------------
+ * 产线动作：**下压上电 → 治具自己发现板子在位 → 读 UID → 主动报 0x0024**。
+ * PC 不用轮询，收到就落库；SN 是产线的第一步，读不到就不往下测。
+ *
+ * 判在位的依据（2026-11-16 实测）：
+ *     3.3V 通道 raw：板子在位 3707~3708，拔掉 1 → 阈值 2000/100，滞回极大。
+ *
+ * 关键约束：**只在 IDLE 时动手** —— 烧录(0x0112)、SWD 自检(0x001E) 期间
+ * 读 UID 会打断它们的 SWD 会话。非空闲时传 ABSENT，顺手把标志清掉。
+ *============================================================================*/
+/* SN 上报总开关：同时管"烧录后上报"和"插板自动上报"两条路径。
+ * 宿主测试里要关掉（仿真目标有 UID，会在同一轮 APP_Run 里追加 0x0024 帧，
+ * 干扰其它用例对"第一条应答"的解析）。产线默认开。 */
+static uint8_t s_sn_en = 1u;
+
+void APP_SnEnable(uint8_t en)
+{
+    s_sn_en = (en != 0u) ? 1u : 0u;
+}
+
+static void APP_SnAutoTask(void)
+{
+    meas_snapshot_t snap;
+    sn_det_state_t  st;
+    uint16_t        raw;
+
+    if (s_sn_en == 0u) {
+        return;
+    }
+    if (app_state != APP_STATE_IDLE) {
+        (void)SnReport_AutoPoll(SN_DET_ST_ABSENT, HAL_GetTick());
+        return;
+    }
+
+    MEAS_Snapshot(&snap);
+    raw = snap.ch[MEAS_CH_V33].raw;
+
+    if (raw > (uint16_t)SN_DET_PRESENT_RAW) {
+        st = SN_DET_ST_PRESENT;
+    } else if (raw < (uint16_t)SN_DET_ABSENT_RAW) {
+        st = SN_DET_ST_ABSENT;
+    } else {
+        st = SN_DET_ST_MID;                      /* 中间值：状态不变 */
+    }
+
+    if (SnReport_AutoPoll(st, HAL_GetTick()) != 0u) {
+        uint8_t uid[SN_UID_LEN];
+
+        if (APP_SnReadUid(uid) != 0u) {
+            APP_SnSend(uid);                     /* 插板路径：每次都报（同板插两次报两次）*/
+            SnReport_AutoResult(1u);
+        } else {
+            SnReport_AutoResult(0u);             /* 读失败 → 下轮重试 */
+        }
+    }
+}
+
+static void APP_SnReport(void)
+{
+    uint8_t uid[SN_UID_LEN];
+
+    if (APP_SnReadUid(uid) == 0u) {
+        return;                                  /* 读不到 → 静默跳过 */
+    }
+    if (SnReport_IsNewBoard(uid) == 0u) {
+        return;                                  /* 插板时已经报过 → 烧录不再重复报 */
+    }
+    APP_SnSend(uid);
 }
 
 /*==============================================================================
@@ -3663,7 +3791,7 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
         APP_CurTestCmd(cmd, data, len);
         break;
 
-    /*── 0x0015 ② 电压检测：9 路 vs 被测板自己报的 ──*/
+    /*── 0x0015 ② 电压检测：治具本地测 FOC 板 4 路电源（不依赖 DUT 回复）──*/
     case MGR_CMD_VOL_TEST:
         APP_VolTestCmd(cmd, data, len);
         break;
@@ -4058,7 +4186,7 @@ void APP_Run(void)
             /* 烧录成功 → 读被测板 96-bit UID，主动上报 SN（0x0024）。
              * 放在 ACK **之后**发：先让 PC 拿到烧录结果，SN 帧随后到。
              * 读不到就静默跳过，绝不影响烧录结果、也不推脏数据。 */
-            if (st == APP_STATUS_OK) {
+            if ((st == APP_STATUS_OK) && (s_sn_en != 0u)) {
                 APP_SnReport();
             }
             /* SWDP_Step 内单个 128KB 扇区擦除要 ~1.3s, 期间 PC 若仍在发帧,
@@ -4097,7 +4225,6 @@ void APP_Run(void)
     APP_CurTestTask();
 
     /* 7c) ② 电压检测流程推进 + 终态回 ACK */
-    APP_VolTestTask();
 
     /* 7d) 0x0010 一键全流程编排（每轮推进一步） */
     APP_RunAllTask();
@@ -4117,6 +4244,11 @@ void APP_Run(void)
 
     /* 7) 0x0013 向 U2 要编码器计数 + 终态回 ACK */
     APP_EncPeerTask();
+
+    /* 8) SN 自动检测：板子下压上电 → 自己读 UID 并主动报 0x0024
+     *   放在最后：PC 的命令优先处理；内部 200 ms 限速，空闲时才动手。
+     *   ⚠ 里面会连 SWD（约 0.5~1 秒），这是产线"第一步取 SN"的固有开销。 */
+    APP_SnAutoTask();
 
 #if (APP_BENCH_ALIVE != 0)
     {

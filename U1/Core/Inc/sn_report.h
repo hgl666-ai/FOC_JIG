@@ -57,7 +57,26 @@
  * 2026-10-27 新版治具原理图确认）。以后别再往本文件加引脚宏。 */
 
 /* ------------------------------------------------------------------ */
-/* 2. API                                                             */
+/* 2. 自动检测（"插上一块板就报 SN"）                                   */
+/* ------------------------------------------------------------------ */
+/* 2026-11-16 实测（治具 3.3V 通道 raw）：
+ *     板子在场：3707 ~ 3708
+ *     板子拔掉：1
+ * 中间值一个都没出现过，所以阈值取得很宽、滞回极大。 */
+#define SN_DET_POLL_MS       200u    /* 轮询周期 */
+#define SN_DET_DEBOUNCE        4u    /* 连续 N 次确认才算稳定（800 ms）*/
+#define SN_DET_PRESENT_RAW  2000u    /* > 此值认为板子在场（≈1800 mV）*/
+#define SN_DET_ABSENT_RAW    100u    /* < 此值认为板子已拔掉 */
+
+/* 在位状态（三态：中间值不作判断，保持原状态）*/
+typedef enum {
+    SN_DET_ST_MID     = 0u,          /* 在"在位/拔出"阈值之间：状态不变 */
+    SN_DET_ST_PRESENT = 1u,          /* 板子在场 */
+    SN_DET_ST_ABSENT  = 2u           /* 板子拔掉 */
+} sn_det_state_t;
+
+/* ------------------------------------------------------------------ */
+/* 3. API                                                             */
 /* ------------------------------------------------------------------ */
 /**
   * @brief  把 12B UID 组装成 0x0024 的 16B DATA
@@ -85,5 +104,27 @@ void    SnReport_MarkReported(const uint8_t uid[SN_UID_LEN]);
 
 /** 清掉去重缓存（上电初始化 / 测试用） */
 void    SnReport_Reset(void);
+
+/**
+  * @brief  自动检测轮询（主循环调用，内部按 SN_DET_POLL_MS 限速）
+  * @param  st      当前在位状态（调用方把 3.3V 的 raw 按阈值转成三态）
+  * @param  now_ms  当前毫秒时基（HAL_GetTick）
+  * @retval 1 = **现在该读 UID 并上报了**；0 = 什么都不用做
+  * @note   返回 1 时调用方必须读 UID，然后调 SnReport_AutoResult() 回报结果。
+  *         **只在系统空闲（不在烧录/自检）时才能返回 1** —— 由调用方保证：
+  *         非空闲时请传 SN_DET_ST_ABSENT，本模块会把标志清掉。
+  */
+uint8_t SnReport_AutoPoll(sn_det_state_t st, uint32_t now_ms);
+
+/**
+  * @brief  回报"刚才那次读 UID + 上报"的结果
+  * @param  ok  1 = 读到了并已上报；0 = 失败（清标志，下个轮询再试）
+  * @note   参考项目没有失败冷却：产线上 SN 是第一步，读不到就不往下走，
+  *         所以这里失败就原样清标志、下轮重试。
+  */
+void    SnReport_AutoResult(uint8_t ok);
+
+/** 自动检测的内部状态（测试用；生产代码不需要读）*/
+void    SnReport_AutoGetState(uint8_t *done, uint8_t *in_cnt);
 
 #endif /* __SN_REPORT_H */

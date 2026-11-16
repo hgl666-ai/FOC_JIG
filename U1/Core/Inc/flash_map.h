@@ -54,8 +54,10 @@
                                            * 应答 71B = 头 8B + 每路 7B × 9
                                            *   头: status(1)+dut_st(1)+dut_ver(2)+adc_mask(2)+sum(2)
                                            *   每路: flags(1)+jig_mv(2)+dut_mv(2)+err_mv(2, 有符号) */
-#define MGR_VOL_TEST_RESP_LEN   47u       /* 2 + 5×9：状态+被测板状态 + 九路各5字节 */
-#define MGR_VOL_CH_ITEM_LEN     5u        /* 治具mV(2) + 被测板mV(2) + 旗标(1) */
+#define MGR_VOL_TEST_RESP_LEN   20u       /* 2 + 3×6：状态 + 通道数 + 六路各[mV(2)+旗标(1)] */
+#define MGR_VOL_CH_ITEM_LEN     3u        /* mV(2, 大端) + 旗标(1) */
+#define MGR_VOL_LOCAL_CH_COUNT  6u        /* PHA / PHB / PHC / CUR1 / CUR2 / 3.3V
+                                           * （2026-11-16：24V/10V 硬件有问题，换成三相电压）*/
 /*── ④ 三相输出判据：对**已有的**测量/脉冲结果做判定，不需要新的采集流程 ──
  * 用法（PC 侧）：先 0x0011 透传 DUT_PWM 让被测板输出已知 PWM → 0x000F mode=1 开窗采集
  *              → 再发本命令判定。治具不需要自己串流程，PC 按顺序发即可。 */
