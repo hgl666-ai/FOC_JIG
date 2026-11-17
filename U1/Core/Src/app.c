@@ -1350,7 +1350,9 @@ static void APP_DutRecvCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
 #define FL6_SETTLE_MS     1000u    /* 停车后静置：等惯性停住 + 反电动势衰减，
                                     * 否则步4 采相电压、步5 数编码器都会被污染 */
 #define FL6_PWM_TMO_MS    3000u    /* AS:PW + 采三相的上限 */
-#define FL6_PULSE_WIN_MS  200u     /* 脉冲采集窗口 */
+#define FL6_PULSE_WIN_MS  500u     /* 脉冲采集窗口（2026-11-17 从 200 放大：
+                                    * 怀疑 FOC 收到 AS:PW 后要 >200ms 才开始输出，
+                                    * 200ms 窗口一相都采不到 → 先试 500ms）*/
 #define FL6_ENC_TMO_MS    2000u    /* 发完脉冲等 FOC 报数的上限 */
 #define FL6_ENC_PULSES    100u     /* A/B 各发 100 个 */
 #define FL6_ENC_PULSES_Z  10u      /* Z 发 10 个（1 个的话 ±2% 没意义） */
@@ -1741,8 +1743,11 @@ static void APP_FlowTestTask(void)
                 uint32_t per  = ps.ph[i].period_ns;
                 uint16_t duty = ps.ph[i].duty_permille;
 
-                /* 三相都该是 1kHz/50%：周期 0.5~2ms、占空比 450~550‰ 就算有波形 */
-                if ((per >= 500000u) && (per <= 2000000u) &&
+                /* 三相都该是方波、占空比 50%。周期范围 2026-11-17 放宽：
+                 *   AS 协议写 1kHz，但 FOC 实测输出 **10kHz（100us）**
+                 *   → 原来只收 0.5~2ms，会把正常波形判成没信号。
+                 *   现在收 0.5kHz~20kHz（50us~2ms），仍能排除直流/噪声。 */
+                if ((per >= 50000u) && (per <= 2000000u) &&
                     (duty >= 450u) && (duty <= 550u)) {
                     mask |= (uint16_t)(1u << i);
                 }
@@ -3500,9 +3505,10 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
          * DATA[0] = 6 → "USB 事件计数"
          * DATA[0] = 7 → "设置 SWD 位翻转延时"（DATA[1..2] = 延时值，0=最快）
          * DATA[0] = 8 → "读目标任意地址"（DATA[1..4] = 地址，返回 4 字节值）
+         * DATA[0] = 9 → **脉冲捕获配置诊断**（TIM3/TIM1 寄存器 + 每相边沿数，35 字节）
          * 缺省/0     → 完整 SWD 烧录自检 */
         if ((len >= 1u) && (data != 0) &&
-            (data[0] >= 1u) && (data[0] <= 8u)) {
+            (data[0] >= 1u) && (data[0] <= 9u)) {
             uint8_t pr[MGR_SWD_SELFTEST_RESP_LEN];
 
             if (data[0] == 7u) {
@@ -3559,6 +3565,57 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
                 pr[4] = (uint8_t)val;
                 pr[5] = 0xB6u;
                 APP_SendAck(cmd, pr, (uint16_t)MGR_SWD_SELFTEST_RESP_LEN);
+                break;
+            }
+
+            if (data[0] == 9u) {
+                /* mode=9：脉冲捕获**配置诊断**（2026-11-17 加）
+                 * 目的：一次看清"中断为什么没进来"到底是哪一层断的。
+                 * 应答 35 字节，全大端：
+                 *   [0]      status
+                 *   [1..2]   TIM3 CR1      [3..4]  TIM3 CCER
+                 *   [5..6]   TIM3 DIER     [7..8]  TIM3 SR
+                 *   [9..10]  TIM3 CNT      [11..12] TIM3 PSC
+                 *   [13..14] TIM3 ARR
+                 *   [15..16] TIM1 CR1      [17..18] TIM1 CCER
+                 *   [19..20] TIM1 DIER     [21..22] TIM1 SR
+                 *   [23..24] TIM1 CNT      [25..26] TIM1 PSC
+                 *   [27..28] TIM1 ARR
+                 *   [29..30] A 相边沿数    [31..32] B 相边沿数
+                 *   [33..34] C 相边沿数
+                 * ⚠ 只读寄存器，**不改变任何捕获状态**。 */
+                uint8_t  pr2[35];
+                uint16_t k;
+                pulse_snapshot_t ps2;
+
+                for (k = 0u; k < 35u; k++) {
+                    pr2[k] = 0u;
+                }
+                PULSE_Snapshot(&ps2);
+
+                pr2[0] = APP_STATUS_OK;
+#ifndef MEAS_HOST_TEST
+                pr2[1]  = (uint8_t)(TIM3->CR1  >> 8);  pr2[2]  = (uint8_t)TIM3->CR1;
+                pr2[3]  = (uint8_t)(TIM3->CCER >> 8);  pr2[4]  = (uint8_t)TIM3->CCER;
+                pr2[5]  = (uint8_t)(TIM3->DIER >> 8);  pr2[6]  = (uint8_t)TIM3->DIER;
+                pr2[7]  = (uint8_t)(TIM3->SR   >> 8);  pr2[8]  = (uint8_t)TIM3->SR;
+                pr2[9]  = (uint8_t)(TIM3->CNT  >> 8);  pr2[10] = (uint8_t)TIM3->CNT;
+                pr2[11] = (uint8_t)(TIM3->PSC  >> 8);  pr2[12] = (uint8_t)TIM3->PSC;
+                pr2[13] = (uint8_t)(TIM3->ARR  >> 8);  pr2[14] = (uint8_t)TIM3->ARR;
+                pr2[15] = (uint8_t)(TIM1->CR1  >> 8);  pr2[16] = (uint8_t)TIM1->CR1;
+                pr2[17] = (uint8_t)(TIM1->CCER >> 8);  pr2[18] = (uint8_t)TIM1->CCER;
+                pr2[19] = (uint8_t)(TIM1->DIER >> 8);  pr2[20] = (uint8_t)TIM1->DIER;
+                pr2[21] = (uint8_t)(TIM1->SR   >> 8);  pr2[22] = (uint8_t)TIM1->SR;
+                pr2[23] = (uint8_t)(TIM1->CNT  >> 8);  pr2[24] = (uint8_t)TIM1->CNT;
+                pr2[25] = (uint8_t)(TIM1->PSC  >> 8);  pr2[26] = (uint8_t)TIM1->PSC;
+                pr2[27] = (uint8_t)(TIM1->ARR  >> 8);  pr2[28] = (uint8_t)TIM1->ARR;
+#endif
+
+                pr2[29] = (uint8_t)(ps2.ph[0].edges >> 8); pr2[30] = (uint8_t)ps2.ph[0].edges;
+                pr2[31] = (uint8_t)(ps2.ph[1].edges >> 8); pr2[32] = (uint8_t)ps2.ph[1].edges;
+                pr2[33] = (uint8_t)(ps2.ph[2].edges >> 8); pr2[34] = (uint8_t)ps2.ph[2].edges;
+
+                APP_SendAck(cmd, pr2, 35u);
                 break;
             }
 

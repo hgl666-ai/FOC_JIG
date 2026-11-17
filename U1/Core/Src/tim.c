@@ -242,6 +242,22 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef* tim_pwmHandle)
   /* USER CODE END TIM4_MspInit 1 */
   }
 }
+/* ⚠ 2026-11-17 补：输入捕获模式（TIM1/TIM3/TIM4 都用 HAL_TIM_IC_Init）
+ * 的时钟必须在这里开。HAL_TIM_IC_Init 只会调本函数 ——
+ * HAL_TIM_Base_MspInit / HAL_TIM_PWM_MspInit 在捕获模式下**根本不会被调用**，
+ * 所以原来写在它们里面的 __HAL_RCC_TIMx_CLK_ENABLE() 从来没生效过。
+ * 症状：寄存器读全 0、捕获中断不触发、0x000F 恒 NOSIGNAL。 */
+void HAL_TIM_IC_MspInit(TIM_HandleTypeDef* tim_icHandle)
+{
+  if (tim_icHandle->Instance == TIM1) {
+    __HAL_RCC_TIM1_CLK_ENABLE();
+  } else if (tim_icHandle->Instance == TIM3) {
+    __HAL_RCC_TIM3_CLK_ENABLE();
+  } else if (tim_icHandle->Instance == TIM4) {
+    __HAL_RCC_TIM4_CLK_ENABLE();
+  }
+}
+
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef* timHandle)
 {
 

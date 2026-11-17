@@ -3359,10 +3359,16 @@ static void t31_flow6_pwm(void)
           "步1(ADC) 没注入 → 整体 05、第一个失败步仍是 1");
     CHECK(app_state == APP_STATE_IDLE, "结束后回 IDLE");
 
-    /* ── 2) 频率不对（20kHz）：判"没波形" ── */
-    pulse_fake_set(20000u, 500u);
+    /* ── 2a) 10kHz/50%：真板实测就是这个频率，必须判**通过** ── */
+    pulse_fake_set(10000u, 500u);
+    CHECK(flow6_run_a3(d, &dlen) != 0, "10kHz 也能收尾出报告");
+    CHECK(d[12] == 0x01u, "步4：10kHz/50%（真板实测值）→ 通过");
+    CHECK(((uint16_t)((d[13] << 8) | d[14])) == 0x0007u, "掩码 7");
+
+    /* ── 2b) 频率超出窗口（100kHz）：判"没波形" ── */
+    pulse_fake_set(30000u, 500u);          /* 33us：低于 50us 下限，但在假发生器量程内 */
     CHECK(flow6_run_a3(d, &dlen) != 0, "频率不对时也能收尾出报告");
-    CHECK(d[12] == 0x02u, "步4：20kHz 不在 0.5~2ms 窗口内 → 判失败");
+    CHECK(d[12] == 0x02u, "步4：30kHz(33us) 低于 50us 下限 → 判失败");
     CHECK(((uint16_t)((d[13] << 8) | d[14])) == 0x0000u, "掩码 0（三路都不算有波形）");
 
     /* ── 3) 占空比不对（80%）── */

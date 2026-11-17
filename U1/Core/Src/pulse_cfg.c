@@ -81,6 +81,19 @@ void PULSE_CfgInit(void)
     s_ccer3 = PCFG3_TIM->CCER;                 /* 影子初值 = 定时器当前极性配置 */
     s_ccer1 = PCFG1_TIM->CCER;
 
+    /* ⚠ 2026-11-17 补：**必须显式使能捕获通道**。
+     *   HAL_TIM_IC_ConfigChannel() 只配 CCMR(CCxS/滤波) 和 CCER 的极性位，
+     *   **不置 CCxE**；使能位是在 HAL_TIM_IC_Start() 里通过 TIM_CCxChannelCmd 置的。
+     *   而本模块为了自己翻极性，从来不走 HAL_TIM_IC_Start() ——
+     *   结果 CCER 一直是 0x0000，捕获通道全程关闭（实测：捕获恒 NOSIGNAL）。
+     *   极性仍由 s_ccer3/s_ccer1 影子维护，这里只补使能位，互不影响。 */
+    s_ccer3 |= (uint16_t)0x0011u;   /* CC1E(bit0) | CC2E(**bit4**) —— 注意不是 bit2：
+                                     * bit2 是 TIM1/TIM8 专用的 CC1NE（互补输出使能），
+                                     * 通用定时器 TIM3 的 CC2E 在 bit4。写错就只开了 CH1。 */
+    PCFG3_TIM->CCER = s_ccer3;
+    s_ccer1 |= (uint16_t)0x0001u;   /* CC1E(bit0) */
+    PCFG1_TIM->CCER = s_ccer1;
+
     HAL_NVIC_SetPriority(TIM3_IRQn, 4, 0);
     HAL_NVIC_EnableIRQ(TIM3_IRQn);
     HAL_NVIC_SetPriority(TIM1_CC_IRQn, 4, 0);
