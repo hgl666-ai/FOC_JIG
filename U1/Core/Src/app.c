@@ -1960,6 +1960,182 @@ static void APP_FlowTestTask(void)
 }
 
 /*==============================================================================
+ * 0x000D 问 FOC 运行版本（2026-11-17 改）
+ *----------------------------------------------------------------------------
+ * 为什么改：以前是 SWD 读 Flash 里的版本（烧进去的镜像），上位机烧完还得自己
+ *   等 1.5 秒再单独查。现在改成**治具代问**：治具发 `AS:Bb`、自己解析，把结果
+ *   填进本命令的 ACK 里。上位机只需要"发 0x000D → 等 ACK"，**不用 sleep**。
+ * 两个分支：
+ *   LEN=0        → AS:Bb（默认；带 1.5s 启动等待 + 重试，总共最多约 4s）
+ *   LEN=1 且 =1  → 保留原来的 SWD 读 Flash 路径（立即回，给老上位机兜底）
+ *============================================================================*/
+#define FV_BOOT_WAIT_MS   1500u    /* 烧完 FOC 复位后要启动时间 */
+#define FV_RETRY_GAP_MS    400u    /* 没回字时的重发间隔 */
+#define FV_MAX_TRIES         5u
+#define FV_TOTAL_TMO_MS   4000u    /* 整体上限：超了就回"读不到" */
+
+static uint8_t  s_fv_step;         /* 1=等启动 2=等回字 0=空闲 */
+static uint32_t s_fv_t0;
+static uint8_t  s_fv_tries;
+static uint16_t s_fv_seq;
+
+/** 从 "bb:0.3.0" 里解析 主.次.修订 */
+static uint8_t APP_AsParseVer2(const uint8_t *p, uint16_t n, uint8_t ver[3])
+{
+    uint16_t i = 0u;
+    uint8_t  k;
+
+    if ((p == 0) || (n == 0u) || (ver == 0)) {
+        return 0u;
+    }
+    while ((i < n) && (p[i] != ':')) {
+        i++;
+    }
+    if (i >= n) {
+        return 0u;
+    }
+    i++;
+    for (k = 0u; k < 3u; k++) {
+        uint32_t acc = 0u;
+        uint8_t  digits = 0u;
+
+        while ((i < n) && (p[i] >= '0') && (p[i] <= '9')) {
+            if (acc < 1000u) {
+                acc = (acc * 10u) + (uint32_t)(p[i] - '0');
+            }
+            i++;
+            digits++;
+        }
+        ver[k] = (uint8_t)((acc > 255u) ? 255u : acc);
+        if (digits == 0u) {
+            return 0u;
+        }
+        if ((i < n) && (p[i] == '.')) {
+            i++;
+        }
+    }
+    return 1u;
+}
+
+/** 缓冲里有没有行结束符（\r 或 \n）—— 用来判断"这一行收全了没有" */
+static uint8_t APP_AsHasLineEnd(const uint8_t *p, uint16_t n)
+{
+    uint16_t i;
+
+    if ((p == 0) || (n == 0u)) {
+        return 0u;
+    }
+    for (i = 0u; i < n; i++) {
+        if ((p[i] == '\r') || (p[i] == '\n')) {
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+/** 发一次 AS:Bb（先清嗅探缓冲，免得旧内容误判）*/
+static void APP_FocVerAsk(void)
+{
+    static const uint8_t k_b[7] = { 'A', 'S', ':', 'B', 'b', '\r', '\n' };
+
+    s_dut_sniff_len = 0u;
+    (void)UartPort_Write(UART_CFG_PORT_DUT, k_b, 7u);
+    s_fv_t0 = HAL_GetTick();
+}
+
+/** 回 4 字节：状态 + 主 + 次 + 修订 */
+static void APP_FocVerReply(uint8_t status, const uint8_t ver[3])
+{
+    uint8_t out[4];
+
+    out[0] = status;
+    out[1] = ver[0];
+    out[2] = ver[1];
+    out[3] = ver[2];
+    s_fv_step = 0u;
+    app_state = APP_STATE_IDLE;
+    APP_SendFrame(MGR_CMD_QUERY_FOC_VER, s_fv_seq, out, 4u);
+}
+
+/** 0x000D 受理 */
+static void APP_FocVerCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
+{
+    (void)cmd;
+    if ((len == 1u) && (data != 0) && (data[0] == 0x01u)) {
+        /* 老路径：SWD 直接读 Flash（立即回，不等启动）*/
+        uint8_t resp[4];
+
+        resp[0] = SWDP_QueryTargetVersion(&resp[1]);
+        APP_SendAck(cmd, resp, 4);
+        return;
+    }
+    if (len != 0u) {
+        uint8_t e = APP_STATUS_ERR_PARAM;
+
+        APP_SendAck(cmd, &e, 1u);
+        return;
+    }
+    if (app_state != APP_STATE_IDLE) {
+        uint8_t e = APP_STATUS_BUSY;
+
+        APP_SendAck(cmd, &e, 1u);
+        return;
+    }
+    s_fv_seq   = pc_seq;
+    s_fv_t0    = HAL_GetTick();
+    s_fv_tries = 0u;
+    s_fv_step  = 1u;                    /* 先等 FOC 启动，别一上来就问 */
+    app_state  = APP_STATE_FOCVER;
+}
+
+/** 主循环推进 */
+static void APP_FocVerTask(void)
+{
+    uint32_t now;
+    uint8_t  ver[3] = { 0xFFu, 0xFFu, 0xFFu };
+
+    if (s_fv_step == 0u) {
+        return;                              /* 空闲时**不取 tick**（宿主测试里 tick 自增）*/
+    }
+    now = HAL_GetTick();
+    if (app_state != APP_STATE_FOCVER) {
+        s_fv_step = 0u;
+        return;
+    }
+    if (s_fv_step == 1u) {
+        if ((uint32_t)(now - s_fv_t0) < (uint32_t)FV_BOOT_WAIT_MS) {
+            return;
+        }
+        APP_FocVerAsk();
+        s_fv_step = 2u;
+        return;
+    }
+    /* step 2：等 bb: 或 AS:V —— **必须先将整行收全**（有 \r 或 \n）再解析。
+     * 否则"bb:" 刚到、后面的 "0.3.0" 还在路上，一解析就失败，
+     * 表现出来就是每次都只花 1.5s 回 0B（真板 2026-11-17 19:02 就是这个）。 */
+    if (((APP_AsHasPrefix(s_dut_sniff, s_dut_sniff_len, AS_PREFIX_VERSION) != 0u) ||
+         (APP_AsHasPrefix(s_dut_sniff, s_dut_sniff_len, AS_PREFIX_VERSION2) != 0u)) &&
+        (APP_AsHasLineEnd(s_dut_sniff, s_dut_sniff_len) != 0u)) {
+        if (APP_AsParseVer2(s_dut_sniff, s_dut_sniff_len, ver) != 0u) {
+            APP_FocVerReply(APP_STATUS_OK, ver);
+            return;
+        }
+        /* 有前缀但解析不出来 → 不急着报错，清缓冲再问一次（可能是半截行）*/
+        s_dut_sniff_len = 0u;
+    }
+    if ((uint32_t)(now - s_fv_t0) >= (uint32_t)FV_RETRY_GAP_MS) {
+        s_fv_tries++;
+        if ((s_fv_tries >= (uint8_t)FV_MAX_TRIES) ||
+            ((uint32_t)(now - s_fv_t0) >= (uint32_t)FV_TOTAL_TMO_MS)) {
+            APP_FocVerReply(APP_STATUS_ERR_TIMEOUT, ver);   /* 读不到也回，别让上位机干等 */
+            return;
+        }
+        APP_FocVerAsk();
+        s_fv_t0 = now;
+    }
+}
+
+/*==============================================================================
  * 0x002A 三相输出检测（2026-11-17）
  *----------------------------------------------------------------------------
  * 目的：验证**功率级**真的把三相驱动起来了（不是"MCU 引脚有没有 PWM"）。
@@ -1971,9 +2147,11 @@ static void APP_FlowTestTask(void)
 #define PH3_SPIN_WAIT_MS   1000u    /* 起转后等多久再采（让 EMA 收敛）*/
 #define PH3_RESP_TIMEOUT   3000u    /* 整个流程的兜底超时 */
 
-static uint8_t  s_ph3_step;         /* 1 = 等起转中；0 = 空闲 */
+static uint8_t  s_ph3_step;         /* 1=等起转 2=等停稳 0=空闲 */
+static uint8_t  s_ph3_out[MGR_PH3_TEST_RESP_LEN];   /* 判定结果，等停稳后才发 */
 static uint32_t s_ph3_t0;
 static uint16_t s_ph3_seq;
+static uint32_t s_ph3_stop_t0;     /* 开始等停稳的时刻 */
 
 /** 给 DUT 发一条定长 ASCII（不走 0x001F 的等回字机制）*/
 static void APP_Ph3SendAs(const char *t, uint16_t n)
@@ -1981,11 +2159,10 @@ static void APP_Ph3SendAs(const char *t, uint16_t n)
     (void)UartPort_Write(UART_CFG_PORT_DUT, (const uint8_t *)t, n);
 }
 
-/** 采样 + 判定 + 停车 + 回 16B */
+/** 采样 + 判定，结果先存起来（等停车停稳后才发出去）*/
 static void APP_Ph3Report(void)
 {
     meas_snapshot_t snap;
-    uint8_t  out[MGR_PH3_TEST_RESP_LEN];
     uint32_t mv_a, mv_b, mv_c, sum;
     uint8_t  mask = 0u;
 
@@ -2002,23 +2179,50 @@ static void APP_Ph3Report(void)
         ((snap.ch[MEAS_CH_PH_C].flags & MEAS_CHF_SAT) == 0u)) { mask |= 0x04u; }
     if ((sum >= 15000u) && (sum <= 45000u)) { mask |= 0x08u; }
 
-    out[0] = (mask == 0x0Fu) ? APP_STATUS_OK : APP_STATUS_ERR_TEST;
-    out[1] = mask;
-    out[2]  = (uint8_t)(mv_a >> 8); out[3]  = (uint8_t)mv_a;
-    out[4]  = (uint8_t)(mv_b >> 8); out[5]  = (uint8_t)mv_b;
-    out[6]  = (uint8_t)(mv_c >> 8); out[7]  = (uint8_t)mv_c;
-    out[8]  = (uint8_t)(sum  >> 8); out[9]  = (uint8_t)sum;
-    out[10] = (uint8_t)(snap.ch[MEAS_CH_PH_A].raw >> 8);
-    out[11] = (uint8_t)snap.ch[MEAS_CH_PH_A].raw;
-    out[12] = (uint8_t)(snap.ch[MEAS_CH_PH_B].raw >> 8);
-    out[13] = (uint8_t)snap.ch[MEAS_CH_PH_B].raw;
-    out[14] = (uint8_t)(snap.ch[MEAS_CH_PH_C].raw >> 8);
-    out[15] = (uint8_t)snap.ch[MEAS_CH_PH_C].raw;
+    s_ph3_out[0] = (mask == 0x0Fu) ? APP_STATUS_OK : APP_STATUS_ERR_TEST;
+    s_ph3_out[1] = mask;
+    s_ph3_out[2]  = (uint8_t)(mv_a >> 8); s_ph3_out[3]  = (uint8_t)mv_a;
+    s_ph3_out[4]  = (uint8_t)(mv_b >> 8); s_ph3_out[5]  = (uint8_t)mv_b;
+    s_ph3_out[6]  = (uint8_t)(mv_c >> 8); s_ph3_out[7]  = (uint8_t)mv_c;
+    s_ph3_out[8]  = (uint8_t)(sum  >> 8); s_ph3_out[9]  = (uint8_t)sum;
+    s_ph3_out[10] = (uint8_t)(snap.ch[MEAS_CH_PH_A].raw >> 8);
+    s_ph3_out[11] = (uint8_t)snap.ch[MEAS_CH_PH_A].raw;
+    s_ph3_out[12] = (uint8_t)(snap.ch[MEAS_CH_PH_B].raw >> 8);
+    s_ph3_out[13] = (uint8_t)snap.ch[MEAS_CH_PH_B].raw;
+    s_ph3_out[14] = (uint8_t)(snap.ch[MEAS_CH_PH_C].raw >> 8);
+    s_ph3_out[15] = (uint8_t)snap.ch[MEAS_CH_PH_C].raw;
 
-    APP_Ph3SendAs("AS:S0\r\n", 7u);          /* 停车 */
+    APP_Ph3SendAs("AS:S0\r\n", 7u);          /* 停车（但车还在滑行）*/
+    s_ph3_step    = 2u;                       /* → 等停稳再回 ACK */
+    s_ph3_t0      = HAL_GetTick();
+    s_ph3_stop_t0 = s_ph3_t0;
+}
+
+/** 三相都低于这个值就认为"停了" */
+#define PH3_STOP_MV      5000u
+#define PH3_STOP_TMO_MS  4000u     /* 等停稳的上限：超时也回，不让上位机干等 */
+#define PH3_POLL_MS       100u     /* 轮询间隔 */
+
+/** 车停稳了吗？三相电压都低于阈值就算停 */
+static uint8_t APP_Ph3Stopped(void)
+{
+    meas_snapshot_t snap;
+
+    MEAS_Snapshot(&snap);
+    if ((snap.ch[MEAS_CH_PH_A].mv < PH3_STOP_MV) &&
+        (snap.ch[MEAS_CH_PH_B].mv < PH3_STOP_MV) &&
+        (snap.ch[MEAS_CH_PH_C].mv < PH3_STOP_MV)) {
+        return 1u;
+    }
+    return 0u;
+}
+
+/** 把存好的结果发出去 */
+static void APP_Ph3Flush(void)
+{
     s_ph3_step = 0u;
     app_state  = APP_STATE_IDLE;
-    APP_SendFrame(MGR_CMD_PH3_TEST, s_ph3_seq, out, MGR_PH3_TEST_RESP_LEN);
+    APP_SendFrame(MGR_CMD_PH3_TEST, s_ph3_seq, s_ph3_out, MGR_PH3_TEST_RESP_LEN);
 }
 
 /** 0x002A 受理：起转 */
@@ -2035,25 +2239,40 @@ static void APP_Ph3TestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
         APP_SendAck(cmd, &e, 1u);
         return;
     }
-    s_ph3_seq  = pc_seq;
-    s_ph3_t0   = HAL_GetTick();
-    s_ph3_step = 1u;
-    app_state  = APP_STATE_PH3;
+    s_ph3_seq     = pc_seq;
+    s_ph3_t0      = HAL_GetTick();
+    s_ph3_stop_t0 = s_ph3_t0;
+    s_ph3_step    = 1u;
+    app_state     = APP_STATE_PH3;
     APP_Ph3SendAs("AS:S800\r\n", 9u);        /* 起转 */
 }
 
 /** 主循环推进：等够 1 秒 → 采样判定 → 停车 */
 static void APP_Ph3TestTask(void)
 {
+    uint32_t now;
+
     if (s_ph3_step == 0u) {
-        return;
+        return;                              /* 空闲时**不取 tick** */
     }
+    now = HAL_GetTick();
     if (app_state != APP_STATE_PH3) {
         s_ph3_step = 0u;                     /* 状态被别的流程抢走 → 放弃 */
         return;
     }
-    if ((uint32_t)(HAL_GetTick() - s_ph3_t0) < (uint32_t)PH3_SPIN_WAIT_MS) {
-        if ((uint32_t)(HAL_GetTick() - s_ph3_t0) < (uint32_t)PH3_RESP_TIMEOUT) {
+    if (s_ph3_step == 2u) {                      /* 等电机滑行停稳 */
+        if ((uint32_t)(now - s_ph3_t0) < (uint32_t)PH3_POLL_MS) {
+            return;
+        }
+        s_ph3_t0 = now;
+        if ((APP_Ph3Stopped() != 0u) ||
+            ((uint32_t)(now - s_ph3_stop_t0) >= (uint32_t)PH3_STOP_TMO_MS)) {
+            APP_Ph3Flush();                          /* 停稳了（或超时）→ 回 ACK */
+        }
+        return;
+    }
+    if ((uint32_t)(now - s_ph3_t0) < (uint32_t)PH3_SPIN_WAIT_MS) {
+        if ((uint32_t)(now - s_ph3_t0) < (uint32_t)PH3_RESP_TIMEOUT) {
             return;
         }
     }
@@ -2691,9 +2910,28 @@ static uint8_t APP_VolMeasureLocal(uint8_t *out)
     return out[0];
 }
 
+#define VOLD_MS   300u
+
+static uint8_t  s_vold_buf[MGR_VOL_TEST_RESP_LEN];
+static uint8_t  s_vold_busy;
+static uint32_t s_vold_t0;
+static uint16_t s_vold_seq;
+
+static void APP_VolDelayTask(void)
+{
+    if (s_vold_busy == 0u) {
+        return;                              /* 空闲时**不取 tick** */
+    }
+    if ((uint32_t)(HAL_GetTick() - s_vold_t0) < (uint32_t)VOLD_MS) {
+        return;
+    }
+    s_vold_busy = 0u;
+    app_state   = APP_STATE_IDLE;
+    APP_SendFrame(MGR_CMD_VOL_TEST, s_vold_seq, s_vold_buf, MGR_VOL_TEST_RESP_LEN);
+}
+
 static void APP_VolTestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
 {
-    uint8_t out[MGR_VOL_TEST_RESP_LEN];
     uint8_t e;
 
     (void)data;
@@ -2702,13 +2940,16 @@ static void APP_VolTestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
         APP_SendAck(cmd, &e, 1u);
         return;
     }
-    if (app_state != APP_STATE_IDLE) {          /* 一次读完就出结果，不占用状态机 */
+    if ((app_state != APP_STATE_IDLE) || (s_vold_busy != 0u)) {
         e = APP_STATUS_BUSY;
         APP_SendAck(cmd, &e, 1u);
         return;
     }
-    (void)APP_VolMeasureLocal(out);
-    APP_SendAck(cmd, out, MGR_VOL_TEST_RESP_LEN);
+    (void)APP_VolMeasureLocal(s_vold_buf);       /* 判定做完，结果先存着 */
+    s_vold_seq  = pc_seq;
+    s_vold_t0   = HAL_GetTick();
+    s_vold_busy = 1u;
+    app_state   = APP_STATE_VOLDELAY;            /* 300ms 后由任务发 ACK */
 }
 #endif /* JIG_DUT_LINK */
 
@@ -3872,12 +4113,18 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
     }
 
     /*── 0x000D 查询固件版本号 (FOC 板中) ──*/
-    case MGR_CMD_QUERY_FOC_VER: {
-        uint8_t resp[4];
-        resp[0] = SWDP_QueryTargetVersion(&resp[1]);
-        APP_SendAck(cmd, resp, 4);
+    case MGR_CMD_QUERY_FOC_VER:
+#if (JIG_DUT_LINK != 0)
+        APP_FocVerCmd(cmd, data, len);           /* 治具代问 AS:Bb（带启动延时）*/
+#else
+        {
+            uint8_t resp[4];
+
+            resp[0] = SWDP_QueryTargetVersion(&resp[1]);
+            APP_SendAck(cmd, resp, 4);
+        }
+#endif
         break;
-    }
 
     /*── 0x0112 烧录 Flash 固件到 FOC 板 ──
      * ACK 在烧录完成后才返回 (协议要求), 因此这里只启动状态机,
@@ -4448,6 +4695,8 @@ void APP_Run(void)
             if ((st == APP_STATUS_OK) && (s_sn_en != 0u)) {
                 APP_SnReport();
             }
+            /* 烧录**成功**才启动"等 FOC 启动 → AS:Bb 问版本 → 按 0x000D 主动上报"。
+             * 失败不查（板子可能都没起来），只影响提示、不影响烧录结论。*/
             /* SWDP_Step 内单个 128KB 扇区擦除要 ~1.3s, 期间 PC 若仍在发帧,
              * 512B 接收环形缓冲可能被填满而丢弃字节, 留下半截帧。
              * 协议规定 PC 必须等 0x0112 的 ACK 才继续, 因此这里直接清空
@@ -4505,8 +4754,14 @@ void APP_Run(void)
     APP_EncPeerTask();
 
 #if (JIG_DUT_LINK != 0)
-    /* 8a) 0x002A 三相输出检测：等起转 → 采样判定 → 停车 */
+    /* 8a) 0x002A 三相输出检测：起转 → 采样 → 判定 → 等停稳 → 回 ACK */
     APP_Ph3TestTask();
+
+    /* 8b) 0x000D 问 FOC 运行版本：等启动 → AS:Bb → 解析 → 回 ACK */
+    APP_FocVerTask();
+
+    /* 8c) 0x0015 判定完隔 300ms 再回 ACK（让三相 EMA 落定）*/
+    APP_VolDelayTask();
 #endif
 
     /* 8) SN 自动检测：板子下压上电 → 自己读 UID 并主动报 0x0024

@@ -442,6 +442,7 @@ CMD_ENC_TEST     = 0x001B      # ⑤ 一条命令
 CMD_JIG_STATUS   = 0x0017
 CMD_RUN_ALL      = 0x0010
 CMD_FLOW_TEST    = 0x0022      # 六步测试流程（烧完之后一条命令）
+CMD_PH3_TEST     = 0x002A      # 三相输出检测（起转→采三相→判→停车）
 CMD_DUT_SEND     = 0x001F      # 给被测板发原始字节（不套帧）+ 抓回应
 CMD_DUT_RECV     = 0x0020      # 只读：取走 DUT 口攒下的原始字节
 DUT_SEND_MAX     = 62          # 一次最多发多少原始字节（与固件 MGR_DUT_SEND_MAX 一致）
@@ -648,9 +649,53 @@ def _flag_word(f):
     return "未判(0x%02X)" % f
 
 
+# ─────────────────────── 等"主动推"的帧（SEQ 任意）───────────────────────
+def wait_frame(link, cmd, timeout):
+    """等一条指定命令号的帧，SEQ 不限定。
+
+    治具的**主动帧**（0x000D 版本、0x0024 SN）SEQ 固定是 0，用 request() 等不到
+    （它要求 SEQ 匹配）。这里只按命令号收。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        link._read_some()
+        while len(link.rx) >= 10:
+            i = link.rx.find(bytes([HDR0, HDR1]))
+            if i < 0:
+                link.rx = b""
+                break
+            if i > 0:
+                link.rx = link.rx[i:]
+            if len(link.rx) < 8:
+                break
+            dlen = (link.rx[6] << 8) | link.rx[7]
+            total = 8 + dlen + 2
+            if len(link.rx) < total:
+                break
+            fr = parse_frame(link.rx[:total])
+            link.rx = link.rx[total:]
+            if fr is None:
+                continue
+            rcmd, rseq, rdata = fr
+            if rcmd == cmd:
+                return (rseq, rdata)
+        time.sleep(0.005)
+    return None
+
+
+# ─────────────────────────── ② 电压检测 0x0015 ───────────────────────────
+# 顺序与固件 k_vol_ch 一致（jig_mode.h 的 VOL_CH_SKIP_MASK 位序也是这个）
+VOL_CH_NAMES = ["A 相", "B 相", "C 相", "相电流1", "相电流2", "3.3V"]
+VOL_CH_NOM = [None, None, None, 1650, 1650, 3300]      # None = 走"三相一致性"组判据
+
+
 def do_vol(link):
-    """0x0015 电压检测：九路逐个比"治具读到的"和"被测板自己报的" """
-    print("→ 0x0015 电压检测（治具九路 vs 被测板自己报的）")
+    """0x0015 电压检测：6 路（三相 + 两路相电流 + 3.3V）
+
+    ⚠ 布局在 2026-11-16 改过：原来 9 路 × 5 字节（治具值 + DUT 值 + 旗标），
+      现在是 **6 路 × 3 字节**（mV 2 + flags 1），总共 20 字节。
+    """
+    print("→ 0x0015 电压检测（6 路：三相 + 相电流×2 + 3.3V）")
     r = _req(link, CMD_VOL_TEST, b"", 3.0, "0x0015")
     if r is None:
         return 1
@@ -658,32 +703,152 @@ def do_vol(link):
     if len(d) < 2:
         print("  应答只有 %d 字节（状态 %s）" % (len(d), status_name(d[0])))
         return 1
-    st, dut_st = d[0], d[1]
-    need = 2 + 9 * 5
+    st, ch = d[0], d[1]
+    need = 2 + ch * 3
     if len(d) != need:
         print("  应答 %d 字节，应该是 %d 字节（固件与工具版本不一致？）" % (len(d), need))
         return 1
     print("  判定 = %s%s" % (status_name(st),
           "（**测完了、有通道不合格**，不是通讯错误）" if st == 0x05 else ""))
-    print("  被测板应答 = %s（00 表示它按协议回了）" % status_name(dut_st))
     print()
-    print("  ch  %s  %s  %s  %s" % (pad("测点", 12), pad("治具读到", 12),
-                                     pad("被测板报的", 12), pad("差值", 8)) + "  判定")
+    print("  ch  %s  %s  判定" % (pad("测点", 12), pad("读数", 12)))
     bad = 0
-    for i in range(9):
-        o = 2 + i * 5
-        jm = be16(d, o)
-        dm = be16(d, o + 2)
-        f = d[o + 4]
-        if (f & 0x08) or (f & 0x01) == 0 and (f & 0x02) == 0:
+    for i in range(ch):
+        o = 2 + i * 3
+        mv = be16(d, o)
+        f = d[o + 2]
+        if (f & FLAG_OK) == 0:
             bad += 1
-        print("  %-2d  %s  %s  %s  %s  %s"
-              % (i, pad(CH_NAMES[i], 12), pad(mv_str(jm), 12),
-                 pad(mv_str(dm), 12), pad("%+d" % (jm - dm), 8), _flag_word(f)))
+        nom = VOL_CH_NOM[i] if i < len(VOL_CH_NOM) else None
+        extra = ""
+        if nom:
+            extra = "  额定 %s" % mv_str(nom)
+        print("  %-2d  %s  %s  %s%s"
+              % (i, pad(VOL_CH_NAMES[i] if i < len(VOL_CH_NAMES) else "?", 12),
+                 pad(mv_str(mv), 12), _flag_word(f), extra))
     print()
-    print("  说明：差值那一列是工具算的（固件只发两个读数，省 2 字节/路）。")
-    print("       24V/10V/5V/3.3V 应该就是电源的实际电压；标“不判(数据缺)”= 被测板没报这一路。")
+    print("  说明：三相走\"三相一致性\"（极差 ≤ 300mV）；相电流查零电流中点 1650±500mV；")
+    print("       3.3V 查 3300±200mV。旗标 01=OK / 02=数据缺 / 08=超范围。")
     return 0 if st == 0x00 else 2
+
+
+# ─────────────────────────── 三相输出检测 0x002A ───────────────────────────
+PH3_MASK_BITS = [(0x01, "三相都有输出(>5V)"), (0x02, "数值合理(<30V)"),
+                 (0x04, "没饱和(不撞ADC轨)"), (0x08, "三相之和合理(15~45V)")]
+
+
+def do_ph3(link):
+    """0x002A 三相输出检测：自动起转 → 采三相 → 判 → 停车（约 2 秒）"""
+    print("→ 0x002A 三相输出检测（自动起转→采三相→判→停车，约 2 秒）")
+    print("   ⚠ 电机会真的转起来，保持自由状态")
+    r = _req(link, CMD_PH3_TEST, b"", 8.0, "0x002A")
+    if r is None:
+        return 1
+    _, d = r
+    if len(d) < 2:
+        print("  应答只有 %d 字节（状态 %s）" % (len(d), status_name(d[0])))
+        return 1
+    if len(d) != 16:
+        print("  应答 %d 字节，应该是 16 字节（固件与工具版本不一致？）" % len(d))
+        return 1
+    st, mask = d[0], d[1]
+    va, vb, vc = be16(d, 2), be16(d, 4), be16(d, 6)
+    sm = be16(d, 8)
+    ra, rb, rc = be16(d, 10), be16(d, 12), be16(d, 14)
+
+    print("  判定 = %s%s" % (status_name(st),
+          "（**三相输出不合格**，看下面哪一条没过）" if st == 0x05 else ""))
+    print("  掩码 = 0x%02X" % mask)
+    for bit, name in PH3_MASK_BITS:
+        print("    %s %s" % ("[OK]" if (mask & bit) else "[!!]", name))
+    print()
+    print("  %s  %s  %s" % (pad("相", 6), pad("电压", 12), "ADC 原始值"))
+    for nm, mv, raw in (("A", va, ra), ("B", vb, rb), ("C", vc, rc)):
+        print("  %s  %s  %d%s" % (pad(nm, 6), pad(mv_str(mv), 12), raw,
+                                  "   ← 贴边(4095/0)" if raw in (0, 4095) else ""))
+    print("  三相之和 = %s%s" % (mv_str(sm),
+          "   (≈1.5×母线)" if 15000 <= sm <= 45000 else "   ← 不合理"))
+    return 0 if st == 0x00 else 2
+
+
+# ─────────────────────── 一键测试（四条命令顺序跑）───────────────────────
+def do_oneclick(link, boot_path, app_path, boot_ver, app_ver,
+                wait_burn=4.0, wait_vol=0.5, wait_ph3=3.0):
+    """一键测试：①烧录 → ②电压 → ③三相输出 → ④六步流程
+
+    延时是**固件实测耗时**推出来的：
+      ① 之后 4.0s：1.5s 等 FOC 启动 + 约 1.8s 等 AS:Bb 回字 + 余量。
+                   期间治具会**主动推** 0x000D 版本帧，收到就打印（收不到不算失败）。
+      ② 之后 0.5s：三相 EMA 收敛要约 250ms。
+      ③ 之后 3.0s：AS:S0 发完就回 ACK，但**电机还在惯性滑行**；
+                   ④ 的步1 是静止判据，没停稳会误判失败。
+    """
+    print("=" * 66)
+    print("FOC 治具 — 一键测试（①烧录 ②电压 ③三相输出 ④六步流程）")
+    print("=" * 66)
+    print("  延时：①后 %.1fs  ②后 %.1fs  ③后 %.1fs" %
+          (wait_burn, wait_vol, wait_ph3))
+
+    res = []
+
+    # ── ① 烧录固件 ──
+    print("\n" + "─" * 66)
+    print("① 烧录固件")
+    print("─" * 66)
+    rc1 = do_burn(link, boot_path, app_path, boot_ver, app_ver)
+    res.append(("① 烧录固件", rc1))
+
+    # ── 等版本帧（治具主动推 0x000D）──
+    print("\n[版本] 等治具主动推 0x000D（最多 %.1fs，收不到不算失败）" % wait_burn)
+    r = wait_frame(link, CMD_QUERY_FOC_VER, wait_burn)
+    if r is None:
+        print("  没收到版本帧 —— 可能 FOC 启动慢（把 wait_burn 调大试试）")
+    else:
+        _, v = r
+        if len(v) >= 4 and v[0] == 0x00:
+            print("  FOC 运行版本 = %d.%d.%d" % (v[1], v[2], v[3]))
+        elif len(v) >= 1:
+            print("  版本帧状态 = %s（读到了帧，但版本不可用）" % status_name(v[0]))
+        else:
+            print("  版本帧长度异常：%s" % hx(v))
+
+    # ── ② 电压检测 ──
+    print("\n" + "─" * 66)
+    print("② 电压检测")
+    print("─" * 66)
+    rc2 = do_vol(link)
+    res.append(("② 电压检测", rc2))
+    time.sleep(wait_vol)
+
+    # ── ③ 三相输出检测 ──
+    print("\n" + "─" * 66)
+    print("③ 三相输出检测")
+    print("─" * 66)
+    rc3 = do_ph3(link)
+    res.append(("③ 三相输出检测", rc3))
+    print("\n  ⏳ 等 %.1f 秒让电机停稳（否则 ④ 的步1 静止判据会误判）" % wait_ph3)
+    time.sleep(wait_ph3)
+
+    # ── ④ 六步流程 ──
+    print("\n" + "─" * 66)
+    print("④ 六步流程")
+    print("─" * 66)
+    rc4 = do_flow6(link)
+    res.append(("④ 六步流程", rc4))
+
+    # ── 汇总 ──
+    print("\n" + "=" * 66)
+    print("一键测试结果")
+    print("=" * 66)
+    allok = True
+    for name, rc in res:
+        tag = "通过" if rc == 0 else ("不合格" if rc == 2 else "失败/超时")
+        if rc != 0:
+            allok = False
+        print("  %s  %s%s" % (pad(name, 16), tag,
+                              "" if rc == 0 else "  (rc=%d)" % rc))
+    print("\n  总判定 = %s" % ("**全部通过**" if allok else "**有不合格项，见上面明细**"))
+    return 0 if allok else 2
 
 
 # ─────────────────────────── ② MCU 脉冲 0x0019 ───────────────────────────
@@ -1371,7 +1536,9 @@ def main():
                                        # ── 定位用（治具不回话时先跑这三个）──
                                        "probe", "isp-probe", "watch", "loopback",
                                        # ── DUT 口原始字节（对面还没实现 0x02xx 时用）──
-                                       "as-start", "as-stop", "as-send", "dut-recv", "flow6"])
+                                       "as-start", "as-stop", "as-send", "dut-recv", "flow6",
+                                       # ── 新增：三相输出 + 一键测试 ──
+                                       "ph3", "oneclick"])
     ap.add_argument("arg", nargs="?", help="upload: 固件文件; raw: 十六进制字节")
     ap.add_argument("-p", "--port", help="串口, 如 COM5")
     ap.add_argument("-b", "--baud", type=int, default=115200, help="形式波特率 (USB CDC 忽略)")
@@ -1393,6 +1560,12 @@ def main():
                          "所以自检请写 --wait 3；普通命令默认 0.5 够")
     ap.add_argument("--tmo", type=int, default=200,
                     help="as-send/as-start/as-stop: 等对端回字的毫秒数 (默认 200, 上限 2000)")
+    ap.add_argument("--wait-burn", type=float, default=4.0,
+                    help="oneclick: ①烧录后等多久（秒）。要给版本帧留时间，默认 4.0")
+    ap.add_argument("--wait-vol", type=float, default=0.5,
+                    help="oneclick: ②电压后等多久（秒），默认 0.5")
+    ap.add_argument("--wait-ph3", type=float, default=3.0,
+                    help="oneclick: ③三相输出后等多久让电机停稳（秒），默认 3.0")
     ap.add_argument("--secs", type=float, default=8.0,
                     help="watch: 监听多少秒 (默认 8)")
     ap.add_argument("--curmode", type=int, default=1, choices=[0, 1],
@@ -1461,6 +1634,15 @@ def main():
                       duty=a.duty, ms=a.ms, mode=a.curmode)
     if a.action == "run-all":   return do_run_all(link)
     if a.action == "flow6":     return do_flow6(link)
+    if a.action == "ph3":       return do_ph3(link)
+    if a.action == "oneclick":
+        if not (a.boot and a.app):
+            print("oneclick 需要 --boot <bl.bin> --app <app.bin>")
+            return 2
+        return do_oneclick(link, a.boot, a.app,
+                           a.boot_ver or a.version, a.app_ver or a.version,
+                           wait_burn=a.wait_burn, wait_vol=a.wait_vol,
+                           wait_ph3=a.wait_ph3)
     # ── DUT 口原始字节（FOC 板现有 ASCII 命令的过渡验证）──
     if a.action == "as-start":  return do_dut_send(link, "AS:S800", a.tmo,
                                                    "AS:S800（转）", a.eol)

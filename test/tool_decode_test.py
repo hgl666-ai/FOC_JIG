@@ -66,14 +66,18 @@ def run(fn, *a, **kw):
 
 # ─────────────────────────── 造应答 ───────────────────────────
 def mk_vol_v2():
-    """0x0015 应答 47B：状态 + 被测板状态 + 9×(治具mV, 被测板mV, 旗标)"""
-    d = bytes([0x00, 0x00])
-    vals = [(24000, 24100), (10000, 10050), (5000, 4980), (3300, 3310),
-            (0, 0), (0, 0), (0, 0), (1650, 1650), (1655, 1655)]
-    for i, (jm, dm) in enumerate(vals):
-        f = 0x01 if i < 4 else 0x02          # 前 4 路判了，后 5 路"不判"
-        d += be16(jm) + be16(dm) + bytes([f])
-    assert len(d) == 47, len(d)
+    """0x0015 应答 20B：状态 + 通道数 + 6×(mV u16, 旗标 u8)
+
+    2026-11-17 改：固件从"9 路 × 5 字节"（治具值 + DUT 值 + 旗标）
+    改成"**6 路 × 3 字节**"（只有治具自己的读数，差值由上位机自己算）。
+    顺序：A 相 / B 相 / C 相 / 相电流1 / 相电流2 / 3.3V
+    """
+    vals = [(340, 0x01), (11168, 0x01), (299, 0x01),
+            (1646, 0x01), (1647, 0x01), (3287, 0x01)]
+    d = bytes([0x00, len(vals)])
+    for mv, f in vals:
+        d += be16(mv) + bytes([f])
+    assert len(d) == 20, len(d)
     return d
 
 
@@ -163,11 +167,12 @@ def main():
     # ① 0x0015 电压
     link = FakeLink({T.CMD_VOL_TEST: mk_vol_v2()})
     out = run(T.do_vol, link)
-    check("24.000 V" in out, "电压：ch0 治具读数 24.000 V")
-    check("24.100 V" in out, "电压：ch0 被测板读数 24.100 V")
-    check("3.300 V" in out, "电压：ch3 = 3.300 V")
-    check("不判(数据缺)" in out, "电压：ch7/ch8 显示“不判”")
-    check("差值那一列是工具算的" in out, "电压：说明差值由工具算（固件不再发）")
+    check("340 mV" in out, "电压：ch0 A 相 = 340 mV")
+    check("11.168 V" in out, "电压：ch1 B 相 = 11.168 V")
+    check("299 mV" in out, "电压：ch2 C 相 = 299 mV")
+    check("1.646 V" in out, "电压：ch3 相电流1 = 1.646 V")
+    check("3.287 V" in out, "电压：ch5 3.3V = 3.287 V")
+    check("三相一致性" in out, "电压：说明里讲了三相一致性判据")
     check(link.seen[0][0] == T.CMD_VOL_TEST and link.seen[0][1] == b"",
           "电压：请求是 LEN=0 的 0x0015")
 

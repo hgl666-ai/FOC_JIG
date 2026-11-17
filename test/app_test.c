@@ -745,9 +745,14 @@ static void t2_empty_and_unknown(void)
       pc_send(MGR_CMD_QUERY_FLASH_VER, 0x0101, 0, 0);
       expect_ack(MGR_CMD_QUERY_FLASH_VER, 0x0101, e, 4, "空 Flash → ERR_NO_FW"); }
 
+    /* 2026-11-17: 0x000D 的 LEN=0 分支改成"治具代问 AS:Bb"(异步, 有 1.5s 启动等待),
+     * 不会再立即应答; 用它测 SWD 分支会把状态机挂住, 后续命令全被 BUSY 掉。
+     * 所以这里改用 LEN=1 且 data[0]=1 —— 走原来的 SWD 读 Flash 路径。*/
     { uint8_t e[4] = {0x06, 0x00, 0xFF, 0xFF};
-      pc_send(MGR_CMD_QUERY_FOC_VER, 0x0202, 0, 0);
-      expect_ack(MGR_CMD_QUERY_FOC_VER, 0x0202, e, 4, "0x000D 被烧板 App 区为空 → 0x06(无固件) + 00FFFF"); }
+      uint8_t m = 0x01;
+      pc_send(MGR_CMD_QUERY_FOC_VER, 0x0202, &m, 1);
+      expect_ack(MGR_CMD_QUERY_FOC_VER, 0x0202, e, 4,
+                 "0x000D(LEN=1) SWD 读被烧板: App 区为空 -> 0x06 + 00FFFF"); }
 
     { uint8_t e[1] = {0xFF};
       pc_send(0x1234, 0x0303, 0, 0);
