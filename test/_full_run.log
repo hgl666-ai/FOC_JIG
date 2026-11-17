@@ -257,8 +257,8 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
   [ok]   V10: 10000 mV in (got 10000, want 10000 +-103)
   [ok]   V5: 5000 mV in (got 5000, want 5000 +-53)
   [ok]   V33: 3300 mV in (got 3300, want 3300 +-36)
-  [ok]   PHA: 24000 mV in (got 24002, want 24000 +-243)
-  [ok]   PHB: 12000 mV in (got 11998, want 12000 +-123)
+  [ok]   PHA: 24000 mV in (got 24001, want 24000 +-243)
+  [ok]   PHB: 12000 mV in (got 12001, want 12000 +-123)
   [ok]   PHC: 0 mV in (got 0, want 0 +-3)
   [ok]   CUR1: 1000 mV in (got 1000, want 1000 +-13)
   [ok]   CUR2: 2000 mV in (got 2000, want 2000 +-23)
@@ -306,7 +306,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
   [ok]   line contains V5=5000
   [ok]   line contains V33=3300
   [ok]   line reports OK=1
-         M V24=22113 V10=10000 V5=5000 V33=3300 PHA=6002 PHB=6002 PHC=6002 CUR1=1500 CUR2=1500 OK=1 F=0x000
+         M V24=22113 V10=10000 V5=5000 V33=3300 PHA=6000 PHB=6000 PHC=6000 CUR1=1500 CUR2=1500 OK=1 F=0x000
 
 --- 8. bounds safety ---
   [ok]   MEAS_GetMv out of range returns 0
@@ -1060,7 +1060,7 @@ D:/Project/FOC_JIG/test/app_test.c:1102:13: warning: 'pulse_fake_set' defined bu
 
     --- Keil build U1 ---
     (UV4 is a GUI app; waiting for the build to finish...)
-Program Size: Code=50920 RO-data=752 RW-data=828 ZI-data=13532  
+Program Size: Code=51792 RO-data=752 RW-data=844 ZI-data=13532  
 "U1\U1.axf" - 0 Error(s), 0 Warning(s).
 [PASS] Keil build U1: 0 Error, 0 Warning
 

@@ -120,6 +120,29 @@
 #define MGR_CMD_PULSE_TEST      0x0019u   /* ③ 一条命令 */
 #define MGR_CMD_PHASE_TEST      0x001Au   /* ④ 一条命令 */
 #define MGR_CMD_ENC_TEST        0x001Bu   /* ⑤ 一条命令 */
+/* 0x0029 编码器单步检测（2026-11-17 新增）：只跑"六步流程的步5"，
+ * 不跑步1~4、不影响 0x0022。参数固定（A=100/B=100/Z=10 @1kHz）。
+ * 应答 16 字节：
+ *   [0]     状态（00 通过 / 05 失败 / 0C 没收到 AS:D）
+ *   [1]     比对掩码（bit0=A bit1=B bit2=Z；07=全对）
+ *   [2]     治具完成掩码（EncGen_DoneMask，07=三路都发完）
+ *   [3]     治具超时强停（0=正常 / 1=被超时强停）
+ *   [4..5]  A 期望  [6..7]  A 实测
+ *   [8..9]  B 期望  [10..11] B 实测
+ *   [12..13] Z 期望 [14..15] Z 实测
+ *   实测值 0xFFFF = 没收到 FOC 的 AS:D */
+#define MGR_CMD_ENC_STEP        0x0029u
+#define MGR_ENC_STEP_RESP_LEN     16u
+
+/* 0x002A 三相输出检测（2026-11-17 新增）：起转 → 采三相 → 判 → 停车。
+ * 应答 16 字节：
+ *   [0]     状态（00 通过 / 05 失败 / 0C 采样超时 / 01 忙 / 0B 参数错）
+ *   [1]     判定掩码（bit0 都有输出 / bit1 数值合理 / bit2 没饱和 / bit3 和合理）
+ *   [2..3]  A 相 mV   [4..5]  B 相 mV   [6..7]  C 相 mV
+ *   [8..9]  三相之和 mV
+ *   [10..11] A raw    [12..13] B raw    [14..15] C raw */
+#define MGR_CMD_PH3_TEST        0x002Au
+#define MGR_PH3_TEST_RESP_LEN     16u
 /* 三条"一条命令跑完"（0x0019/0x001A/0x001B）的应答长度 = 各自判据命令的长度 */
 #define MGR_PULSE_TEST_RESP_LEN   PULSE_PACK_RESP_LEN        /* 23B */
 #define MGR_PHASE_TEST_RESP_LEN   MGR_PHASE_JUDGE_RESP_LEN   /* 16B */

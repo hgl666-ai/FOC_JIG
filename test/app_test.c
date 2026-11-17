@@ -2174,7 +2174,7 @@ static void t21_vol_test(void)
     }
 
     /* 2) 6 路都在范围内 → 全部通过（三相灌成一致：1886 码 ≈ 12.0V）*/
-    vol_inject(1886u, 1886u, 1886u, 2048u, 2048u, 3723u);
+    vol_inject(1262u, 1262u, 1262u, 2048u, 2048u, 3723u);
     n = vol_send(seq++);
     CHECK(n > 0u && Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u, "有可解析的应答");
     CHECK(ac == MGR_CMD_VOL_TEST && as_ == (uint16_t)(seq - 1u), "命令与序号回显正确");
@@ -2205,7 +2205,7 @@ static void t21_vol_test(void)
 
     /* 3) A 相明显偏低（三相不一致）→ 只标 A 相为 DEVIATION，整体不合格
      *    1886 码 ≈ 12000mV，但 A 相只灌 50 码 ≈ 320mV */
-    vol_inject(50u, 1886u, 1886u, 2048u, 2048u, 3723u);
+    vol_inject(50u, 1262u, 1262u, 2048u, 2048u, 3723u);
     n = vol_send(seq++);
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_VOL_TEST_RESP_LEN,
           "异常时也回 20 字节");
@@ -2215,7 +2215,7 @@ static void t21_vol_test(void)
     CHECK((d[10] & VOL_CHK_F_OK) != 0u, "C 相仍然 OK");
 
     /* 3b) CUR1 灌成 0（贴底）→ 该路参与判定，必须失败 */
-    vol_inject(1886u, 1886u, 1886u, 0u, 2048u, 3723u);
+    vol_inject(1262u, 1262u, 1262u, 0u, 2048u, 3723u);
     n = vol_send(seq++);
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_VOL_TEST_RESP_LEN,
           "相电流异常也回 20 字节");
@@ -2224,7 +2224,7 @@ static void t21_vol_test(void)
     CHECK((d[16] & VOL_CHK_F_OK) != 0u, "CUR2 仍然 OK（flags 在 d[16]）");
 
     /* 3c) 三相一致但都偏高 → 组判据不报，单路也不报（相电压不看绝对值）*/
-    vol_inject(3773u, 3773u, 3773u, 2048u, 2048u, 3723u);
+    vol_inject(2524u, 2524u, 2524u, 2048u, 2048u, 3723u);
     n = vol_send(seq++);
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_VOL_TEST_RESP_LEN,
           "三相一致也回 20 字节");
@@ -2318,9 +2318,9 @@ static void t22_phase_judge(void)
     /* 灌电压：母线（码 4090 —— **故意不贴边**，因为 phase_chk 把 SAT 当"数据不可用"）、
      * 三相各 12V（码 1861）→ 期望 500‰ × 母线 */
     MEAS_TestInject((meas_id_t)MEAS_CH_V24,  4090u);
-    MEAS_TestInject((meas_id_t)MEAS_CH_PH_A, 1861u);
-    MEAS_TestInject((meas_id_t)MEAS_CH_PH_B, 1861u);
-    MEAS_TestInject((meas_id_t)MEAS_CH_PH_C, 1861u);
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_A, 1262u);
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_B, 1262u);
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_C, 1262u);
     for (int i = 0; i < 600; i++) {
         MEAS_Poll();
     }
@@ -3229,12 +3229,12 @@ static void t30_flow6(void)
         pump(3);
         CHECK(as_sent("AS:MC"), "A2 分支：发 AS:MC 进数编码器模式");
 
-        host_advance(30u); as_inject("AS:MC0\r\n");
+        host_advance(150u); as_inject("AS:MC0\r\n");
         pump(2);                                       /* 进模式 → 开始打脉冲 */
         CHECK(g_enc_rec_cnt[0] == 100u && g_enc_rec_cnt[1] == 100u &&
               g_enc_rec_cnt[2] == 10u,
               "治具打 A=100 B=100 Z=10");
-        CHECK(g_enc_rec_freq[0] == 5000u, "脉冲频率 5kHz");
+        CHECK(g_enc_rec_freq[0] == 1000u, "脉冲频率 1kHz（2026-11-17：5k→1k 加宽 Z 脉宽）");
 
         CHECK(as_sent("AS:ME"), "脉冲发完发 AS:ME 让对面结束并上报");
         as_inject("AS:D,A=100,B=100,Z=10\r\n");
@@ -3260,7 +3260,7 @@ static void t30_flow6(void)
         pump(2);
         host_advance(60u);
         pump(3);
-        host_advance(30u); as_inject("AS:MC0\r\n");
+        host_advance(150u); as_inject("AS:MC0\r\n");
         pump(2);
         pump(4);                                         /* 等脉冲发完 + 发出 AS:ME */
         as_inject("AS:D,A=100,B=100,Z=0\r\n");         /* 没有 Z 的编码器 */
@@ -3284,7 +3284,7 @@ static void t30_flow6(void)
         pump(2);
         host_advance(60u);
         pump(3);
-        host_advance(30u); as_inject("AS:MC0\r\n");
+        host_advance(150u); as_inject("AS:MC0\r\n");
         pump(2);
         pump(4);
         as_inject("AS:D,A=150,B=100,Z=10\r\n");        /* A 相多了 50 个 → 超 ±2% */
@@ -3394,9 +3394,9 @@ static void t31_flow6_pwm(void)
  * 换算：raw = mv × 4095 × k_num / (3300 × k_den)（与 measure.c 的 k_cfg 一致） */
 static void adc_inject_ok(void)
 {
-    MEAS_TestInject((meas_id_t)MEAS_CH_PH_A, 1886u);   /* A 相 12V */
-    MEAS_TestInject((meas_id_t)MEAS_CH_PH_B, 1886u);   /* B 相 12V */
-    MEAS_TestInject((meas_id_t)MEAS_CH_PH_C, 1886u);   /* C 相 12V */
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_A, 1262u);   /* A 相 12V */
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_B, 1262u);   /* B 相 12V */
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_C, 1262u);   /* C 相 12V */
     MEAS_TestInject((meas_id_t)MEAS_CH_V5,   0u);      /* 5V 不判（VOL_CH_SKIP_MASK）*/   /* 5V    (k=3/5)    */
     MEAS_TestInject((meas_id_t)MEAS_CH_V33,  3723u);   /* 3.3V  (k=10/11 -> 引脚 3000mV) */
     MEAS_TestInject((meas_id_t)MEAS_CH_CUR1, 2048u);   /* 1.65V (k=1)      */
@@ -3576,7 +3576,7 @@ static void t36_flow6_enc_timeout(void)
     host_advance(60u);
     pump(3);
     CHECK(as_sent("AS:MC"), "发出 AS:MC");
-    host_advance(30u); as_inject("AS:MC0\r\n");
+    host_advance(150u); as_inject("AS:MC0\r\n");
     pump(2);
     CHECK(g_enc_start_calls > 0u, "治具开始打脉冲");
     /* 之后什么都不注入，等 2 秒超时 */
@@ -3691,7 +3691,7 @@ static void t38_flow6_force(void)
     host_advance(1100u); pump(3);          /* 停车静置 1 秒 → 强制分支生效 */
     CHECK(as_sent("AS:MC"), "**强制后仍然走进步5**（发出 AS:MC）");
 
-    host_advance(30u); as_inject("AS:MC0\r\n");               /* 对面进计数模式 */
+    host_advance(150u); as_inject("AS:MC0\r\n");               /* 对面进计数模式 */
     pump(2);
     CHECK(g_enc_start_calls > 0u, "收到 AS:MC0 之后才开始打脉冲");
     pump(2);                               /* 等脉冲发完 → 发 AS:ME */
@@ -3942,9 +3942,9 @@ static void t42_adc_current_ignored(void)
     printf("\n-- T42 步1 通道表：5V 已移除、两路相电流参与判定 --\n");
 
     /* ① 5 路全合格（24V/10V/CUR1/CUR2/3.3V）→ 步1 通过 */
-    MEAS_TestInject((meas_id_t)MEAS_CH_PH_A, 1886u);   /* A 相 12V（三相一致）*/
-    MEAS_TestInject((meas_id_t)MEAS_CH_PH_B, 1886u);
-    MEAS_TestInject((meas_id_t)MEAS_CH_PH_C, 1886u);
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_A, 1262u);   /* A 相 12V（三相一致，÷11.8 下码值 1262）*/
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_B, 1262u);
+    MEAS_TestInject((meas_id_t)MEAS_CH_PH_C, 1262u);
     MEAS_TestInject((meas_id_t)MEAS_CH_V33,  3723u);   /* 3.3V = 3300mV */
     MEAS_TestInject((meas_id_t)MEAS_CH_CUR1, 2048u);   /* 电流 = 1650mV */
     MEAS_TestInject((meas_id_t)MEAS_CH_CUR2, 2048u);

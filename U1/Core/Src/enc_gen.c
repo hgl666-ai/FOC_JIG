@@ -135,6 +135,8 @@ void EncGen_Init(void)
     HAL_NVIC_EnableIRQ(ENC_IRQn);
 }
 
+static uint16_t s_half;     /* 半周期 tick 数（= clk/(2f)），ARR/CCR 都按它算 */
+
 uint8_t EncGen_Start(const enc_plan_t *p)
 {
     uint32_t f_min = 0xFFFFFFFFu;
@@ -175,7 +177,23 @@ uint8_t EncGen_Start(const enc_plan_t *p)
 
     /* ── 时基与通道 ── */
     ENC_TIM->PSC  = s_psc;
-    ENC_TIM->ARR  = 0xFFFFu;                /* 翻转模式靠 CCR 定频，ARR 拉满 */
+    /* ⚠ 2026-11-17 修：翻转模式的规则是 **CNT == CCR 时翻转**，而 CNT 只在
+     *   0~ARR 之间跑。原来把 ARR 拉满 0xFFFF（65536 tick），于是每 65536 tick
+     *   才匹配一次 CCR → 实际频率 = clk/(2×65536) ≈ 550Hz，比目标 5kHz 慢了 9 倍
+     *   （真板实测：0x0012 超时、A/B 翻转 336 次、Z 只翻 2 次）。
+     *   正确做法：ARR = 半周期-1（一个 ARR 周期 = 翻转一次的间隔），
+     *   CCR = 半周期/2（周期内某个点翻转，决定相位）。
+     *   于是翻转 200 次 = 200 × 半周期 = 100 个完整脉冲 ✓
+     *   ⚠ 限制：三路共用同一个 ARR → **三路频率必须相同**（现在就都是 5kHz）。 */
+    {
+        uint16_t half = (uint16_t)EncPlan_CcrFor(s_clk, f_min);   /* = clk/(2f) */
+
+        if (half < 3u) {
+            half = 3u;
+        }
+        ENC_TIM->ARR = (uint16_t)(half - 1u);
+        s_half       = half;                /* 给下面填 CCR 用 */
+    }
     ENC_TIM->CNT  = 0u;
 
     /* OCxM = toggle；清掉 CCxS/CCxPE，确保是输出比较 */
@@ -183,9 +201,10 @@ uint8_t EncGen_Start(const enc_plan_t *p)
     ENC_TIM->CCMR2 = (uint16_t)(ENC_CCMR_TOGGLE_CH3);
 
     /* CCR 各填各的 → 三路频率互不干扰；不发的通道 CCR 无所谓 */
-    ENC_TIM->CCR1 = (p->cnt_z > 0u) ? EncPlan_CcrFor(s_clk, p->freq_z_hz) : 0u;
-    ENC_TIM->CCR2 = (p->cnt_b > 0u) ? EncPlan_CcrFor(s_clk, p->freq_b_hz) : 0u;
-    ENC_TIM->CCR3 = (p->cnt_a > 0u) ? EncPlan_CcrFor(s_clk, p->freq_a_hz) : 0u;
+    /* 翻转点都放在半周期中间；频率由 ARR 决定（三路同频，见上面的说明） */
+    ENC_TIM->CCR1 = (p->cnt_z > 0u) ? (uint16_t)(s_half / 2u) : 0u;
+    ENC_TIM->CCR2 = (p->cnt_b > 0u) ? (uint16_t)(s_half / 2u) : 0u;
+    ENC_TIM->CCR3 = (p->cnt_a > 0u) ? (uint16_t)(s_half / 2u) : 0u;
 
     /* 只使能要发的那几路输出（极性高：先输出低，第一次翻转拉高） */
     s_ccer = 0u;

@@ -25,7 +25,8 @@ typedef enum {
     APP_STATE_RUN            /* 0x0010 一键全流程编排中 (需要 JIG_DUT_LINK=1) */,
     APP_STATE_DUT_RAW        /* 0x001F 给 DUT 发原始字节、等它回字的这段窗口 (appended 2026-11-06) */,
     APP_STATE_ASCII          /* PC 串口助手里手敲 AS:xxx 的这条命令行 (appended 2026-11-09) */,
-    APP_STATE_FLOW6          /* 0x0022 六步测试流程进行中 (appended 2026-11-09) */
+    APP_STATE_FLOW6          /* 0x0022 六步测试流程进行中 (appended 2026-11-09) */,
+APP_STATE_PH3            /* 0x002A 三相输出检测：起转/采样/停车 (appended 2026-11-17) */
 } APP_State_t;
 
 extern APP_State_t app_state;

@@ -100,9 +100,9 @@ static void inject_nominal(void)
     MEAS_TestInject(MEAS_CH_V10,  mv_to_counts(10000.0, 47.0 / 371.0));
     MEAS_TestInject(MEAS_CH_V5,   mv_to_counts(5000.0, 3.0 / 5.0));
     MEAS_TestInject(MEAS_CH_V33,  mv_to_counts(3300.0, 10.0 / 11.0));
-    MEAS_TestInject(MEAS_CH_PH_A, mv_to_counts(6000.0, 1.0 / 8.0));
-    MEAS_TestInject(MEAS_CH_PH_B, mv_to_counts(6000.0, 1.0 / 8.0));
-    MEAS_TestInject(MEAS_CH_PH_C, mv_to_counts(6000.0, 1.0 / 8.0));
+    MEAS_TestInject(MEAS_CH_PH_A, mv_to_counts(6000.0, 5.0 / 59.0));
+    MEAS_TestInject(MEAS_CH_PH_B, mv_to_counts(6000.0, 5.0 / 59.0));
+    MEAS_TestInject(MEAS_CH_PH_C, mv_to_counts(6000.0, 5.0 / 59.0));
     MEAS_TestInject(MEAS_CH_CUR1, mv_to_counts(1500.0, 1.0));
     MEAS_TestInject(MEAS_CH_CUR2, mv_to_counts(1500.0, 1.0));
 }
@@ -124,9 +124,9 @@ int main(void)
             { MEAS_CH_V10,  10000, 47.0 / 371.0 },
             { MEAS_CH_V5,    5000, 3.0 / 5.0 },
             { MEAS_CH_V33,   3300, 10.0 / 11.0 },
-            { MEAS_CH_PH_A, 24000, 1.0 / 8.0 },
-            { MEAS_CH_PH_B, 12000, 1.0 / 8.0 },
-            { MEAS_CH_PH_C,     0, 1.0 / 8.0 },
+            { MEAS_CH_PH_A, 24000, 5.0 / 59.0 },   /* 32.4k/3k 分压 */
+            { MEAS_CH_PH_B, 12000, 5.0 / 59.0 },
+            { MEAS_CH_PH_C,     0, 5.0 / 59.0 },
             { MEAS_CH_CUR1,  1000, 1.0 },
             { MEAS_CH_CUR2,  2000, 1.0 },
         };

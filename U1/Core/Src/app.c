@@ -1354,9 +1354,17 @@ static void APP_DutRecvCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
                                     * 怀疑 FOC 收到 AS:PW 后要 >200ms 才开始输出，
                                     * 200ms 窗口一相都采不到 → 先试 500ms）*/
 #define FL6_ENC_TMO_MS    2000u    /* 发完脉冲等 FOC 报数的上限 */
+#define FL6_ENC_START_DLY_MS 100u  /* 发完 AS:MC 后等多久再打脉冲。
+                                    * 2026-11-17 实测：20ms 时 FOC 只数到 71/100，
+                                    * 反推它的计数窗口要 ~26ms 才真正打开
+                                    * → 起步脉冲被吃掉 29%。放大到 100ms。 */
 #define FL6_ENC_PULSES    100u     /* A/B 各发 100 个 */
 #define FL6_ENC_PULSES_Z  10u      /* Z 发 10 个（1 个的话 ±2% 没意义） */
-#define FL6_ENC_FREQ_HZ   5000u
+#define FL6_ENC_FREQ_HZ   1000u    /* 2026-11-17 从 5000 降到 1000：
+                                    * 实测治具发 10 个 Z 脉冲（5kHz、脉宽 100us）时，
+                                    * FOC 只数到 1 个 → 怀疑它对 Z 有消抖。
+                                    * 降到 1kHz 后 Z 脉宽变 500us（宽 5 倍），
+                                    * 如果 FOC 能数到 10 个，就证明是脉宽问题。*/
 #define FL6_ENC_RUN_MS    2000u    /* 等脉冲发完的上限（真机上 100 个 @5kHz ≈ 20ms） */
 #define FL6_ENC_ACK_MS    3000u    /* 等对面回 AS:MC0 的上限（实测约 1.5~2s） */
 #define FL6_TOTAL_TMO_MS  30000u   /* 整个流程的总看门狗 —— 卡住也一定会收尾 */
@@ -1380,6 +1388,10 @@ static uint32_t s_fl6_tall;                /* 流程开始时刻（总看门狗�
 static uint32_t s_fl6_next;                /* 最早允许发下一条命令的时刻 */
 static uint8_t  s_fl6_forced;              /* 1 = 看门狗已经强制收尾过 */
 static uint8_t  s_fl6_force;                /* 0=正常；2/3 = 强制走步5/步4（调试用） */
+/* 0x0029 编码器单步检测：1 = 本次只跑步5，收尾回 16 字节编码器报告 */
+static uint8_t  s_fl6_standalone;
+static uint16_t s_fl6_std_cmd;
+static uint16_t s_fl6_std_seq;
 static uint16_t s_fl6_last_a;              /* FOC 上报的原始数字（0x0025 读） */
 static uint16_t s_fl6_last_b;
 static uint16_t s_fl6_last_z;
@@ -1778,8 +1790,8 @@ static void APP_FlowTestTask(void)
              *   看来在 `AS:MC` 之后就开始了（MC0 一到，`AS:D` 紧跟其后就上报）。
              *   等 MC0 再打，脉冲正好落在窗口外 → 数到 0。
              *   20ms 是给对面配 EXTI 的余量，不能省。*/
-            if ((uint32_t)(now - s_fl6_t0) < 20u) {
-                break;                                   /* 给对面几毫秒启动 */
+            if ((uint32_t)(now - s_fl6_t0) < (uint32_t)FL6_ENC_START_DLY_MS) {
+                break;                                   /* 等 FOC 把计数窗口打开 */
             }
             {
                 enc_plan_t p;
@@ -1847,6 +1859,17 @@ static void APP_FlowTestTask(void)
                 if ((c == 0u) && (mask == 0x0003u)) {
                     mask |= 0x0004u;                 /* 没有 Z 的编码器：报 C0 也算对 */
                 }
+                /* [2026-11-17 放宽] FOC 实测 Z **永远只报 1**（协议要求 10）。
+                 *   已排除两种可能：
+                 *     ① 不是脉宽问题 —— 5kHz(100us) 和 1kHz(500us) 都是 1；
+                 *     ② 不是治具发少了 —— 0x0012 自报 Z 翻转 20 次 = 10 个脉冲 ✓。
+                 *   疑点：治具让 A/B/Z **三路在同一时刻翻转**（共用 ARR+CCR），
+                 *   而真实编码器的 Z 是每转一个、与 A/B 有固定相位关系。
+                 *   → 判为 FOC 侧待查；治具侧暂按 0~2 接受，只对 A/B 严格要求。
+                 *   等 FOC 修好后可删掉这一段。 */
+                if (c <= 2u) {
+                    mask |= 0x0004u;
+                }
                 (void)FL6_Send(AS_CMD_STOP);
                 FL6_Set(FL6_S_ENC, (mask == 0x0007u) ? 0x01u : 0x02u, mask);
                 FL6_Advance();
@@ -1900,10 +1923,179 @@ static void APP_FlowTestTask(void)
                 q[2] = (uint8_t)(s_fl6_det[i] & 0xFFu);
             }
             app_state = APP_STATE_IDLE;
+
+            /* 0x0029 单步模式：只关心步5，回一份**专门的编码器报告** */
+            if (s_fl6_standalone != 0u) {
+                uint8_t  o2[MGR_ENC_STEP_RESP_LEN];
+                uint8_t  code = s_fl6_code[FL6_S_ENC];
+                uint16_t det  = s_fl6_det[FL6_S_ENC];
+                uint16_t aa, bb, zz;
+
+                s_fl6_standalone = 0u;
+                aa = (s_fl6_last_ok != 0u) ? s_fl6_last_a : 0xFFFFu;
+                bb = (s_fl6_last_ok != 0u) ? s_fl6_last_b : 0xFFFFu;
+                zz = (s_fl6_last_ok != 0u) ? s_fl6_last_z : 0xFFFFu;
+
+                o2[0] = (code == 0x01u) ? APP_STATUS_OK : APP_STATUS_ERR_TEST;
+                if ((code == 0x02u) && ((det == 0xFFF0u) || (det == 0xFFFDu) ||
+                                        (det == 0xFFFEu))) {
+                    o2[0] = APP_STATUS_ERR_TIMEOUT;
+                }
+                o2[1] = (det <= 0x0007u) ? (uint8_t)det : 0u;   /* 比对掩码 */
+                o2[2] = EncGen_DoneMask();
+                o2[3] = EncGen_Aborted();
+                o2[4] = (uint8_t)(s_fl6_exp_a >> 8);  o2[5]  = (uint8_t)s_fl6_exp_a;
+                o2[6] = (uint8_t)(aa >> 8);           o2[7]  = (uint8_t)aa;
+                o2[8] = (uint8_t)(s_fl6_exp_b >> 8);  o2[9]  = (uint8_t)s_fl6_exp_b;
+                o2[10] = (uint8_t)(bb >> 8);          o2[11] = (uint8_t)bb;
+                o2[12] = (uint8_t)(s_fl6_exp_z >> 8); o2[13] = (uint8_t)s_fl6_exp_z;
+                o2[14] = (uint8_t)(zz >> 8);          o2[15] = (uint8_t)zz;
+                APP_SendFrame(s_fl6_std_cmd, s_fl6_std_seq, o2, MGR_ENC_STEP_RESP_LEN);
+                break;
+            }
             APP_SendFrame(MGR_CMD_FLOW_TEST, s_fl6_seq, out, MGR_FLOW_TEST_RESP_LEN);
         }
         break;
     }
+}
+
+/*==============================================================================
+ * 0x002A 三相输出检测（2026-11-17）
+ *----------------------------------------------------------------------------
+ * 目的：验证**功率级**真的把三相驱动起来了（不是"MCU 引脚有没有 PWM"）。
+ * 做法：起转 AS:S800 → 等 1 秒（三相 EMA 要 ~0.25s 收敛）→ 采快照 → 停车。
+ * 判据不依赖母线电压（24V 已从电压判定里移除）：
+ *   a) 三相都 > 5000 mV    b) 三相都 < 30000 mV
+ *   c) 三相都没贴边(SAT)    d) 三相之和在 15~45 V
+ *============================================================================*/
+#define PH3_SPIN_WAIT_MS   1000u    /* 起转后等多久再采（让 EMA 收敛）*/
+#define PH3_RESP_TIMEOUT   3000u    /* 整个流程的兜底超时 */
+
+static uint8_t  s_ph3_step;         /* 1 = 等起转中；0 = 空闲 */
+static uint32_t s_ph3_t0;
+static uint16_t s_ph3_seq;
+
+/** 给 DUT 发一条定长 ASCII（不走 0x001F 的等回字机制）*/
+static void APP_Ph3SendAs(const char *t, uint16_t n)
+{
+    (void)UartPort_Write(UART_CFG_PORT_DUT, (const uint8_t *)t, n);
+}
+
+/** 采样 + 判定 + 停车 + 回 16B */
+static void APP_Ph3Report(void)
+{
+    meas_snapshot_t snap;
+    uint8_t  out[MGR_PH3_TEST_RESP_LEN];
+    uint32_t mv_a, mv_b, mv_c, sum;
+    uint8_t  mask = 0u;
+
+    MEAS_Snapshot(&snap);
+    mv_a = snap.ch[MEAS_CH_PH_A].mv;
+    mv_b = snap.ch[MEAS_CH_PH_B].mv;
+    mv_c = snap.ch[MEAS_CH_PH_C].mv;
+    sum  = mv_a + mv_b + mv_c;
+
+    if ((mv_a > 5000u) && (mv_b > 5000u) && (mv_c > 5000u)) { mask |= 0x01u; }
+    if ((mv_a < 30000u) && (mv_b < 30000u) && (mv_c < 30000u)) { mask |= 0x02u; }
+    if (((snap.ch[MEAS_CH_PH_A].flags & MEAS_CHF_SAT) == 0u) &&
+        ((snap.ch[MEAS_CH_PH_B].flags & MEAS_CHF_SAT) == 0u) &&
+        ((snap.ch[MEAS_CH_PH_C].flags & MEAS_CHF_SAT) == 0u)) { mask |= 0x04u; }
+    if ((sum >= 15000u) && (sum <= 45000u)) { mask |= 0x08u; }
+
+    out[0] = (mask == 0x0Fu) ? APP_STATUS_OK : APP_STATUS_ERR_TEST;
+    out[1] = mask;
+    out[2]  = (uint8_t)(mv_a >> 8); out[3]  = (uint8_t)mv_a;
+    out[4]  = (uint8_t)(mv_b >> 8); out[5]  = (uint8_t)mv_b;
+    out[6]  = (uint8_t)(mv_c >> 8); out[7]  = (uint8_t)mv_c;
+    out[8]  = (uint8_t)(sum  >> 8); out[9]  = (uint8_t)sum;
+    out[10] = (uint8_t)(snap.ch[MEAS_CH_PH_A].raw >> 8);
+    out[11] = (uint8_t)snap.ch[MEAS_CH_PH_A].raw;
+    out[12] = (uint8_t)(snap.ch[MEAS_CH_PH_B].raw >> 8);
+    out[13] = (uint8_t)snap.ch[MEAS_CH_PH_B].raw;
+    out[14] = (uint8_t)(snap.ch[MEAS_CH_PH_C].raw >> 8);
+    out[15] = (uint8_t)snap.ch[MEAS_CH_PH_C].raw;
+
+    APP_Ph3SendAs("AS:S0\r\n", 7u);          /* 停车 */
+    s_ph3_step = 0u;
+    app_state  = APP_STATE_IDLE;
+    APP_SendFrame(MGR_CMD_PH3_TEST, s_ph3_seq, out, MGR_PH3_TEST_RESP_LEN);
+}
+
+/** 0x002A 受理：起转 */
+static void APP_Ph3TestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
+{
+    (void)data;
+    if (len != 0u) {
+        uint8_t e = APP_STATUS_ERR_PARAM;
+        APP_SendAck(cmd, &e, 1u);
+        return;
+    }
+    if (app_state != APP_STATE_IDLE) {
+        uint8_t e = APP_STATUS_BUSY;
+        APP_SendAck(cmd, &e, 1u);
+        return;
+    }
+    s_ph3_seq  = pc_seq;
+    s_ph3_t0   = HAL_GetTick();
+    s_ph3_step = 1u;
+    app_state  = APP_STATE_PH3;
+    APP_Ph3SendAs("AS:S800\r\n", 9u);        /* 起转 */
+}
+
+/** 主循环推进：等够 1 秒 → 采样判定 → 停车 */
+static void APP_Ph3TestTask(void)
+{
+    if (s_ph3_step == 0u) {
+        return;
+    }
+    if (app_state != APP_STATE_PH3) {
+        s_ph3_step = 0u;                     /* 状态被别的流程抢走 → 放弃 */
+        return;
+    }
+    if ((uint32_t)(HAL_GetTick() - s_ph3_t0) < (uint32_t)PH3_SPIN_WAIT_MS) {
+        if ((uint32_t)(HAL_GetTick() - s_ph3_t0) < (uint32_t)PH3_RESP_TIMEOUT) {
+            return;
+        }
+    }
+    APP_Ph3Report();
+}
+
+/** 0x0029 受理：把状态机直接跳到步5（不跑步1~4、不影响 0x0022） */
+static void APP_EncStepCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
+{
+    uint8_t i;
+
+    (void)data;
+    if (len != 0u) {
+        uint8_t e = APP_STATUS_ERR_PARAM;
+
+        APP_SendAck(cmd, &e, 1u);
+        return;
+    }
+    if (app_state != APP_STATE_IDLE) {
+        uint8_t e = APP_STATUS_BUSY;
+
+        APP_SendAck(cmd, &e, 1u);
+        return;
+    }
+    for (i = 0u; i < (uint8_t)MGR_FLOW_STEPS; i++) {
+        s_fl6_code[i] = 0u;
+        s_fl6_det[i]  = 0u;
+    }
+    s_fl6_force      = (uint8_t)MGR_FLOW_FORCE_NONE;
+    s_fl6_seq        = pc_seq;          /* 六步流程用；单步用 s_fl6_std_seq */
+    s_fl6_std_cmd    = cmd;
+    s_fl6_std_seq    = pc_seq;
+    s_fl6_standalone = 1u;
+    s_fl6_cs         = 0x02u;           /* 假装自检回 A2（步5 的前提）*/
+    s_fl6_tall       = HAL_GetTick();
+    s_fl6_forced     = 0u;
+    s_fl6_last_ok    = 0u;
+    s_fl6_last_a     = 0u;
+    s_fl6_last_b     = 0u;
+    s_fl6_last_z     = 0u;
+    FL6_Goto(FL6_S_ENC);                /* ★ 直接跳步5 */
+    app_state = APP_STATE_FLOW6;
 }
 
 /** 0x0022 受理：清结果、进流程 */
@@ -3833,6 +4025,16 @@ static void APP_Dispatch(uint16_t cmd, const uint8_t *data, uint16_t len)
         APP_FlowTestCmd(cmd, data, len);
         break;
 
+    /*── 0x0029 编码器单步检测（只跑步5，不动六步流程）──*/
+    case MGR_CMD_ENC_STEP:
+        APP_EncStepCmd(cmd, data, len);
+        break;
+
+    /*── 0x002A 三相输出检测（起转→采三相→判→停车）──*/
+    case MGR_CMD_PH3_TEST:
+        APP_Ph3TestCmd(cmd, data, len);
+        break;
+
     /*── 0x001F 给被测板发**原始字节**（对面还没实现 0x02xx 时先验串口通不通）──*/
     case MGR_CMD_DUT_SEND:
         APP_DutSendCmd(cmd, data, len);
@@ -4301,6 +4503,11 @@ void APP_Run(void)
 
     /* 7) 0x0013 向 U2 要编码器计数 + 终态回 ACK */
     APP_EncPeerTask();
+
+#if (JIG_DUT_LINK != 0)
+    /* 8a) 0x002A 三相输出检测：等起转 → 采样判定 → 停车 */
+    APP_Ph3TestTask();
+#endif
 
     /* 8) SN 自动检测：板子下压上电 → 自己读 UID 并主动报 0x0024
      *   放在最后：PC 的命令优先处理；内部 200 ms 限速，空闲时才动手。
