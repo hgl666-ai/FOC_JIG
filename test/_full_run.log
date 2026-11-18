@@ -24,11 +24,11 @@
 ============================================================
  2/12  Full-chain test (PC frame to target flash, all simulated)
 ============================================================
-D:/Project/FOC_JIG/test/app_test.c:3832:13: warning: 't41_swd_speed' defined but not used [-Wunused-function]
- 3832 | static void t41_swd_speed(void)
+D:/Project/FOC_JIG/test/app_test.c:3814:13: warning: 't41_swd_speed' defined but not used [-Wunused-function]
+ 3814 | static void t41_swd_speed(void)
       |             ^~~~~~~~~~~~~
-D:/Project/FOC_JIG/test/app_test.c:3793:13: warning: 't40_flash_slots' defined but not used [-Wunused-function]
- 3793 | static void t40_flash_slots(void)
+D:/Project/FOC_JIG/test/app_test.c:3775:13: warning: 't40_flash_slots' defined but not used [-Wunused-function]
+ 3775 | static void t40_flash_slots(void)
       |             ^~~~~~~~~~~~~~~
 D:/Project/FOC_JIG/test/app_test.c:1123:13: warning: 'pulse_fake_reset' defined but not used [-Wunused-function]
  1123 | static void pulse_fake_reset(void)
@@ -102,7 +102,7 @@ D:/Project/FOC_JIG/test/app_test.c:1107:13: warning: 'pulse_fake_set' defined bu
 
 -- T20 0x0014 相电流检测（完整流程）--
 
--- T21 0x0015 电压检测（6 路：三相/两路电流/3.3V）--
+-- T21 0x0015 电压检测（3 路：两路相电流 + 3.3V；三相已移交 0x002A）--
 
 -- T18 0x0012 编码器脉冲发生 --
 
@@ -157,7 +157,7 @@ D:/Project/FOC_JIG/test/app_test.c:1107:13: warning: 'pulse_fake_set' defined bu
 
 -- T42 步1 通道表：5V 已移除、两路相电流参与判定 --
 
-=== 共 666 项检查, 失败 0 项 ===
+=== 共 660 项检查, 失败 0 项 ===
 [PASS] app_test (DUT link mode)
 
     --- app_test in BENCH mode: DUT link on USART3, no U2 (jig_mode.h 3.4.1) ---
@@ -187,7 +187,7 @@ D:/Project/FOC_JIG/test/app_test.c:1107:13: warning: 'pulse_fake_set' defined bu
 
 -- T20 0x0014 相电流检测（完整流程）--
 
--- T21 0x0015 电压检测（6 路：三相/两路电流/3.3V）--
+-- T21 0x0015 电压检测（3 路：两路相电流 + 3.3V；三相已移交 0x002A）--
 
 -- T18 0x0012 编码器脉冲发生 --
 
@@ -242,7 +242,7 @@ D:/Project/FOC_JIG/test/app_test.c:1107:13: warning: 'pulse_fake_set' defined bu
 
 -- T42 步1 通道表：5V 已移除、两路相电流参与判定 --
 
-=== 共 666 项检查, 失败 0 项 ===
+=== 共 660 项检查, 失败 0 项 ===
 [PASS] app_test (bench mode: DUT link, no U2)
 
 ============================================================
@@ -1029,7 +1029,7 @@ D:/Project/FOC_JIG/test/app_test.c:1107:13: warning: 'pulse_fake_set' defined bu
 === foc_jig_tool Ӧ������Լ죨����ҪӲ����===
 
 
-=== �� 49 �ʧ�� 0 �� ===
+=== �� 46 �ʧ�� 0 �� ===
 [PASS] foc_jig_tool reply decoders
 
 ============================================================
@@ -1060,7 +1060,7 @@ D:/Project/FOC_JIG/test/app_test.c:1107:13: warning: 'pulse_fake_set' defined bu
 
     --- Keil build U1 ---
     (UV4 is a GUI app; waiting for the build to finish...)
-Program Size: Code=52692 RO-data=760 RW-data=864 ZI-data=13632  
+Program Size: Code=52548 RO-data=744 RW-data=864 ZI-data=13624  
 "U1\U1.axf" - 0 Error(s), 0 Warning(s).
 [PASS] Keil build U1: 0 Error, 0 Warning
 

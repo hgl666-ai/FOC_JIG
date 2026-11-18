@@ -109,7 +109,7 @@
  *   → 本命令只管 3.3V + 两路相电流（与 FOC 动作无关，结果稳定可重复）；
  *     三相交给 0x002A。
  * ⚠ 相电压的读数**照常上报**（上位机仍能看到 mV），只是不再判合格/不合格。*/
-#define VOL_CH_SKIP_MASK     0x07u    /* bit0/1/2 = PHA/PHB/PHC 不判 */
+#define VOL_CH_SKIP_MASK     0x00u    /* 3 路（CUR1/CUR2/3.3V）全部参与判定 */
 #endif
 
 /* 三相电压的最大允许压差（mV）。

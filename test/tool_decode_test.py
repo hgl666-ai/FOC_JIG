@@ -66,18 +66,16 @@ def run(fn, *a, **kw):
 
 # ─────────────────────────── 造应答 ───────────────────────────
 def mk_vol_v2():
-    """0x0015 应答 20B：状态 + 通道数 + 6×(mV u16, 旗标 u8)
+    """0x0015 应答 11B：状态 + 通道数 + 3x(mV u16, 旗标 u8)
 
-    2026-11-17 改：固件从"9 路 × 5 字节"（治具值 + DUT 值 + 旗标）
-    改成"**6 路 × 3 字节**"（只有治具自己的读数，差值由上位机自己算）。
-    顺序：A 相 / B 相 / C 相 / 相电流1 / 相电流2 / 3.3V
+    2026-11-18：三相（A/B/C）已从本命令移出（交给 0x002A），
+    所以只剩 CUR1 / CUR2 / 3.3V 三路。
     """
-    vals = [(340, 0x01), (11168, 0x01), (299, 0x01),
-            (1646, 0x01), (1647, 0x01), (3287, 0x01)]
+    vals = [(1646, 0x01), (1647, 0x01), (3287, 0x01)]
     d = bytes([0x00, len(vals)])
     for mv, f in vals:
         d += be16(mv) + bytes([f])
-    assert len(d) == 20, len(d)
+    assert len(d) == 11, len(d)
     return d
 
 
@@ -167,12 +165,9 @@ def main():
     # ① 0x0015 电压
     link = FakeLink({T.CMD_VOL_TEST: mk_vol_v2()})
     out = run(T.do_vol, link)
-    check("340 mV" in out, "电压：ch0 A 相 = 340 mV")
-    check("11.168 V" in out, "电压：ch1 B 相 = 11.168 V")
-    check("299 mV" in out, "电压：ch2 C 相 = 299 mV")
-    check("1.646 V" in out, "电压：ch3 相电流1 = 1.646 V")
-    check("3.287 V" in out, "电压：ch5 3.3V = 3.287 V")
-    check("三相一致性" in out, "电压：说明里讲了三相一致性判据")
+    check("1.646 V" in out, "电压：ch0 相电流1 = 1.646 V")
+    check("1.647 V" in out, "电压：ch1 相电流2 = 1.647 V")
+    check("3.287 V" in out, "电压：ch2 3.3V = 3.287 V")
     check(link.seen[0][0] == T.CMD_VOL_TEST and link.seen[0][1] == b"",
           "电压：请求是 LEN=0 的 0x0015")
 

@@ -2166,7 +2166,7 @@ static void t21_vol_test(void)
     uint16_t n, ac, as_, dlen;
     uint16_t seq = 0x0700u;
 
-    printf("\n-- T21 0x0015 电压检测（6 路：三相/两路电流/3.3V）--\n");
+    printf("\n-- T21 0x0015 电压检测（3 路：两路相电流 + 3.3V；三相已移交 0x002A）--\n");
 
     /* 1) 这条命令不需要参数 → 带了参数就是 0B */
     {
@@ -2180,70 +2180,52 @@ static void t21_vol_test(void)
               && dlen == 1u && d[0] == 0x0Bu, "带了参数 → 0B ERR_PARAM");
     }
 
-    /* 2) 6 路都在范围内 → 全部通过（三相灌成一致：1886 码 ≈ 12.0V）*/
+    /* 2) 3 路都在范围内 → 全部通过
+     *    2026-11-18：三相已从本命令移出（交给 0x002A），只剩 CUR1 / CUR2 / 3.3V。
+     *    新布局：[0]状态 [1]路数 | [2..4]CUR1 | [5..7]CUR2 | [8..10]3.3V */
     vol_inject(1262u, 1262u, 1262u, 2048u, 2048u, 3723u);
     n = vol_send(seq++);
     CHECK(n > 0u && Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u, "有可解析的应答");
     CHECK(ac == MGR_CMD_VOL_TEST && as_ == (uint16_t)(seq - 1u), "命令与序号回显正确");
-    CHECK(dlen == MGR_VOL_TEST_RESP_LEN, "应答 17 字节");
-    CHECK(d[0] == APP_STATUS_OK, "6 路都在范围内 → 状态 OK");
-    CHECK(d[1] == MGR_VOL_LOCAL_CH_COUNT, "通道数 = 6");
+    CHECK(dlen == MGR_VOL_TEST_RESP_LEN, "应答 11 字节（2 + 3×3）");
+    CHECK(d[0] == APP_STATUS_OK, "3 路都在范围内 → 状态 OK");
+    CHECK(d[1] == MGR_VOL_LOCAL_CH_COUNT, "通道数 = 3");
     {
         uint8_t i, all_ok = 1u;
         for (i = 0u; i < (uint8_t)MGR_VOL_LOCAL_CH_COUNT; i++) {
-            uint8_t f = d[4u + ((uint16_t)i * MGR_VOL_CH_ITEM_LEN)];
+            uint8_t f = d[2u + ((uint16_t)i * MGR_VOL_CH_ITEM_LEN) + 2u];
             if ((f & VOL_CHK_F_OK) == 0u) {
                 all_ok = 0u;
             }
         }
-        CHECK(all_ok == 1u, "六路旗标都是 OK");
+        CHECK(all_ok == 1u, "三路旗标都是 OK");
     }
-    /* 相电压三相一致 → 三个都 OK（PHA[2..4] PHB[5..7] PHC[8..10]）*/
-    CHECK((d[4] & VOL_CHK_F_OK) != 0u && (d[7] & VOL_CHK_F_OK) != 0u
-          && (d[10] & VOL_CHK_F_OK) != 0u, "三相一致 → 三个都 OK");
-    /* CUR1 在 [11..13]、CUR2 在 [14..16] */
     {
-        uint16_t c1 = (uint16_t)((d[11] << 8) | d[12]);
-        uint16_t c2 = (uint16_t)((d[14] << 8) | d[15]);
+        uint16_t c1 = (uint16_t)((d[2] << 8) | d[3]);
+        uint16_t c2 = (uint16_t)((d[5] << 8) | d[6]);
+        uint16_t v3 = (uint16_t)((d[8] << 8) | d[9]);
 
         CHECK(c1 >= 1600u && c1 <= 1700u, "CUR1 读数 ≈ 1650mV");
         CHECK(c2 >= 1600u && c2 <= 1700u, "CUR2 读数 ≈ 1650mV");
+        CHECK(v3 >= 3200u && v3 <= 3400u, "3.3V 读数 ≈ 3300mV");
     }
 
-    /* 3) A 相明显偏低 —— 但**三相已经不在本命令里判了**（VOL_CH_SKIP_MASK=0x07）。
-     *    2026-11-18 策略调整：FOC 上电会自己动一下电机、运行时也在 PWM，
-     *    三相本来就不相等，"≤300mV 一致性"永远过不了 → 三相判据移交 0x002A。
-     *    本命令只保证"读数照常上报"和"三相恒报 OK"。*/
-    vol_inject(50u, 1262u, 1262u, 2048u, 2048u, 3723u);
+    /* 3) 相电压**完全不参与**本命令（表里已经没有它们了）：把三相灌成乱七八糟，
+     *    本命令的结果也必须不受影响。*/
+    vol_inject(50u, 4095u, 1u, 2048u, 2048u, 3723u);
     n = vol_send(seq++);
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_VOL_TEST_RESP_LEN,
-          "异常时也回 20 字节");
-    CHECK(d[0] == APP_STATUS_OK, "三相不参与判定 → 状态仍是 00");
-    CHECK((d[4] & VOL_CHK_F_OK) != 0u, "A 相恒为 OK（不判）");
-    CHECK((d[7] & VOL_CHK_F_OK) != 0u, "B 相恒为 OK（不判）");
-    CHECK((d[10] & VOL_CHK_F_OK) != 0u, "C 相恒为 OK（不判）");
-    {   /* 读数照常上报（A 灌 50 码 → 约 475mV），三个值都写进应答 */
-        uint16_t va2 = (uint16_t)((d[2] << 8) | d[3]);
-        uint16_t vb2 = (uint16_t)((d[5] << 8) | d[6]);
-        CHECK(va2 < 1000u && vb2 > 10000u,
-              "三相读数照常上报（A 低、B 高），只是不判");
-    }
+          "相电压乱灌也回 11 字节");
+    CHECK(d[0] == APP_STATUS_OK, "相电压再离谱也不影响本命令（不在表里）");
 
-    /* 3b) CUR1 灌成 0（贴底）→ 该路参与判定，必须失败 */
+    /* 3b) CUR1 灌成 0（贴底）→ 该路参与判定，必须失败（CUR1 mV 在 [2..3]、旗标 d[4]）*/
     vol_inject(1262u, 1262u, 1262u, 0u, 2048u, 3723u);
     n = vol_send(seq++);
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_VOL_TEST_RESP_LEN,
-          "相电流异常也回 20 字节");
+          "相电流异常也回 11 字节");
     CHECK(d[0] == APP_STATUS_ERR_TEST, "CUR1 贴底 → 状态 05");
-    CHECK((d[13] & VOL_CHK_F_OK) == 0u, "CUR1 那一路判不合格（flags 在 d[13]）");
-    CHECK((d[16] & VOL_CHK_F_OK) != 0u, "CUR2 仍然 OK（flags 在 d[16]）");
-
-    /* 3c) 三相一致但都偏高 → 组判据不报，单路也不报（相电压不看绝对值）*/
-    vol_inject(2524u, 2524u, 2524u, 2048u, 2048u, 3723u);
-    n = vol_send(seq++);
-    CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_VOL_TEST_RESP_LEN,
-          "三相一致也回 20 字节");
-    CHECK(d[0] == APP_STATUS_OK, "三相一致（哪怕都 24V）→ 判通过");
+    CHECK((d[4] & VOL_CHK_F_OK) == 0u, "CUR1 那一路判不合格（旗标 d[4]）");
+    CHECK((d[7] & VOL_CHK_F_OK) != 0u, "CUR2 仍然 OK（旗标 d[7]）");
 
     /* 4) 不依赖 DUT：把假 DUT 设成不吭声，命令照样立刻返回 */
     s_dut_quiet = 1u;
@@ -3997,7 +3979,7 @@ static void t42_adc_current_ignored(void)
     host_advance(1100u); pump(3);
     CHECK(f6_wait(d, &dlen) != 0, "第二轮：给出报告");
     CHECK(d[3] == 0x02u, "步1(ADC)：CUR1 贴底 → 失败");
-    CHECK(((uint16_t)((d[4] << 8) | d[5])) == 3u, "步1 detail = 3（CUR1 在新表里的下标）");
+    CHECK(((uint16_t)((d[4] << 8) | d[5])) == 0u, "步1 detail = 0（CUR1 在 3 路新表里是第 0 路）");
 }
 #endif /* JIG_DUT_LINK */
 

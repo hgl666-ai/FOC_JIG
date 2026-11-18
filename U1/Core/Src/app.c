@@ -1503,34 +1503,28 @@ typedef struct {
 } vol_ch_item_t;
 
 static const vol_ch_item_t k_vol_ch[MGR_VOL_LOCAL_CH_COUNT] = {
-    /* nom_mv = 0 表示"参与组判据"（相电压），不按额定值判 */
-    { (uint8_t)MEAS_CH_PH_A,     0u,    0u },   /* A 相：三相一致性 */
-    { (uint8_t)MEAS_CH_PH_B,     0u,    0u },   /* B 相 */
-    { (uint8_t)MEAS_CH_PH_C,     0u,    0u },   /* C 相 */
+    /* 2026-11-18：三相电压不再在本命令里测。
+     *   原因：FOC 上电会自己做一次电机初始化（三相被驱动在 12~15V 且互不相等），
+     *   之后运行时也在 PWM —— "三相一致性"在本命令里永远没有稳定时机。
+     *   三相的判定交给 0x002A（起转后测，判据是"都有输出/不饱和/和合理"）。
+     * 本命令只管这三个**与 FOC 动作无关**的量，结果稳定可重复。*/
     { (uint8_t)MEAS_CH_CUR1,  1650u,  500u },   /* 相电流1  零电流中点 ±500mV */
     { (uint8_t)MEAS_CH_CUR2,  1650u,  500u },   /* 相电流2  同上 */
     { (uint8_t)MEAS_CH_V33,   3300u,  200u },   /* 3.3V     ±6%（5%=165，取下限 200）*/
 };
 
-#define VOL_PH_COUNT   3u    /* 表里前 3 路是相电压，走组判据 */
-
 /**
-  * @brief  按 k_vol_ch 判一遍全部通道，填 flag[]（0x0015 和 步1 共用）
+  * @brief  按 k_vol_ch 判一遍全部通道，填 flag[]
   * @param  flag [out] MGR_VOL_LOCAL_CH_COUNT 个旗标（VOL_CHK_F_*）
   * @retval 1 = 有不合格，0 = 全过
-  * @note   相电压（前 3 路）走"三相一致性"组判据：max-min > VOL_PH_SPREAD_MV
-  *         时，把**离均值最远**的那一路标成 DEVIATION（其余保持 OK），
-  *         这样报告里能直接看出是哪一相不对。
+  * @note   2026-11-18：三相电压已从本表移出（见 k_vol_ch 的注释），
+  *         所以这里只剩"额定值 ± 容差"一种判法，没有三相组判据了。
   */
 static uint8_t APP_VolJudgeAll(uint8_t flag[MGR_VOL_LOCAL_CH_COUNT])
 {
     meas_snapshot_t snap;
     uint8_t  any_bad = 0u;
     uint8_t  i;
-    uint32_t pmin = 0xFFFFFFFFu;
-    uint32_t pmax = 0u;
-    uint32_t psum = 0u;
-    uint8_t  pcnt = 0u;
 
     MEAS_Snapshot(&snap);
 
@@ -1541,20 +1535,12 @@ static uint8_t APP_VolJudgeAll(uint8_t flag[MGR_VOL_LOCAL_CH_COUNT])
         uint32_t tol = k_vol_ch[i].tol_mv;
 
         if ((((uint32_t)VOL_CH_SKIP_MASK >> i) & 1u) != 0u) {
-            flag[i] = (uint8_t)VOL_CHK_F_OK;      /* 该路不判（见 jig_mode.h）*/
+            flag[i] = (uint8_t)VOL_CHK_F_OK;
             continue;
         }
         if ((snap.ch[ci].flags & MEAS_CHF_OK) == 0u) {
-            flag[i] = (uint8_t)VOL_CHK_F_NODATA;  /* 读数不可用 → 判不了 */
+            flag[i] = (uint8_t)VOL_CHK_F_NODATA;
             any_bad = 1u;
-            continue;
-        }
-        if (ex == 0u) {
-            flag[i] = (uint8_t)VOL_CHK_F_OK;      /* 相电压：先记可用，稍后组判 */
-            if (mv < pmin) { pmin = mv; }
-            if (mv > pmax) { pmax = mv; }
-            psum += mv;
-            pcnt++;
             continue;
         }
         if ((mv + tol < ex) || (mv > (ex + tol))) {
@@ -1562,39 +1548,6 @@ static uint8_t APP_VolJudgeAll(uint8_t flag[MGR_VOL_LOCAL_CH_COUNT])
             any_bad = 1u;
         } else {
             flag[i] = (uint8_t)VOL_CHK_F_OK;
-        }
-    }
-
-    /* 三相一致性：绕组把它们连在一起，静止时三点应几乎等电位 */
-    if ((pcnt >= 2u) && ((pmax - pmin) > (uint32_t)VOL_PH_SPREAD_MV)) {
-        uint32_t avg    = psum / (uint32_t)pcnt;
-        uint32_t far_d  = 0u;
-        uint8_t  far_i  = 0xFFu;
-
-        for (i = 0u; i < (uint8_t)VOL_PH_COUNT; i++) {
-            uint8_t  ci = k_vol_ch[i].ch;
-            uint32_t mv = snap.ch[ci].mv;
-            uint32_t d;
-
-            /* ⚠ 被 VOL_CH_SKIP_MASK 跳过的那一路，flag 也是 OK ——
-             *   不在这里再挡一次，它就会被"离均值最远"选中，
-             *   把跳过强行改回 DEVIATION（2026-11-18 实测：B 相明明跳过了，
-             *   却因为 11.1V 离均值最远被判成 08）。*/
-            if ((((uint32_t)VOL_CH_SKIP_MASK >> i) & 1u) != 0u) {
-                continue;
-            }
-            if (flag[i] != (uint8_t)VOL_CHK_F_OK) {
-                continue;
-            }
-            d = (mv > avg) ? (mv - avg) : (avg - mv);
-            if (d > far_d) {
-                far_d = d;
-                far_i = i;
-            }
-        }
-        if (far_i != 0xFFu) {
-            flag[far_i] = (uint8_t)VOL_CHK_F_DEVIATION;
-            any_bad = 1u;
         }
     }
     return any_bad;
@@ -2161,7 +2114,7 @@ static void APP_FocVerTask(void)
 #define PH3_SPIN_WAIT_MS   2500u
 #define PH3_RESP_TIMEOUT   3000u    /* 整个流程的兜底超时 */
 
-static uint8_t  s_ph3_step;         /* 1=等起转 2=等停稳 0=空闲 */
+static uint8_t  s_ph3_step;         /* 1=等FOC空闲 2=等起转 3=等停稳 0=空闲 */
 static uint8_t  s_ph3_out[MGR_PH3_TEST_RESP_LEN];   /* 判定结果，等停稳后才发 */
 static uint32_t s_ph3_t0;
 static uint16_t s_ph3_seq;
@@ -2207,12 +2160,35 @@ static void APP_Ph3Report(void)
     s_ph3_out[15] = (uint8_t)snap.ch[MEAS_CH_PH_C].raw;
 
     APP_Ph3SendAs("AS:S0\r\n", 7u);          /* 停车（但车还在滑行）*/
-    s_ph3_step    = 2u;                       /* → 等停稳再回 ACK */
+    s_ph3_step    = 3u;                       /* → 等停稳再回 ACK */
     s_ph3_t0      = HAL_GetTick();
     s_ph3_stop_t0 = s_ph3_t0;
 }
 
 /** 三相都低于这个值就认为"停了" */
+/* 起转前先等 FOC 自己的电机初始化结束。
+ *   判据：A 相和 C 相都 < 2V（初始化时三相被驱动在 12~15V，结束后掉到 0.3V）。
+ *   ⚠ 只看 A/C：B 相分压有问题（静止虚高 11V），不能参与判断。
+ *   最长等 3 秒 —— FOC 初始化一般 1~2 秒，卡住也不能把治具拖死。*/
+#define PH3_IDLE_MV      2000u
+/* 2026-11-18 实测：FOC 上电初始化要 3~5.5 秒。原来 3 秒就超时，
+ * 超时后发的 AS:S800 落在初始化期间被忽略 → 电机不转、0x002A 判失败。
+ * 放大到 8 秒，保证等到 FOC 真正空闲再起转。*/
+#define PH3_IDLE_TMO_MS  8000u
+
+/** FOC 空闲了吗？（A/C 都低于 2V 就算空闲）*/
+static uint8_t APP_Ph3FocIdle(void)
+{
+    meas_snapshot_t snap;
+
+    MEAS_Snapshot(&snap);
+    if ((snap.ch[MEAS_CH_PH_A].mv < (uint32_t)PH3_IDLE_MV) &&
+        (snap.ch[MEAS_CH_PH_C].mv < (uint32_t)PH3_IDLE_MV)) {
+        return 1u;
+    }
+    return 0u;
+}
+
 #define PH3_STOP_MV      5000u
 #define PH3_STOP_TMO_MS  4000u     /* 等停稳的上限：超时也回，不让上位机干等 */
 #define PH3_POLL_MS       100u     /* 轮询间隔 */
@@ -2223,8 +2199,9 @@ static uint8_t APP_Ph3Stopped(void)
     meas_snapshot_t snap;
 
     MEAS_Snapshot(&snap);
+    /* ⚠ 只看 A/C：B 相分压有问题（静止虚高 11V），拿它参与判断会导致
+     *   永远判不出"停了"，每次白等满 4 秒超时（2026-11-18 实测）。*/
     if ((snap.ch[MEAS_CH_PH_A].mv < PH3_STOP_MV) &&
-        (snap.ch[MEAS_CH_PH_B].mv < PH3_STOP_MV) &&
         (snap.ch[MEAS_CH_PH_C].mv < PH3_STOP_MV)) {
         return 1u;
     }
@@ -2256,9 +2233,8 @@ static void APP_Ph3TestCmd(uint16_t cmd, const uint8_t *data, uint16_t len)
     s_ph3_seq     = pc_seq;
     s_ph3_t0      = HAL_GetTick();
     s_ph3_stop_t0 = s_ph3_t0;
-    s_ph3_step    = 1u;
+    s_ph3_step    = 1u;                       /* 先等 FOC 的电机初始化结束 */
     app_state     = APP_STATE_PH3;
-    APP_Ph3SendAs("AS:S800\r\n", 9u);        /* 起转 */
 }
 
 /** 主循环推进：等够 1 秒 → 采样判定 → 停车 */
@@ -2274,7 +2250,21 @@ static void APP_Ph3TestTask(void)
         s_ph3_step = 0u;                     /* 状态被别的流程抢走 → 放弃 */
         return;
     }
-    if (s_ph3_step == 2u) {                      /* 等电机滑行停稳 */
+    if (s_ph3_step == 1u) {                      /* 等 FOC 的电机初始化结束 */
+        if ((uint32_t)(now - s_ph3_t0) < (uint32_t)PH3_POLL_MS) {
+            return;
+        }
+        s_ph3_t0 = now;
+        if ((APP_Ph3FocIdle() == 0u) &&
+            ((uint32_t)(now - s_ph3_stop_t0) < (uint32_t)PH3_IDLE_TMO_MS)) {
+            return;                              /* FOC 还在动 → 继续等 */
+        }
+        APP_Ph3SendAs("AS:S800\r\n", 9u);       /* FOC 空闲了 → 起转 */
+        s_ph3_step = 2u;
+        s_ph3_t0   = HAL_GetTick();
+        return;
+    }
+    if (s_ph3_step == 3u) {                      /* 等电机滑行停稳 */
         if ((uint32_t)(now - s_ph3_t0) < (uint32_t)PH3_POLL_MS) {
             return;
         }
@@ -2929,9 +2919,10 @@ static uint8_t APP_VolMeasureLocal(uint8_t *out)
  *   最长 5000ms —— FOC 初始化一般在这之内结束，卡住也不能把治具拖死；
  *   判据 A/C < 2V —— 初始化时三相被驱动在 12~15V，结束后掉到 0.3V。
  *   ⚠ 只看 A/C：B 相分压有问题（静止虚高 11V），不能参与判断。*/
+/* 2026-11-18：本命令不再测三相，也就不必等 FOC 的电机初始化了 ——
+ * 固定 300ms（三相 EMA 收敛）就回 ACK。
+ * "等 FOC 安静"挪进 0x002A（它起转前才真正需要 FOC 空闲）。*/
 #define VOLD_MIN_MS     300u
-#define VOLD_MAX_MS    5000u
-#define VOLD_QUIET_MV  2000u
 
 static uint8_t  s_vold_buf[MGR_VOL_TEST_RESP_LEN];
 static uint8_t  s_vold_busy;
@@ -2941,7 +2932,6 @@ static uint16_t s_vold_seq;
 static void APP_VolDelayTask(void)
 {
     uint32_t dt;
-    meas_snapshot_t snap;
 
     if (s_vold_busy == 0u) {
         return;                              /* 空闲时**不取 tick** */
@@ -2949,13 +2939,6 @@ static void APP_VolDelayTask(void)
     dt = (uint32_t)(HAL_GetTick() - s_vold_t0);
     if (dt < (uint32_t)VOLD_MIN_MS) {
         return;                              /* EMA 还没收敛 */
-    }
-    if (dt < (uint32_t)VOLD_MAX_MS) {
-        MEAS_Snapshot(&snap);
-        if (!((snap.ch[MEAS_CH_PH_A].mv < (uint32_t)VOLD_QUIET_MV) &&
-              (snap.ch[MEAS_CH_PH_C].mv < (uint32_t)VOLD_QUIET_MV))) {
-            return;                          /* FOC 还在初始化/驱动 → 继续等 */
-        }
     }
     s_vold_busy = 0u;
     app_state   = APP_STATE_IDLE;

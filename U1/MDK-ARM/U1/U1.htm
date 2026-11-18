@@ -3,9 +3,9 @@
 <title>Static Call Graph - [U1\U1.axf]</title></head>
 <body><HR>
 <H1>Static Call Graph for image U1\U1.axf</H1><HR>
-<BR><P>#&#060CALLGRAPH&#062# ARM Linker, 5060960: Last Updated: Wed Nov 18 10:41:51 2026
+<BR><P>#&#060CALLGRAPH&#062# ARM Linker, 5060960: Last Updated: Wed Nov 18 12:36:38 2026
 <BR><P>
-<H3>Maximum Stack Usage =        708 bytes + Unknown(Functions without stacksize, Cycles, Untraceable Function Pointers)</H3><H3>
+<H3>Maximum Stack Usage =        668 bytes + Unknown(Functions without stacksize, Cycles, Untraceable Function Pointers)</H3><H3>
 Call chain for Maximum Stack Depth:</H3>
 __rt_entry_main &rArr; main &rArr; APP_Run &rArr; APP_MeasStep &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
 <P>
@@ -225,7 +225,7 @@ Global Symbols
 <P><STRONG><a name="[26d]"></a>__rt_entry_postsh_1</STRONG> (Thumb, 0 bytes, Stack size unknown bytes, __rtentry2.o(.ARM.Collect$$rtentry$$00000009))
 
 <P><STRONG><a name="[5c]"></a>__rt_entry_main</STRONG> (Thumb, 0 bytes, Stack size unknown bytes, __rtentry2.o(.ARM.Collect$$rtentry$$0000000D))
-<BR><BR>[Stack]<UL><LI>Max Depth = 708 + Unknown Stack Size
+<BR><BR>[Stack]<UL><LI>Max Depth = 668 + Unknown Stack Size
 <LI>Call Chain = __rt_entry_main &rArr; main &rArr; APP_Run &rArr; APP_MeasStep &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
 </UL>
 <BR>[Calls]<UL><LI><a href="#[5d]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;main
@@ -439,6 +439,7 @@ Global Symbols
 <P><STRONG><a name="[82]"></a>__aeabi_memclr</STRONG> (Thumb, 0 bytes, Stack size 0 bytes, rt_memclr.o(.text))
 <BR><BR>[Called By]<UL><LI><a href="#[ea]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Init
 <LI><a href="#[d0]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_FlowEncJudgeReq
+<LI><a href="#[93]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Dispatch
 <LI><a href="#[80]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_CurStartMachine
 <LI><a href="#[eb]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;FwUpload_Init
 <LI><a href="#[94]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;FwUpload_Handle
@@ -461,7 +462,6 @@ Global Symbols
 <LI><a href="#[12a]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_RunAllEncJudge
 <LI><a href="#[95]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_JigStatusCmd
 <LI><a href="#[b7]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_EncJudgeCmd
-<LI><a href="#[93]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Dispatch
 <LI><a href="#[80]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_CurStartMachine
 <LI><a href="#[ee]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;Link_Init
 </UL>
@@ -658,8 +658,8 @@ Global Symbols
 <BR>[Called By]<UL><LI><a href="#[138]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_USB_Receive
 </UL>
 
-<P><STRONG><a name="[11a]"></a>APP_Run</STRONG> (Thumb, 352 bytes, Stack size 80 bytes, app.o(i.APP_Run))
-<BR><BR>[Stack]<UL><LI>Max Depth = 708<LI>Call Chain = APP_Run &rArr; APP_MeasStep &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
+<P><STRONG><a name="[11a]"></a>APP_Run</STRONG> (Thumb, 318 bytes, Stack size 40 bytes, app.o(i.APP_Run))
+<BR><BR>[Stack]<UL><LI>Max Depth = 668<LI>Call Chain = APP_Run &rArr; APP_MeasStep &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
 </UL>
 <BR>[Calls]<UL><LI><a href="#[11e]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;Frame_Parse
 <LI><a href="#[125]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_SnSend
@@ -695,7 +695,6 @@ Global Symbols
 <LI><a href="#[127]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;SST_Result
 <LI><a href="#[a6]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;SST_Busy
 <LI><a href="#[11b]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;PcLink_Poll
-<LI><a href="#[85]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MEAS_Snapshot
 </UL>
 <BR>[Called By]<UL><LI><a href="#[5d]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;main
 </UL>
@@ -2110,8 +2109,7 @@ Global Symbols
 </UL>
 <BR>[Calls]<UL><LI><a href="#[112]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MEAS_AllOk
 </UL>
-<BR>[Called By]<UL><LI><a href="#[11a]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Run
-<LI><a href="#[12f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_VolMeasureLocal
+<BR>[Called By]<UL><LI><a href="#[12f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_VolMeasureLocal
 <LI><a href="#[da]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_VolJudgeAll
 <LI><a href="#[129]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_SnAutoTask
 <LI><a href="#[ba]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_PhaseJudgeCmd
@@ -3581,7 +3579,7 @@ Global Symbols
 <BR>[Address Reference Count : 1]<UL><LI> startup_stm32f103xb.o(RESET)
 </UL>
 <P><STRONG><a name="[5d]"></a>main</STRONG> (Thumb, 66 bytes, Stack size 0 bytes, main.o(i.main))
-<BR><BR>[Stack]<UL><LI>Max Depth = 708<LI>Call Chain = main &rArr; APP_Run &rArr; APP_MeasStep &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
+<BR><BR>[Stack]<UL><LI>Max Depth = 668<LI>Call Chain = main &rArr; APP_Run &rArr; APP_MeasStep &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
 </UL>
 <BR>[Calls]<UL><LI><a href="#[1e2]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MX_USB_DEVICE_Init
 <LI><a href="#[1e1]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MX_USART3_UART_Init
@@ -3978,7 +3976,7 @@ Local Symbols
 <LI><a href="#[9f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;PULSE_Snapshot
 <LI><a href="#[af]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;EncGen_DbgSnapshot
 <LI><a href="#[aa]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;Flash_ReadHead
-<LI><a href="#[83]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;__aeabi_memclr4
+<LI><a href="#[82]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;__aeabi_memclr
 <LI><a href="#[66]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;__aeabi_memcpy
 </UL>
 <BR>[Called By]<UL><LI><a href="#[11a]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Run
@@ -4422,24 +4420,24 @@ Local Symbols
 </UL>
 <BR>[Calls]<UL><LI><a href="#[7e]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;UartPort_Write
 </UL>
-<BR>[Called By]<UL><LI><a href="#[b2]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Ph3TestCmd
+<BR>[Called By]<UL><LI><a href="#[117]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Ph3TestTask
 <LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Ph3Report
 </UL>
 
-<P><STRONG><a name="[b2]"></a>APP_Ph3TestCmd</STRONG> (Thumb, 74 bytes, Stack size 16 bytes, app.o(i.APP_Ph3TestCmd))
+<P><STRONG><a name="[b2]"></a>APP_Ph3TestCmd</STRONG> (Thumb, 64 bytes, Stack size 16 bytes, app.o(i.APP_Ph3TestCmd))
 <BR><BR>[Stack]<UL><LI>Max Depth = 128<LI>Call Chain = APP_Ph3TestCmd &rArr; APP_SendAck &rArr; APP_SendFrame &rArr; PcLink_Send &rArr; CDC_Transmit_FS &rArr; USBD_CDC_TransmitPacket &rArr; USBD_LL_Transmit &rArr; HAL_PCD_EP_Transmit &rArr; USB_EPStartXfer &rArr; USB_WritePMA
 </UL>
-<BR>[Calls]<UL><LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Ph3SendAs
-<LI><a href="#[8b]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_SendAck
+<BR>[Calls]<UL><LI><a href="#[8b]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_SendAck
 <LI><a href="#[6f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;HAL_GetTick
 </UL>
 <BR>[Called By]<UL><LI><a href="#[93]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Dispatch
 </UL>
 
-<P><STRONG><a name="[117]"></a>APP_Ph3TestTask</STRONG> (Thumb, 158 bytes, Stack size 88 bytes, app.o(i.APP_Ph3TestTask))
+<P><STRONG><a name="[117]"></a>APP_Ph3TestTask</STRONG> (Thumb, 230 bytes, Stack size 88 bytes, app.o(i.APP_Ph3TestTask))
 <BR><BR>[Stack]<UL><LI>Max Depth = 200<LI>Call Chain = APP_Ph3TestTask &rArr; APP_SendFrame &rArr; PcLink_Send &rArr; CDC_Transmit_FS &rArr; USBD_CDC_TransmitPacket &rArr; USBD_LL_Transmit &rArr; HAL_PCD_EP_Transmit &rArr; USB_EPStartXfer &rArr; USB_WritePMA
 </UL>
 <BR>[Calls]<UL><LI><a href="#[88]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_SendFrame
+<LI><a href="#[116]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Ph3SendAs
 <LI><a href="#[115]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Ph3Report
 <LI><a href="#[6f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;HAL_GetTick
 <LI><a href="#[85]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MEAS_Snapshot
@@ -4509,7 +4507,7 @@ Local Symbols
 </UL>
 
 <P><STRONG><a name="[128]"></a>APP_RunAllTask</STRONG> (Thumb, 200 bytes, Stack size 24 bytes, app.o(i.APP_RunAllTask))
-<BR><BR>[Stack]<UL><LI>Max Depth = 480<LI>Call Chain = APP_RunAllTask &rArr; APP_RunStartStep &rArr; APP_PhaseJudgeCmd &rArr; APP_SendAck &rArr; APP_SendFrame &rArr; PcLink_Send &rArr; CDC_Transmit_FS &rArr; USBD_CDC_TransmitPacket &rArr; USBD_LL_Transmit &rArr; HAL_PCD_EP_Transmit &rArr; USB_EPStartXfer &rArr; USB_WritePMA
+<BR><BR>[Stack]<UL><LI>Max Depth = 472<LI>Call Chain = APP_RunAllTask &rArr; APP_RunStartStep &rArr; APP_PhaseJudgeCmd &rArr; APP_SendAck &rArr; APP_SendFrame &rArr; PcLink_Send &rArr; CDC_Transmit_FS &rArr; USBD_CDC_TransmitPacket &rArr; USBD_LL_Transmit &rArr; HAL_PCD_EP_Transmit &rArr; USB_EPStartXfer &rArr; USB_WritePMA
 </UL>
 <BR>[Calls]<UL><LI><a href="#[12c]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_RunStepDone
 <LI><a href="#[12d]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_RunStartStep
@@ -4528,8 +4526,8 @@ Local Symbols
 <BR>[Called By]<UL><LI><a href="#[12d]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_RunStartStep
 </UL>
 
-<P><STRONG><a name="[12d]"></a>APP_RunStartStep</STRONG> (Thumb, 250 bytes, Stack size 40 bytes, app.o(i.APP_RunStartStep))
-<BR><BR>[Stack]<UL><LI>Max Depth = 456<LI>Call Chain = APP_RunStartStep &rArr; APP_PhaseJudgeCmd &rArr; APP_SendAck &rArr; APP_SendFrame &rArr; PcLink_Send &rArr; CDC_Transmit_FS &rArr; USBD_CDC_TransmitPacket &rArr; USBD_LL_Transmit &rArr; HAL_PCD_EP_Transmit &rArr; USB_EPStartXfer &rArr; USB_WritePMA
+<P><STRONG><a name="[12d]"></a>APP_RunStartStep</STRONG> (Thumb, 250 bytes, Stack size 32 bytes, app.o(i.APP_RunStartStep))
+<BR><BR>[Stack]<UL><LI>Max Depth = 448<LI>Call Chain = APP_RunStartStep &rArr; APP_PhaseJudgeCmd &rArr; APP_SendAck &rArr; APP_SendFrame &rArr; PcLink_Send &rArr; CDC_Transmit_FS &rArr; USBD_CDC_TransmitPacket &rArr; USBD_LL_Transmit &rArr; HAL_PCD_EP_Transmit &rArr; USB_EPStartXfer &rArr; USB_WritePMA
 </UL>
 <BR>[Calls]<UL><LI><a href="#[12f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_VolMeasureLocal
 <LI><a href="#[12e]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_RunDut
@@ -4640,8 +4638,8 @@ Local Symbols
 <LI><a href="#[cb]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_EncPeerTask
 </UL>
 
-<P><STRONG><a name="[da]"></a>APP_VolJudgeAll</STRONG> (Thumb, 274 bytes, Stack size 104 bytes, app.o(i.APP_VolJudgeAll))
-<BR><BR>[Stack]<UL><LI>Max Depth = 124<LI>Call Chain = APP_VolJudgeAll &rArr; MEAS_Snapshot
+<P><STRONG><a name="[da]"></a>APP_VolJudgeAll</STRONG> (Thumb, 102 bytes, Stack size 88 bytes, app.o(i.APP_VolJudgeAll))
+<BR><BR>[Stack]<UL><LI>Max Depth = 108<LI>Call Chain = APP_VolJudgeAll &rArr; MEAS_Snapshot
 </UL>
 <BR>[Calls]<UL><LI><a href="#[85]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MEAS_Snapshot
 </UL>
@@ -4649,8 +4647,8 @@ Local Symbols
 <LI><a href="#[d5]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_FlowTestTask
 </UL>
 
-<P><STRONG><a name="[12f]"></a>APP_VolMeasureLocal</STRONG> (Thumb, 88 bytes, Stack size 96 bytes, app.o(i.APP_VolMeasureLocal))
-<BR><BR>[Stack]<UL><LI>Max Depth = 220<LI>Call Chain = APP_VolMeasureLocal &rArr; APP_VolJudgeAll &rArr; MEAS_Snapshot
+<P><STRONG><a name="[12f]"></a>APP_VolMeasureLocal</STRONG> (Thumb, 88 bytes, Stack size 88 bytes, app.o(i.APP_VolMeasureLocal))
+<BR><BR>[Stack]<UL><LI>Max Depth = 196<LI>Call Chain = APP_VolMeasureLocal &rArr; APP_VolJudgeAll &rArr; MEAS_Snapshot
 </UL>
 <BR>[Calls]<UL><LI><a href="#[da]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_VolJudgeAll
 <LI><a href="#[85]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MEAS_Snapshot
@@ -4660,7 +4658,7 @@ Local Symbols
 </UL>
 
 <P><STRONG><a name="[b5]"></a>APP_VolTestCmd</STRONG> (Thumb, 74 bytes, Stack size 16 bytes, app.o(i.APP_VolTestCmd))
-<BR><BR>[Stack]<UL><LI>Max Depth = 236<LI>Call Chain = APP_VolTestCmd &rArr; APP_VolMeasureLocal &rArr; APP_VolJudgeAll &rArr; MEAS_Snapshot
+<BR><BR>[Stack]<UL><LI>Max Depth = 212<LI>Call Chain = APP_VolTestCmd &rArr; APP_VolMeasureLocal &rArr; APP_VolJudgeAll &rArr; MEAS_Snapshot
 </UL>
 <BR>[Calls]<UL><LI><a href="#[12f]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_VolMeasureLocal
 <LI><a href="#[8b]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_SendAck
