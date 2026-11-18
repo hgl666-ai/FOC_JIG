@@ -2208,16 +2208,24 @@ static void t21_vol_test(void)
         CHECK(c2 >= 1600u && c2 <= 1700u, "CUR2 读数 ≈ 1650mV");
     }
 
-    /* 3) A 相明显偏低（三相不一致）→ 只标 A 相为 DEVIATION，整体不合格
-     *    1886 码 ≈ 12000mV，但 A 相只灌 50 码 ≈ 320mV */
+    /* 3) A 相明显偏低 —— 但**三相已经不在本命令里判了**（VOL_CH_SKIP_MASK=0x07）。
+     *    2026-11-18 策略调整：FOC 上电会自己动一下电机、运行时也在 PWM，
+     *    三相本来就不相等，"≤300mV 一致性"永远过不了 → 三相判据移交 0x002A。
+     *    本命令只保证"读数照常上报"和"三相恒报 OK"。*/
     vol_inject(50u, 1262u, 1262u, 2048u, 2048u, 3723u);
     n = vol_send(seq++);
     CHECK(Frame_Parse(tx_buf, n, &ac, &as_, d, &dlen) != 0u && dlen == MGR_VOL_TEST_RESP_LEN,
           "异常时也回 20 字节");
-    CHECK(d[0] == APP_STATUS_ERR_TEST, "三相不一致 → 状态 05");
-    CHECK((d[4] & VOL_CHK_F_DEVIATION) != 0u, "A 相标记为 DEVIATION（偏离最大）");
-    CHECK((d[7] & VOL_CHK_F_OK) != 0u, "B 相仍然 OK（只标偏得最远的那一路）");
-    CHECK((d[10] & VOL_CHK_F_OK) != 0u, "C 相仍然 OK");
+    CHECK(d[0] == APP_STATUS_OK, "三相不参与判定 → 状态仍是 00");
+    CHECK((d[4] & VOL_CHK_F_OK) != 0u, "A 相恒为 OK（不判）");
+    CHECK((d[7] & VOL_CHK_F_OK) != 0u, "B 相恒为 OK（不判）");
+    CHECK((d[10] & VOL_CHK_F_OK) != 0u, "C 相恒为 OK（不判）");
+    {   /* 读数照常上报（A 灌 50 码 → 约 475mV），三个值都写进应答 */
+        uint16_t va2 = (uint16_t)((d[2] << 8) | d[3]);
+        uint16_t vb2 = (uint16_t)((d[5] << 8) | d[6]);
+        CHECK(va2 < 1000u && vb2 > 10000u,
+              "三相读数照常上报（A 低、B 高），只是不判");
+    }
 
     /* 3b) CUR1 灌成 0（贴底）→ 该路参与判定，必须失败 */
     vol_inject(1262u, 1262u, 1262u, 0u, 2048u, 3723u);

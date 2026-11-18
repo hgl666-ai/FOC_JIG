@@ -1576,6 +1576,13 @@ static uint8_t APP_VolJudgeAll(uint8_t flag[MGR_VOL_LOCAL_CH_COUNT])
             uint32_t mv = snap.ch[ci].mv;
             uint32_t d;
 
+            /* ⚠ 被 VOL_CH_SKIP_MASK 跳过的那一路，flag 也是 OK ——
+             *   不在这里再挡一次，它就会被"离均值最远"选中，
+             *   把跳过强行改回 DEVIATION（2026-11-18 实测：B 相明明跳过了，
+             *   却因为 11.1V 离均值最远被判成 08）。*/
+            if ((((uint32_t)VOL_CH_SKIP_MASK >> i) & 1u) != 0u) {
+                continue;
+            }
             if (flag[i] != (uint8_t)VOL_CHK_F_OK) {
                 continue;
             }
@@ -3852,7 +3859,12 @@ static void APP_SnAutoTask(void)
         return;
     }
     if (app_state != APP_STATE_IDLE) {
-        (void)SnReport_AutoPoll(SN_DET_ST_ABSENT, HAL_GetTick());
+        /* 命令执行期间**只是暂停轮询**，绝不喂 SN_DET_ST_ABSENT。
+         * 2026-11-18 修：原来在这里喂"拔板"，连续 4 次就把"已上报"标志清掉，
+         * 于是每跑一条命令、回到 IDLE 后又重报一次 SN。上位机看到 SN 就发
+         * 0x000D，0x000D 又让治具离开 IDLE → 形成 2.2 秒一圈的自激闭环，
+         * 实测表现为"点一下就是 BUSY"。
+         * 现在：同一次插入只报一条 SN；真的拔掉再插才报第二条。*/
         return;
     }
 
@@ -4894,10 +4906,62 @@ static void APP_AsciiDispatch(void)
 }
 
 /** 窗口结束：把回字原样吐回 PC（没有回字就给一句提示，别让人干等） */
+/*==============================================================================
+ * DUT → PC 的字节过滤（2026-11-18）
+ *----------------------------------------------------------------------------
+ * 只让**可打印文本**过桥，二进制帧（FOC 的心跳 A5 5B 20 00 …，约 2 秒一条）
+ * 一律丢掉。原因：上位机看到心跳会当成"有事件"，实测会因此反复发 0x000D
+ * 查版本，把治具占住 1.5 秒 → 用户点什么都是 BUSY。
+ * 注意：这是**桥接显示**用的过滤，不影响 0x001F/0x0026 这些显式的诊断通道。
+ *============================================================================*/
+#define AS_BRIDGE_BUF   MGR_DUT_SNIFF_SIZE
+
+static uint8_t s_ascii_fbuf[MGR_DUT_SNIFF_SIZE];
+
+/** 过滤一批 DUT 字节；返回能发给 PC 的字节数（写进 s_ascii_fbuf）*/
+static uint16_t APP_AsciiFilter(const uint8_t *p, uint16_t n)
+{
+    uint16_t i = 0u;
+    uint16_t m = 0u;
+
+    if ((p == 0) || (n == 0u)) {
+        return 0u;
+    }
+    while (i < n) {
+        /* FOC 的二进制帧从 A5 5B 开始 —— 整段丢掉，后面的也别转 */
+        if ((p[i] == 0xA5u) && ((uint16_t)(i + 1u) < n) && (p[i + 1u] == 0x5Bu)) {
+            break;
+        }
+        if (((p[i] >= 0x20u) && (p[i] <= 0x7Eu)) ||
+            (p[i] == (uint8_t)'\r') || (p[i] == (uint8_t)'\n') ||
+            (p[i] == (uint8_t)'\t')) {
+            s_ascii_fbuf[m] = p[i];
+            m++;
+        }
+        i++;
+    }
+    return m;
+}
+
+/** 过滤后转发；过滤完什么都不剩就一个字都不发（绝不打扰上位机）*/
+static void APP_AsciiBridgeSend(void)
+{
+    uint16_t m;
+
+    if (s_dut_sniff_len == 0u) {
+        return;
+    }
+    m = APP_AsciiFilter(s_dut_sniff, s_dut_sniff_len);
+    s_dut_sniff_len = 0u;
+    if (m > 0u) {
+        PcLink_Send(s_ascii_fbuf, m);
+    }
+}
+
 static void APP_AsciiFlush(void)
 {
     if (s_dut_sniff_len > 0u) {
-        PcLink_Send(s_dut_sniff, s_dut_sniff_len);
+        APP_AsciiBridgeSend();          /* 过滤后再转：心跳不进上位机 */
     } else {
         PcLink_Send((const uint8_t *)AS_MSG_NO_REPLY,
                     (uint16_t)(sizeof(AS_MSG_NO_REPLY) - 1u));
@@ -4924,10 +4988,7 @@ static void APP_AsciiPoll(void)
          * 那时控制台窗口早关了（2026-11-11 实测：直连能看到、经治具看不到）。*/
         if ((app_state == APP_STATE_IDLE) && (s_ascii_bridge != 0u)) {
             APP_DutSniff();
-            if (s_dut_sniff_len > 0u) {
-                PcLink_Send(s_dut_sniff, s_dut_sniff_len);
-                s_dut_sniff_len = 0u;
-            }
+            APP_AsciiBridgeSend();      /* 过滤后再转：FOC 心跳不再转给 PC */
         }
         return;
     }
