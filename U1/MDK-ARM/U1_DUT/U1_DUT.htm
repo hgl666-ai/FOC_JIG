@@ -3,9 +3,9 @@
 <title>Static Call Graph - [U1_DUT\U1_DUT.axf]</title></head>
 <body><HR>
 <H1>Static Call Graph for image U1_DUT\U1_DUT.axf</H1><HR>
-<BR><P>#&#060CALLGRAPH&#062# ARM Linker, 5060960: Last Updated: Wed Nov 18 10:11:58 2026
+<BR><P>#&#060CALLGRAPH&#062# ARM Linker, 5060960: Last Updated: Wed Nov 18 10:41:36 2026
 <BR><P>
-<H3>Maximum Stack Usage =        668 bytes + Unknown(Functions without stacksize, Cycles, Untraceable Function Pointers)</H3><H3>
+<H3>Maximum Stack Usage =        708 bytes + Unknown(Functions without stacksize, Cycles, Untraceable Function Pointers)</H3><H3>
 Call chain for Maximum Stack Depth:</H3>
 __rt_entry_main &rArr; main &rArr; APP_Run &rArr; APP_FlowTestTask &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
 <P>
@@ -204,7 +204,7 @@ Global Symbols
 <P><STRONG><a name="[1e9]"></a>__rt_entry_postsh_1</STRONG> (Thumb, 0 bytes, Stack size unknown bytes, __rtentry2.o(.ARM.Collect$$rtentry$$00000009))
 
 <P><STRONG><a name="[47]"></a>__rt_entry_main</STRONG> (Thumb, 0 bytes, Stack size unknown bytes, __rtentry2.o(.ARM.Collect$$rtentry$$0000000D))
-<BR><BR>[Stack]<UL><LI>Max Depth = 668 + Unknown Stack Size
+<BR><BR>[Stack]<UL><LI>Max Depth = 708 + Unknown Stack Size
 <LI>Call Chain = __rt_entry_main &rArr; main &rArr; APP_Run &rArr; APP_FlowTestTask &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
 </UL>
 <BR>[Calls]<UL><LI><a href="#[48]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;main
@@ -638,8 +638,8 @@ Global Symbols
 <BR>[Called By]<UL><LI><a href="#[f2]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;PcLink_Poll
 </UL>
 
-<P><STRONG><a name="[f1]"></a>APP_Run</STRONG> (Thumb, 314 bytes, Stack size 40 bytes, app.o(i.APP_Run))
-<BR><BR>[Stack]<UL><LI>Max Depth = 668<LI>Call Chain = APP_Run &rArr; APP_FlowTestTask &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
+<P><STRONG><a name="[f1]"></a>APP_Run</STRONG> (Thumb, 348 bytes, Stack size 80 bytes, app.o(i.APP_Run))
+<BR><BR>[Stack]<UL><LI>Max Depth = 708<LI>Call Chain = APP_Run &rArr; APP_FlowTestTask &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
 </UL>
 <BR>[Calls]<UL><LI><a href="#[f5]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;Frame_Parse
 <LI><a href="#[fc]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_SnSend
@@ -674,6 +674,7 @@ Global Symbols
 <LI><a href="#[fe]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;SST_Result
 <LI><a href="#[91]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;SST_Busy
 <LI><a href="#[f2]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;PcLink_Poll
+<LI><a href="#[70]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MEAS_Snapshot
 </UL>
 <BR>[Called By]<UL><LI><a href="#[48]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;main
 </UL>
@@ -1808,7 +1809,8 @@ Global Symbols
 </UL>
 <BR>[Calls]<UL><LI><a href="#[e9]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MEAS_AllOk
 </UL>
-<BR>[Called By]<UL><LI><a href="#[106]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_VolMeasureLocal
+<BR>[Called By]<UL><LI><a href="#[f1]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Run
+<LI><a href="#[106]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_VolMeasureLocal
 <LI><a href="#[c2]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_VolJudgeAll
 <LI><a href="#[100]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_SnAutoTask
 <LI><a href="#[a4]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_PhaseJudgeCmd
@@ -2761,7 +2763,7 @@ Global Symbols
 <BR>[Address Reference Count : 1]<UL><LI> startup_stm32f103xb.o(RESET)
 </UL>
 <P><STRONG><a name="[48]"></a>main</STRONG> (Thumb, 62 bytes, Stack size 0 bytes, main.o(i.main))
-<BR><BR>[Stack]<UL><LI>Max Depth = 668<LI>Call Chain = main &rArr; APP_Run &rArr; APP_FlowTestTask &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
+<BR><BR>[Stack]<UL><LI>Max Depth = 708<LI>Call Chain = main &rArr; APP_Run &rArr; APP_FlowTestTask &rArr; PULSE_CfgPoll &rArr; PULSE_Poll &rArr; phase_settle &rArr; median_of
 </UL>
 <BR>[Calls]<UL><LI><a href="#[181]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MX_USART3_UART_Init
 <LI><a href="#[180]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;MX_USART1_UART_Init
@@ -3450,7 +3452,7 @@ Local Symbols
 <BR>[Called By]<UL><LI><a href="#[7e]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_Dispatch
 </UL>
 
-<P><STRONG><a name="[ee]"></a>APP_Ph3TestTask</STRONG> (Thumb, 140 bytes, Stack size 88 bytes, app.o(i.APP_Ph3TestTask))
+<P><STRONG><a name="[ee]"></a>APP_Ph3TestTask</STRONG> (Thumb, 150 bytes, Stack size 88 bytes, app.o(i.APP_Ph3TestTask))
 <BR><BR>[Stack]<UL><LI>Max Depth = 200<LI>Call Chain = APP_Ph3TestTask &rArr; APP_Ph3Report &rArr; APP_Ph3SendAs &rArr; UartPort_Write &rArr; uart_tx_kick
 </UL>
 <BR>[Calls]<UL><LI><a href="#[73]">&gt;&gt;</a>&nbsp;&nbsp;&nbsp;APP_SendFrame

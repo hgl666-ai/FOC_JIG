@@ -2132,7 +2132,9 @@ static uint16_t vol_send(uint16_t seq)
     tx_len = 0;
     n = Frame_Build(raw, MGR_CMD_VOL_TEST, seq, 0, 0u);
     APP_USB_Receive(raw, n);
-    for (int i = 0; (i < 400) && (tx_len == 0); i++) {
+    /* 0x0015 现在要等 FOC 初始化结束（最长 5 秒）才回 ACK，
+     * 所以喂时窗口从 400ms 放大到 6000ms。*/
+    for (int i = 0; (i < 6000) && (tx_len == 0); i++) {
         host_advance(1u);
         APP_Run();
     }

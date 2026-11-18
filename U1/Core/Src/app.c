@@ -2151,7 +2151,14 @@ static void APP_FocVerTask(void)
  *   a) 三相都 > 5000 mV    b) 三相都 < 30000 mV
  *   c) 三相都没贴边(SAT)    d) 三相之和在 15~45 V
  *============================================================================*/
-#define PH3_SPIN_WAIT_MS   1000u    /* 起转后等多久再采（让 EMA 收敛）*/
+/* 起转后等多久再采。2026-11-18 从 1000 加到 2500，两个原因：
+ *   ① FOC 上电后会自己做一次归零动作，把三相拉到约 12V。若在归零期间采，
+ *      即使 AS:S800 没被接受，也会读到 12V → 假通过（用户实测发现）。
+ *      等 2.5 秒让归零肯定结束：S800 生效就转（12~15V），没生效就掉回 0.3V
+ *      → 判据"三相都 >5V"自然会把假通过挡掉。
+ *   ② 三相 EMA（shift=8）要 ~250ms 收敛，2.5 秒余量充足。
+ * 代价：0x002A 的总耗时从约 5 秒变成约 6.5 秒。*/
+#define PH3_SPIN_WAIT_MS   2500u
 #define PH3_RESP_TIMEOUT   3000u    /* 整个流程的兜底超时 */
 
 static uint8_t  s_ph3_step;         /* 1=等起转 2=等停稳 0=空闲 */
@@ -2917,7 +2924,14 @@ static uint8_t APP_VolMeasureLocal(uint8_t *out)
     return out[0];
 }
 
-#define VOLD_MS   300u
+/* 回 ACK 的时机：等 FOC 上电初始化结束、三相安静下来。
+ *   最短 300ms —— 三相 EMA（shift=8）要 ~250ms 收敛；
+ *   最长 5000ms —— FOC 初始化一般在这之内结束，卡住也不能把治具拖死；
+ *   判据 A/C < 2V —— 初始化时三相被驱动在 12~15V，结束后掉到 0.3V。
+ *   ⚠ 只看 A/C：B 相分压有问题（静止虚高 11V），不能参与判断。*/
+#define VOLD_MIN_MS     300u
+#define VOLD_MAX_MS    5000u
+#define VOLD_QUIET_MV  2000u
 
 static uint8_t  s_vold_buf[MGR_VOL_TEST_RESP_LEN];
 static uint8_t  s_vold_busy;
@@ -2926,11 +2940,22 @@ static uint16_t s_vold_seq;
 
 static void APP_VolDelayTask(void)
 {
+    uint32_t dt;
+    meas_snapshot_t snap;
+
     if (s_vold_busy == 0u) {
         return;                              /* 空闲时**不取 tick** */
     }
-    if ((uint32_t)(HAL_GetTick() - s_vold_t0) < (uint32_t)VOLD_MS) {
-        return;
+    dt = (uint32_t)(HAL_GetTick() - s_vold_t0);
+    if (dt < (uint32_t)VOLD_MIN_MS) {
+        return;                              /* EMA 还没收敛 */
+    }
+    if (dt < (uint32_t)VOLD_MAX_MS) {
+        MEAS_Snapshot(&snap);
+        if (!((snap.ch[MEAS_CH_PH_A].mv < (uint32_t)VOLD_QUIET_MV) &&
+              (snap.ch[MEAS_CH_PH_C].mv < (uint32_t)VOLD_QUIET_MV))) {
+            return;                          /* FOC 还在初始化/驱动 → 继续等 */
+        }
     }
     s_vold_busy = 0u;
     app_state   = APP_STATE_IDLE;
